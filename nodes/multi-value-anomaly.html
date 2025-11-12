@@ -1,0 +1,106 @@
+<script type="text/javascript">
+    RED.nodes.registerType('multi-value-anomaly', {
+        category: 'condition-monitoring',
+        color: '#E6E0F8',
+        defaults: {
+            name: { value: "" },
+            method: { value: "zscore" },
+            threshold: { value: 3.0, validate: RED.validators.number() },
+            windowSize: { value: 100, validate: RED.validators.number() },
+            minThreshold: { value: "", validate: function(v) { return v === "" || !isNaN(v); } },
+            maxThreshold: { value: "", validate: function(v) { return v === "" || !isNaN(v); } }
+        },
+        inputs: 1,
+        outputs: 2,
+        icon: "chart-line.png",
+        label: function() {
+            return this.name || "Multi-Value Anomalie";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        oneditprepare: function() {
+            $("#node-input-method").on("change", function() {
+                var method = $(this).val();
+                if (method === "threshold") {
+                    $("#node-input-threshold").closest(".form-row").hide();
+                    $("#node-input-minThreshold").closest(".form-row").show();
+                    $("#node-input-maxThreshold").closest(".form-row").show();
+                } else {
+                    $("#node-input-threshold").closest(".form-row").show();
+                    $("#node-input-minThreshold").closest(".form-row").hide();
+                    $("#node-input-maxThreshold").closest(".form-row").hide();
+                }
+            });
+            $("#node-input-method").trigger("change");
+        },
+        oneditsave: function() {
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="multi-value-anomaly">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-method"><i class="fa fa-cog"></i> Methode</label>
+        <select id="node-input-method">
+            <option value="zscore">Z-Score</option>
+            <option value="iqr">IQR</option>
+            <option value="threshold">Threshold</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-threshold"><i class="fa fa-sliders"></i> Schwellenwert (für Z-Score)</label>
+        <input type="number" id="node-input-threshold" placeholder="3.0" step="0.1" min="0">
+    </div>
+    <div class="form-row">
+        <label for="node-input-minThreshold"><i class="fa fa-arrow-down"></i> Minimum-Schwellenwert (für Threshold)</label>
+        <input type="number" id="node-input-minThreshold" placeholder="" step="any">
+    </div>
+    <div class="form-row">
+        <label for="node-input-maxThreshold"><i class="fa fa-arrow-up"></i> Maximum-Schwellenwert (für Threshold)</label>
+        <input type="number" id="node-input-maxThreshold" placeholder="" step="any">
+    </div>
+    <div class="form-row">
+        <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Fenstergröße</label>
+        <input type="number" id="node-input-windowSize" placeholder="100" min="2">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="multi-value-anomaly">
+    <p>Analysiert mehrere Werte gleichzeitig (Arrays oder Objekte) auf Anomalien.</p>
+    <h3>Eingaben</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">array | object</span></dt>
+        <dd>Array von Zahlen oder Objekt mit numerischen Werten</dd>
+    </dl>
+    <h3>Ausgaben</h3>
+    <dl class="message-properties">
+        <dt>Ausgang 1 (oben)</dt>
+        <dd>Normale Werte - Array mit Analyseergebnissen für alle Werte</dd>
+        <dt>Ausgang 2 (unten)</dt>
+        <dd>Anomalien - Array mit Analyseergebnissen (mindestens ein Wert ist anomal)</dd>
+    </dl>
+    <h3>Details</h3>
+    <p>Analysiert jeden Wert separat mit einem eigenen Buffer. Die Ausgabe enthält ein Array mit Analyseergebnissen für jeden Wert.</p>
+    <p><b>Parameter:</b></p>
+    <ul>
+        <li><b>Methode:</b> Z-Score, IQR oder Threshold</li>
+        <li><b>Schwellenwert:</b> Für Z-Score Methode</li>
+        <li><b>Min/Max-Schwellenwert:</b> Für Threshold Methode</li>
+        <li><b>Fenstergröße:</b> Anzahl der Werte pro Buffer</li>
+    </ul>
+    <p><b>Ausgabe-Format:</b></p>
+    <pre>{
+  "payload": [
+    {"valueName": "temp1", "value": 35.2, "isAnomaly": false, "zScore": 1.2},
+    {"valueName": "temp2", "value": 45.8, "isAnomaly": true, "zScore": 3.5}
+  ],
+  "hasAnomaly": true,
+  "anomalyCount": 1
+}</pre>
+</script>
+

@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  node-red:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: node-red-condition-monitoring
+    ports:
+      - "1880:1880"
+    volumes:
+      # Node-RED Daten (Flows, Settings)
+      - ./node-red-data:/data
+      # Entwicklungsmodul (wird als Volume gemountet)
+      - ./nodes:/data/nodes/node-red-contrib-condition-monitoring/nodes
+      - ./package.json:/data/nodes/node-red-contrib-condition-monitoring/package.json
+    environment:
+      - NODE_OPTIONS=--max_old_space_size=4096
+    restart: unless-stopped
+    networks:
+      - node-red-network
+
+networks:
+  node-red-network:
+    driver: bridge
+

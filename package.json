@@ -1,0 +1,49 @@
+{
+  "name": "node-red-contrib-condition-monitoring",
+  "version": "1.0.0",
+  "description": "Node-RED Nodes für Anomalieerkennung und Zeitreihenanalyse",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "node-red": {
+    "nodes": {
+      "zscore-anomaly": "nodes/zscore-anomaly.js",
+      "iqr-anomaly": "nodes/iqr-anomaly.js",
+      "moving-average-anomaly": "nodes/moving-average-anomaly.js",
+      "isolation-forest-anomaly": "nodes/isolation-forest-anomaly.js",
+      "threshold-anomaly": "nodes/threshold-anomaly.js",
+      "percentile-anomaly": "nodes/percentile-anomaly.js",
+      "ema-anomaly": "nodes/ema-anomaly.js",
+      "cusum-anomaly": "nodes/cusum-anomaly.js",
+      "multi-value-splitter": "nodes/multi-value-splitter.js",
+      "multi-value-anomaly": "nodes/multi-value-anomaly.js"
+    }
+  },
+  "keywords": [
+    "node-red",
+    "anomaly-detection",
+    "time-series",
+    "condition-monitoring",
+    "z-score",
+    "iqr",
+    "isolation-forest",
+    "threshold",
+    "percentile",
+    "ema",
+    "cusum",
+    "exponential-moving-average"
+  ],
+  "author": "blanpa",
+  "license": "MIT",
+  "dependencies": {
+    "ml-isolation-forest": "^0.0.4",
+    "simple-statistics": "^7.8.2"
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": ""
+  }
+}
+

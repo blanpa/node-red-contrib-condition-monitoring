@@ -1,0 +1,64 @@
+<script type="text/javascript">
+    RED.nodes.registerType('isolation-forest-anomaly', {
+        category: 'condition-monitoring',
+        color: '#E6E0F8',
+        defaults: {
+            name: { value: "" },
+            contamination: { value: 0.1, validate: RED.validators.number() },
+            windowSize: { value: 100, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 2,
+        icon: "chart-line.png",
+        label: function() {
+            return this.name || "Isolation Forest Anomalie";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        oneditprepare: function() {
+        },
+        oneditsave: function() {
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="isolation-forest-anomaly">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-contamination"><i class="fa fa-sliders"></i> Kontamination (0.0 - 0.5)</label>
+        <input type="number" id="node-input-contamination" placeholder="0.1" step="0.01" min="0" max="0.5">
+    </div>
+    <div class="form-row">
+        <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Fenstergröße</label>
+        <input type="number" id="node-input-windowSize" placeholder="100" min="10">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="isolation-forest-anomaly">
+    <p>Erkennt Anomalien in Zeitreihendaten basierend auf dem Isolation Forest Algorithmus.</p>
+    <h3>Eingaben</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>Der numerische Wert, der auf Anomalien geprüft werden soll.</dd>
+    </dl>
+    <h3>Ausgaben</h3>
+    <dl class="message-properties">
+        <dt>Ausgang 1 (oben)</dt>
+        <dd>Normale Werte mit zusätzlichen Metadaten (isAnomaly, anomalyScore, method)</dd>
+        <dt>Ausgang 2 (unten)</dt>
+        <dd>Anomalien mit zusätzlichen Metadaten</dd>
+    </dl>
+    <h3>Details</h3>
+    <p>Isolation Forest ist ein Machine-Learning-Algorithmus, der Anomalien erkennt, indem er isoliert, wie leicht ein Datenpunkt von den anderen getrennt werden kann.</p>
+    <p><b>Parameter:</b></p>
+    <ul>
+        <li><b>Kontamination:</b> Erwarteter Anteil der Anomalien im Datensatz (0.0 - 0.5, Standard: 0.1 = 10%)</li>
+        <li><b>Fenstergröße:</b> Anzahl der Werte für das Training des Modells (mindestens 10)</li>
+    </ul>
+    <p><b>Hinweis:</b> Erfordert das npm-Paket "ml-isolation-forest". Falls nicht verfügbar, wird automatisch eine Z-Score Fallback-Methode verwendet.</p>
+</script>
+

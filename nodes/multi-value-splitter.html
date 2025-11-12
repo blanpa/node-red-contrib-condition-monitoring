@@ -1,0 +1,84 @@
+<script type="text/javascript">
+    RED.nodes.registerType('multi-value-splitter', {
+        category: 'condition-monitoring',
+        color: '#E6E0F8',
+        defaults: {
+            name: { value: "" },
+            field: { value: "payload" },
+            outputMode: { value: "sequential" },
+            preserveOriginal: { value: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "split.png",
+        label: function() {
+            return this.name || "Multi-Value Splitter";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        oneditprepare: function() {
+        },
+        oneditsave: function() {
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="multi-value-splitter">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-field"><i class="fa fa-code"></i> Quellfeld</label>
+        <input type="text" id="node-input-field" placeholder="payload">
+    </div>
+    <div class="form-row">
+        <label for="node-input-outputMode"><i class="fa fa-cog"></i> Ausgabemodus</label>
+        <select id="node-input-outputMode">
+            <option value="sequential">Sequentiell (Werte nacheinander)</option>
+            <option value="parallel">Parallel (Array mit allen Werten)</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-preserveOriginal"><i class="fa fa-copy"></i> Original-Nachricht beibehalten</label>
+        <input type="checkbox" id="node-input-preserveOriginal" checked>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="multi-value-splitter">
+    <p>Teilt Payloads mit mehreren Werten (Arrays oder Objekte) auf, um sie mit Anomalieerkennungs-Nodes zu verarbeiten.</p>
+    <h3>Eingaben</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">array | object | number</span></dt>
+        <dd>Array von Zahlen, Objekt mit numerischen Werten, oder einzelner Wert</dd>
+    </dl>
+    <h3>Ausgaben</h3>
+    <dl class="message-properties">
+        <dt>Sequentieller Modus</dt>
+        <dd>Sendet jeden Wert einzeln nacheinander. Jede Nachricht enthält:
+            <ul>
+                <li>payload: Der einzelne Wert</li>
+                <li>valueIndex: Index im ursprünglichen Array</li>
+                <li>valueName: Name des Wertes (bei Objekten)</li>
+                <li>totalValues: Gesamtanzahl der Werte</li>
+            </ul>
+        </dd>
+        <dt>Paralleler Modus</dt>
+        <dd>Sendet alle Werte als Array:
+            <ul>
+                <li>payload: Array mit allen Werten</li>
+                <li>valueNames: Array mit Namen der Werte</li>
+                <li>valueCount: Anzahl der Werte</li>
+            </ul>
+        </dd>
+    </dl>
+    <h3>Beispiele</h3>
+    <p><b>Array-Eingabe:</b></p>
+    <pre>{"payload": [35.2, 36.5, 34.8]}</pre>
+    <p><b>Objekt-Eingabe:</b></p>
+    <pre>{"payload": {"temp1": 35.2, "temp2": 36.5, "temp3": 34.8}}</pre>
+    <p><b>Ausgabe (sequentiell):</b></p>
+    <pre>{"payload": 35.2, "valueIndex": 0, "valueName": "temp1", "totalValues": 3}</pre>
+</script>
+

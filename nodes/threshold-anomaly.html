@@ -1,0 +1,70 @@
+<script type="text/javascript">
+    RED.nodes.registerType('threshold-anomaly', {
+        category: 'condition-monitoring',
+        color: '#E6E0F8',
+        defaults: {
+            name: { value: "" },
+            minThreshold: { value: "", validate: function(v) { return v === "" || !isNaN(v); } },
+            maxThreshold: { value: "", validate: function(v) { return v === "" || !isNaN(v); } },
+            inclusive: { value: false }
+        },
+        inputs: 1,
+        outputs: 2,
+        icon: "chart-line.png",
+        label: function() {
+            return this.name || "Threshold Anomalie";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        oneditprepare: function() {
+        },
+        oneditsave: function() {
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="threshold-anomaly">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-minThreshold"><i class="fa fa-arrow-down"></i> Minimum-Schwellenwert (leer lassen zum Deaktivieren)</label>
+        <input type="number" id="node-input-minThreshold" placeholder="" step="any">
+    </div>
+    <div class="form-row">
+        <label for="node-input-maxThreshold"><i class="fa fa-arrow-up"></i> Maximum-Schwellenwert (leer lassen zum Deaktivieren)</label>
+        <input type="number" id="node-input-maxThreshold" placeholder="" step="any">
+    </div>
+    <div class="form-row">
+        <label for="node-input-inclusive"><i class="fa fa-check-square"></i> Inklusiv (Grenzwerte gelten als Anomalie)</label>
+        <input type="checkbox" id="node-input-inclusive">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="threshold-anomaly">
+    <p>Erkennt Anomalien basierend auf statischen Schwellenwerten (Min/Max).</p>
+    <h3>Eingaben</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>Der numerische Wert, der auf Anomalien geprüft werden soll.</dd>
+    </dl>
+    <h3>Ausgaben</h3>
+    <dl class="message-properties">
+        <dt>Ausgang 1 (oben)</dt>
+        <dd>Normale Werte mit zusätzlichen Metadaten</dd>
+        <dt>Ausgang 2 (unten)</dt>
+        <dd>Anomalien mit zusätzlichen Metadaten (reason, minThreshold, maxThreshold)</dd>
+    </dl>
+    <h3>Details</h3>
+    <p>Einfache statische Schwellenwertprüfung. Werte außerhalb der definierten Grenzen werden als Anomalien erkannt.</p>
+    <p><b>Parameter:</b></p>
+    <ul>
+        <li><b>Minimum-Schwellenwert:</b> Untere Grenze (leer lassen zum Deaktivieren)</li>
+        <li><b>Maximum-Schwellenwert:</b> Obere Grenze (leer lassen zum Deaktivieren)</li>
+        <li><b>Inklusiv:</b> Wenn aktiviert, gelten Werte genau an der Grenze als Anomalien</li>
+    </ul>
+    <p><b>Beispiel:</b> Min=10, Max=100 → Werte < 10 oder > 100 sind Anomalien</p>
+</script>
+
