@@ -1,0 +1,45 @@
+# Development files
+docker-compose.yml
+docker-compose.dev.yml
+Dockerfile
+.dockerignore
+
+# Node-RED data directory
+node-red-data/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing (if added later)
+test/
+coverage/
+.nyc_output/
+
+# Documentation build files
+docs/
+
+# Misc
+.env
+.env.local
+*.bak
+*.tmp
+

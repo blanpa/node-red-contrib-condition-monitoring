@@ -1,7 +1,7 @@
 <script type="text/javascript">
     RED.nodes.registerType('threshold-anomaly', {
-        category: 'condition-monitoring',
-        color: '#E6E0F8',
+        category: 'anomaly detection',
+        color: '#FDD835',
         defaults: {
             name: { value: "" },
             minThreshold: { value: "", validate: function(v) { return v === "" || !isNaN(v); } },
@@ -10,9 +10,9 @@
         },
         inputs: 1,
         outputs: 2,
-        icon: "chart-line.png",
+        icon: "icon-anomaly-detection.png",
         label: function() {
-            return this.name || "Threshold Anomalie";
+            return this.name || "Threshold Anomaly";
         },
         labelStyle: function() {
             return this.name ? "node_label_italic" : "";
@@ -30,41 +30,41 @@
         <input type="text" id="node-input-name" placeholder="Name">
     </div>
     <div class="form-row">
-        <label for="node-input-minThreshold"><i class="fa fa-arrow-down"></i> Minimum-Schwellenwert (leer lassen zum Deaktivieren)</label>
+        <label for="node-input-minThreshold"><i class="fa fa-arrow-down"></i> Minimum Threshold (leave empty to disable)</label>
         <input type="number" id="node-input-minThreshold" placeholder="" step="any">
     </div>
     <div class="form-row">
-        <label for="node-input-maxThreshold"><i class="fa fa-arrow-up"></i> Maximum-Schwellenwert (leer lassen zum Deaktivieren)</label>
+        <label for="node-input-maxThreshold"><i class="fa fa-arrow-up"></i> Maximum Threshold (leave empty to disable)</label>
         <input type="number" id="node-input-maxThreshold" placeholder="" step="any">
     </div>
     <div class="form-row">
-        <label for="node-input-inclusive"><i class="fa fa-check-square"></i> Inklusiv (Grenzwerte gelten als Anomalie)</label>
+        <label for="node-input-inclusive"><i class="fa fa-check-square"></i> Inclusive (boundary values count as anomalies)</label>
         <input type="checkbox" id="node-input-inclusive">
     </div>
 </script>
 
 <script type="text/html" data-help-name="threshold-anomaly">
-    <p>Erkennt Anomalien basierend auf statischen Schwellenwerten (Min/Max).</p>
-    <h3>Eingaben</h3>
+    <p>Detects anomalies based on static thresholds (Min/Max).</p>
+    <h3>Inputs</h3>
     <dl class="message-properties">
         <dt>payload <span class="property-type">number</span></dt>
-        <dd>Der numerische Wert, der auf Anomalien geprüft werden soll.</dd>
+        <dd>The numeric value to be checked for anomalies.</dd>
     </dl>
-    <h3>Ausgaben</h3>
+    <h3>Outputs</h3>
     <dl class="message-properties">
-        <dt>Ausgang 1 (oben)</dt>
-        <dd>Normale Werte mit zusätzlichen Metadaten</dd>
-        <dt>Ausgang 2 (unten)</dt>
-        <dd>Anomalien mit zusätzlichen Metadaten (reason, minThreshold, maxThreshold)</dd>
+        <dt>Output 1 (top)</dt>
+        <dd>Normal values with additional metadata</dd>
+        <dt>Output 2 (bottom)</dt>
+        <dd>Anomalies with additional metadata (reason, minThreshold, maxThreshold)</dd>
     </dl>
     <h3>Details</h3>
-    <p>Einfache statische Schwellenwertprüfung. Werte außerhalb der definierten Grenzen werden als Anomalien erkannt.</p>
-    <p><b>Parameter:</b></p>
+    <p>Simple static threshold check. Values outside the defined boundaries are detected as anomalies.</p>
+    <p><b>Parameters:</b></p>
     <ul>
-        <li><b>Minimum-Schwellenwert:</b> Untere Grenze (leer lassen zum Deaktivieren)</li>
-        <li><b>Maximum-Schwellenwert:</b> Obere Grenze (leer lassen zum Deaktivieren)</li>
-        <li><b>Inklusiv:</b> Wenn aktiviert, gelten Werte genau an der Grenze als Anomalien</li>
+        <li><b>Minimum Threshold:</b> Lower boundary (leave empty to disable)</li>
+        <li><b>Maximum Threshold:</b> Upper boundary (leave empty to disable)</li>
+        <li><b>Inclusive:</b> When enabled, values exactly at the boundary count as anomalies</li>
     </ul>
-    <p><b>Beispiel:</b> Min=10, Max=100 → Werte < 10 oder > 100 sind Anomalien</p>
+    <p><b>Example:</b> Min=10, Max=100 → Values < 10 or > 100 are anomalies</p>
 </script>
 

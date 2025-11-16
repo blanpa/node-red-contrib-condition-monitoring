@@ -2,20 +2,20 @@ version: '3.8'
 
 services:
   node-red:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: nodered/node-red:latest
     container_name: node-red-condition-monitoring
+    user: "1000:1000"
     ports:
       - "1880:1880"
     volumes:
       # Node-RED Daten (Flows, Settings)
       - ./node-red-data:/data
-      # Entwicklungsmodul (wird als Volume gemountet)
-      - ./nodes:/data/nodes/node-red-contrib-condition-monitoring/nodes
-      - ./package.json:/data/nodes/node-red-contrib-condition-monitoring/package.json
+      # Dein Modul direkt in node_modules mounten
+      - ./nodes:/data/node_modules/node-red-contrib-condition-monitoring/nodes
+      - ./package.json:/data/node_modules/node-red-contrib-condition-monitoring/package.json
     environment:
       - NODE_OPTIONS=--max_old_space_size=4096
+      - TZ=Europe/Berlin
     restart: unless-stopped
     networks:
       - node-red-network

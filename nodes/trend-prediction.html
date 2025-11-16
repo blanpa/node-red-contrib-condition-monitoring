@@ -1,0 +1,103 @@
+<script type="text/javascript">
+    RED.nodes.registerType('trend-prediction', {
+        category: 'predictive maintenance',
+        color: '#FDD835',
+        defaults: {
+            name: { value: "" },
+            method: { value: "linear" },
+            predictionSteps: { value: 10, validate: RED.validators.number() },
+            windowSize: { value: 50, validate: RED.validators.number() },
+            threshold: { value: "", validate: function(v) { return v === "" || !isNaN(v); } }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "icon-predictive-maintanance.png",
+        label: function() {
+            return this.name || "Trend Prediction";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        oneditprepare: function() {
+        },
+        oneditsave: function() {
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="trend-prediction">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-method"><i class="fa fa-cog"></i> Method</label>
+        <select id="node-input-method">
+            <option value="linear">Linear Regression</option>
+            <option value="exponential">Exponential Smoothing</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-predictionSteps"><i class="fa fa-forward"></i> Prediction Steps</label>
+        <input type="number" id="node-input-predictionSteps" placeholder="10" min="1" max="100">
+    </div>
+    <div class="form-row">
+        <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Window Size</label>
+        <input type="number" id="node-input-windowSize" placeholder="50" min="3">
+    </div>
+    <div class="form-row">
+        <label for="node-input-threshold"><i class="fa fa-exclamation-triangle"></i> Threshold (for RUL calculation)</label>
+        <input type="number" id="node-input-threshold" placeholder="" step="any">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="trend-prediction">
+    <p>Predicts future trends and calculates Remaining Useful Life (RUL) based on historical data.</p>
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>The numeric value to analyze for trends.</dd>
+        <dt>timestamp <span class="property-type">number</span> <span class="optional">optional</span></dt>
+        <dd>Timestamp in milliseconds (defaults to current time)</dd>
+    </dl>
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>The current value</dd>
+        <dt>trend <span class="property-type">string</span></dt>
+        <dd>"increasing", "decreasing", or "stable"</dd>
+        <dt>slope <span class="property-type">number</span></dt>
+        <dd>Rate of change per sample</dd>
+        <dt>predictedValues <span class="property-type">array</span></dt>
+        <dd>Array of predicted future values</dd>
+        <dt>timeToThreshold <span class="property-type">number</span></dt>
+        <dd>Milliseconds until threshold is reached (RUL)</dd>
+        <dt>stepsToThreshold <span class="property-type">number</span></dt>
+        <dd>Number of samples until threshold is reached</dd>
+    </dl>
+    <h3>Details</h3>
+    <p>This node analyzes historical data to predict future trends and calculate when a threshold will be reached, 
+    which is useful for Remaining Useful Life (RUL) estimation in predictive maintenance.</p>
+    <p><b>Parameters:</b></p>
+    <ul>
+        <li><b>Method:</b>
+            <ul>
+                <li><b>Linear Regression:</b> Best for steady trends</li>
+                <li><b>Exponential Smoothing:</b> Adapts to changing trends</li>
+            </ul>
+        </li>
+        <li><b>Prediction Steps:</b> How many future samples to predict (default: 10)</li>
+        <li><b>Window Size:</b> Number of historical samples to use (default: 50)</li>
+        <li><b>Threshold:</b> Critical value for RUL calculation (e.g., maximum temperature)</li>
+    </ul>
+    <p><b>Use Cases:</b></p>
+    <ul>
+        <li>Predict when maintenance will be needed</li>
+        <li>Estimate remaining operational time</li>
+        <li>Forecast equipment degradation</li>
+        <li>Early warning of threshold violations</li>
+    </ul>
+    <p><b>Example:</b> If temperature is rising at 0.5°C per hour and threshold is 80°C, 
+    the node calculates how many hours until maintenance is required.</p>
+</script>
+

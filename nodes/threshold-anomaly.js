@@ -15,39 +15,39 @@ module.exports = function(RED) {
                 var value = parseFloat(msg.payload);
                 
                 if (isNaN(value)) {
-                    node.error("Payload ist keine gültige Zahl", msg);
+                    node.error("Payload is not a valid number", msg);
                     return;
                 }
                 
                 var isAnomaly = false;
                 var reason = null;
                 
-                // Prüfung auf Minimum-Schwellenwert
+                // Check minimum threshold
                 if (node.minThreshold !== null) {
                     if (node.inclusive) {
                         if (value <= node.minThreshold) {
                             isAnomaly = true;
-                            reason = "Unter Minimum-Schwellenwert";
+                            reason = "Below minimum threshold";
                         }
                     } else {
                         if (value < node.minThreshold) {
                             isAnomaly = true;
-                            reason = "Unter Minimum-Schwellenwert";
+                            reason = "Below minimum threshold";
                         }
                     }
                 }
                 
-                // Prüfung auf Maximum-Schwellenwert
+                // Check maximum threshold
                 if (node.maxThreshold !== null) {
                     if (node.inclusive) {
                         if (value >= node.maxThreshold) {
                             isAnomaly = true;
-                            reason = reason ? reason + " oder über Maximum-Schwellenwert" : "Über Maximum-Schwellenwert";
+                            reason = reason ? reason + " or above maximum threshold" : "Above maximum threshold";
                         }
                     } else {
                         if (value > node.maxThreshold) {
                             isAnomaly = true;
-                            reason = reason ? reason + " oder über Maximum-Schwellenwert" : "Über Maximum-Schwellenwert";
+                            reason = reason ? reason + " or above maximum threshold" : "Above maximum threshold";
                         }
                     }
                 }
@@ -79,7 +79,7 @@ module.exports = function(RED) {
                 }
                 
             } catch (err) {
-                node.error("Fehler bei Threshold-Prüfung: " + err.message, msg);
+                node.error("Error in threshold check: " + err.message, msg);
             }
         });
     }

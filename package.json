@@ -1,8 +1,7 @@
 {
   "name": "node-red-contrib-condition-monitoring",
-  "version": "1.0.0",
-  "description": "Node-RED Nodes für Anomalieerkennung und Zeitreihenanalyse",
-  "main": "index.js",
+  "version": "0.1.0",
+  "description": "Node-RED Nodes for anomaly detection, predictive maintenance, and time series analysis",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -17,7 +16,14 @@
       "ema-anomaly": "nodes/ema-anomaly.js",
       "cusum-anomaly": "nodes/cusum-anomaly.js",
       "multi-value-splitter": "nodes/multi-value-splitter.js",
-      "multi-value-anomaly": "nodes/multi-value-anomaly.js"
+      "multi-value-anomaly": "nodes/multi-value-anomaly.js",
+      "trend-prediction": "nodes/trend-prediction.js",
+      "fft-analysis": "nodes/fft-analysis.js",
+      "health-index": "nodes/health-index.js",
+      "rate-of-change": "nodes/rate-of-change.js",
+      "peak-detection": "nodes/peak-detection.js",
+      "correlation-anomaly": "nodes/correlation-anomaly.js",
+      "vibration-features": "nodes/vibration-features.js"
     }
   },
   "keywords": [
@@ -25,6 +31,7 @@
     "anomaly-detection",
     "time-series",
     "condition-monitoring",
+    "predictive-maintenance",
     "z-score",
     "iqr",
     "isolation-forest",
@@ -32,18 +39,36 @@
     "percentile",
     "ema",
     "cusum",
-    "exponential-moving-average"
+    "exponential-moving-average",
+    "fft",
+    "vibration-analysis",
+    "vibration-features",
+    "trend-prediction",
+    "health-index",
+    "rul",
+    "remaining-useful-life",
+    "rms",
+    "crest-factor",
+    "kurtosis",
+    "skewness"
   ],
   "author": "blanpa",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blanpa/node-red-contrib-condition-monitoring.git"
+  },
+  "bugs": {
+    "url": "https://github.com/blanpa/node-red-contrib-condition-monitoring/issues"
+  },
+  "homepage": "https://github.com/blanpa/node-red-contrib-condition-monitoring#readme",
   "dependencies": {
     "ml-isolation-forest": "^0.0.4",
     "simple-statistics": "^7.8.2"
   },
   "devDependencies": {},
-  "repository": {
-    "type": "git",
-    "url": ""
+  "engines": {
+    "node": ">=14.0.0"
   }
 }
 

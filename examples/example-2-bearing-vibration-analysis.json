@@ -1,0 +1,203 @@
+[
+    {
+        "id": "bearing_flow_tab",
+        "type": "tab",
+        "label": "Example 2: Bearing Vibration Analysis",
+        "disabled": false,
+        "info": "Advanced vibration analysis for bearing fault detection.\nUses: FFT Analysis, Peak Detection, IQR Anomaly, Moving Average"
+    },
+    {
+        "id": "inject_bearing_1",
+        "type": "inject",
+        "z": "bearing_flow_tab",
+        "name": "Simulate Vibration (50Hz)",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "0.02",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 200,
+        "y": 100,
+        "wires": [
+            [
+                "function_vibration_sim"
+            ]
+        ]
+    },
+    {
+        "id": "function_vibration_sim",
+        "type": "function",
+        "z": "bearing_flow_tab",
+        "name": "Bearing Vibration Simulator",
+        "func": "// Simulate bearing with developing fault\nconst t = (context.get('t') || 0) + 1;\ncontext.set('t', t);\n\nconst time = t * 0.02; // 50Hz sampling\n\n// Base vibration (30 Hz rotation)\nlet signal = 0.5 * Math.sin(2 * Math.PI * 30 * time);\n\n// Add bearing fault frequency (increasing over time)\nconst faultIntensity = Math.min(t / 10000, 1.0); // Increases slowly\nconst faultFreq = 157; // Bearing fault frequency in Hz\nsignal += faultIntensity * 0.3 * Math.sin(2 * Math.PI * faultFreq * time);\n\n// Add impacts (bearing defect)\nif (Math.random() < faultIntensity * 0.01) {\n    signal += (Math.random() - 0.5) * 2; // Random impulse\n}\n\n// Add noise\nsignal += (Math.random() - 0.5) * 0.1;\n\nmsg.payload = signal;\nmsg.timestamp = Date.now();\n\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 460,
+        "y": 100,
+        "wires": [
+            [
+                "fft_analysis_1",
+                "peak_detection_1",
+                "iqr_anomaly_1",
+                "moving_avg_1"
+            ]
+        ]
+    },
+    {
+        "id": "fft_analysis_1",
+        "type": "fft-analysis",
+        "z": "bearing_flow_tab",
+        "name": "FFT Spectrum",
+        "fftSize": 256,
+        "samplingRate": 1000,
+        "peakThreshold": 0.15,
+        "outputFormat": "peaks",
+        "x": 720,
+        "y": 60,
+        "wires": [
+            [
+                "debug_fft_peaks"
+            ]
+        ]
+    },
+    {
+        "id": "peak_detection_1",
+        "type": "peak-detection",
+        "z": "bearing_flow_tab",
+        "name": "Detect Impacts",
+        "minPeakHeight": "",
+        "minPeakDistance": 10,
+        "peakType": "both",
+        "windowSize": 50,
+        "x": 720,
+        "y": 120,
+        "wires": [
+            [],
+            [
+                "debug_impact_detected"
+            ]
+        ]
+    },
+    {
+        "id": "iqr_anomaly_1",
+        "type": "iqr-anomaly",
+        "z": "bearing_flow_tab",
+        "name": "IQR Detection",
+        "multiplier": 1.5,
+        "windowSize": 100,
+        "x": 720,
+        "y": 180,
+        "wires": [
+            [],
+            [
+                "debug_iqr_anomaly"
+            ]
+        ]
+    },
+    {
+        "id": "moving_avg_1",
+        "type": "moving-average-anomaly",
+        "z": "bearing_flow_tab",
+        "name": "Moving Average",
+        "windowSize": 20,
+        "threshold": 2,
+        "method": "stddev",
+        "x": 730,
+        "y": 240,
+        "wires": [
+            [],
+            [
+                "debug_ma_anomaly"
+            ]
+        ]
+    },
+    {
+        "id": "debug_fft_peaks",
+        "type": "debug",
+        "z": "bearing_flow_tab",
+        "name": "FFT Dominant Frequencies",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "peaks",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 980,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "debug_impact_detected",
+        "type": "debug",
+        "z": "bearing_flow_tab",
+        "name": "⚠️ IMPACT Detected",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 960,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "debug_iqr_anomaly",
+        "type": "debug",
+        "z": "bearing_flow_tab",
+        "name": "⚠️ IQR Outlier",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 940,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "debug_ma_anomaly",
+        "type": "debug",
+        "z": "bearing_flow_tab",
+        "name": "⚠️ Moving Avg Anomaly",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 980,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "comment_2",
+        "type": "comment",
+        "z": "bearing_flow_tab",
+        "name": "Bearing Fault Detection via Vibration Analysis",
+        "info": "This flow demonstrates:\n- FFT for frequency domain analysis\n- Peak detection for impact events\n- IQR for robust outlier detection\n- Moving average for trend analysis\n\nLook for:\n- Bearing fault frequency peaks (~157 Hz)\n- Increasing impact frequency\n- Rising vibration amplitude",
+        "x": 220,
+        "y": 40,
+        "wires": []
+    }
+]
+

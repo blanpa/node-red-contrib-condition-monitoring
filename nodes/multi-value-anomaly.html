@@ -1,7 +1,7 @@
 <script type="text/javascript">
     RED.nodes.registerType('multi-value-anomaly', {
-        category: 'condition-monitoring',
-        color: '#E6E0F8',
+        category: 'anomaly detection',
+        color: '#FDD835',
         defaults: {
             name: { value: "" },
             method: { value: "zscore" },
@@ -12,9 +12,9 @@
         },
         inputs: 1,
         outputs: 2,
-        icon: "chart-line.png",
+        icon: "icon-anomaly-detection.png",
         label: function() {
-            return this.name || "Multi-Value Anomalie";
+            return this.name || "Multi-Value Anomaly";
         },
         labelStyle: function() {
             return this.name ? "node_label_italic" : "";
@@ -45,7 +45,7 @@
         <input type="text" id="node-input-name" placeholder="Name">
     </div>
     <div class="form-row">
-        <label for="node-input-method"><i class="fa fa-cog"></i> Methode</label>
+        <label for="node-input-method"><i class="fa fa-cog"></i> Method</label>
         <select id="node-input-method">
             <option value="zscore">Z-Score</option>
             <option value="iqr">IQR</option>
@@ -53,47 +53,47 @@
         </select>
     </div>
     <div class="form-row">
-        <label for="node-input-threshold"><i class="fa fa-sliders"></i> Schwellenwert (für Z-Score)</label>
+        <label for="node-input-threshold"><i class="fa fa-sliders"></i> Threshold (for Z-Score)</label>
         <input type="number" id="node-input-threshold" placeholder="3.0" step="0.1" min="0">
     </div>
     <div class="form-row">
-        <label for="node-input-minThreshold"><i class="fa fa-arrow-down"></i> Minimum-Schwellenwert (für Threshold)</label>
+        <label for="node-input-minThreshold"><i class="fa fa-arrow-down"></i> Minimum Threshold (for Threshold method)</label>
         <input type="number" id="node-input-minThreshold" placeholder="" step="any">
     </div>
     <div class="form-row">
-        <label for="node-input-maxThreshold"><i class="fa fa-arrow-up"></i> Maximum-Schwellenwert (für Threshold)</label>
+        <label for="node-input-maxThreshold"><i class="fa fa-arrow-up"></i> Maximum Threshold (for Threshold method)</label>
         <input type="number" id="node-input-maxThreshold" placeholder="" step="any">
     </div>
     <div class="form-row">
-        <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Fenstergröße</label>
+        <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Window Size</label>
         <input type="number" id="node-input-windowSize" placeholder="100" min="2">
     </div>
 </script>
 
 <script type="text/html" data-help-name="multi-value-anomaly">
-    <p>Analysiert mehrere Werte gleichzeitig (Arrays oder Objekte) auf Anomalien.</p>
-    <h3>Eingaben</h3>
+    <p>Analyzes multiple values simultaneously (arrays or objects) for anomalies.</p>
+    <h3>Inputs</h3>
     <dl class="message-properties">
         <dt>payload <span class="property-type">array | object</span></dt>
-        <dd>Array von Zahlen oder Objekt mit numerischen Werten</dd>
+        <dd>Array of numbers or object with numeric values</dd>
     </dl>
-    <h3>Ausgaben</h3>
+    <h3>Outputs</h3>
     <dl class="message-properties">
-        <dt>Ausgang 1 (oben)</dt>
-        <dd>Normale Werte - Array mit Analyseergebnissen für alle Werte</dd>
-        <dt>Ausgang 2 (unten)</dt>
-        <dd>Anomalien - Array mit Analyseergebnissen (mindestens ein Wert ist anomal)</dd>
+        <dt>Output 1 (top)</dt>
+        <dd>Normal values - Array with analysis results for all values</dd>
+        <dt>Output 2 (bottom)</dt>
+        <dd>Anomalies - Array with analysis results (at least one value is anomalous)</dd>
     </dl>
     <h3>Details</h3>
-    <p>Analysiert jeden Wert separat mit einem eigenen Buffer. Die Ausgabe enthält ein Array mit Analyseergebnissen für jeden Wert.</p>
-    <p><b>Parameter:</b></p>
+    <p>Analyzes each value separately with its own buffer. The output contains an array with analysis results for each value.</p>
+    <p><b>Parameters:</b></p>
     <ul>
-        <li><b>Methode:</b> Z-Score, IQR oder Threshold</li>
-        <li><b>Schwellenwert:</b> Für Z-Score Methode</li>
-        <li><b>Min/Max-Schwellenwert:</b> Für Threshold Methode</li>
-        <li><b>Fenstergröße:</b> Anzahl der Werte pro Buffer</li>
+        <li><b>Method:</b> Z-Score, IQR, or Threshold</li>
+        <li><b>Threshold:</b> For Z-Score method</li>
+        <li><b>Min/Max Threshold:</b> For Threshold method</li>
+        <li><b>Window Size:</b> Number of values per buffer</li>
     </ul>
-    <p><b>Ausgabe-Format:</b></p>
+    <p><b>Output Format:</b></p>
     <pre>{
   "payload": [
     {"valueName": "temp1", "value": 35.2, "isAnomaly": false, "zScore": 1.2},

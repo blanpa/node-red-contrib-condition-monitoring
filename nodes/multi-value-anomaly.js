@@ -58,7 +58,7 @@ module.exports = function(RED) {
                 }
                 
                 if (values.length === 0) {
-                    node.error("Keine gültigen Werte gefunden", msg);
+                    node.error("No valid values found", msg);
                     return;
                 }
                 
@@ -69,14 +69,14 @@ module.exports = function(RED) {
                 values.forEach(function(value, index) {
                     var valueName = valueNames[index] || ("value" + index);
                     
-                    // Buffer für diesen Wert initialisieren
+                    // Initialize buffer for this value
                     if (!node.dataBuffers[valueName]) {
                         node.dataBuffers[valueName] = [];
                     }
                     
                     var buffer = node.dataBuffers[valueName];
                     
-                    // Wert zum Buffer hinzufügen
+                    // Add value to buffer
                     buffer.push({
                         timestamp: Date.now(),
                         value: value
@@ -125,7 +125,7 @@ module.exports = function(RED) {
                             }
                             if (!isNaN(maxThreshold) && value > maxThreshold) {
                                 isAnomaly = true;
-                                analysis.reason = analysis.reason ? analysis.reason + " oder über Maximum" : "Über Maximum";
+                                analysis.reason = analysis.reason ? analysis.reason + " or above maximum" : "Above maximum";
                             }
                         }
                     }

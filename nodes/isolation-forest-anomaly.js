@@ -5,12 +5,12 @@ module.exports = function(RED) {
         RED.nodes.createNode(this, config);
         var node = this;
         
-        // Isolation Forest wird nur geladen wenn verfügbar
+        // Load Isolation Forest only if available
         var IsolationForest = null;
         try {
             IsolationForest = require('ml-isolation-forest').IsolationForest;
         } catch (err) {
-            node.warn("ml-isolation-forest nicht verfügbar. Bitte installieren: npm install ml-isolation-forest");
+            node.warn("ml-isolation-forest not available. Please install: npm install ml-isolation-forest");
         }
         
         this.contamination = parseFloat(config.contamination) || 0.1;
@@ -25,20 +25,20 @@ module.exports = function(RED) {
             }
             
             try {
-                // Daten für Training vorbereiten
+                // Prepare data for training
                 var trainingData = node.dataBuffer.map(function(d, index) {
-                    // Features: Wert, Index (Zeit), und optional Differenz zum vorherigen Wert
+                    // Features: value, time index, and optional difference to previous value
                     var features = [d.value];
                     if (index > 0) {
                         features.push(d.value - node.dataBuffer[index - 1].value);
                     } else {
                         features.push(0);
                     }
-                    features.push(index); // Zeitindex
+                    features.push(index); // Time index
                     return features;
                 });
                 
-                // Isolation Forest trainieren
+                // Train Isolation Forest
                 node.model = new IsolationForest({
                     contamination: node.contamination,
                     numEstimators: 100,
@@ -49,42 +49,42 @@ module.exports = function(RED) {
                 node.isTrained = true;
                 
             } catch (err) {
-                node.error("Fehler beim Training des Isolation Forest: " + err.message);
+                node.error("Error training Isolation Forest: " + err.message);
                 node.isTrained = false;
             }
         }
         
         node.on('input', function(msg) {
             try {
-                // Wert aus der Nachricht extrahieren
+                // Extract value from message
                 var value = parseFloat(msg.payload);
                 
                 if (isNaN(value)) {
-                    node.error("Payload ist keine gültige Zahl", msg);
+                    node.error("Payload is not a valid number", msg);
                     return;
                 }
                 
-                // Wert zum Buffer hinzufügen
+                // Add value to buffer
                 node.dataBuffer.push({
                     timestamp: Date.now(),
                     value: value
                 });
                 
-                // Buffer auf maximale Größe begrenzen
+                // Limit buffer to maximum size
                 if (node.dataBuffer.length > node.windowSize) {
                     node.dataBuffer.shift();
-                    // Model neu trainieren wenn Buffer voll ist
+                    // Retrain model when buffer is full
                     trainModel();
                 }
                 
-                // Model trainieren wenn genug Daten vorhanden
+                // Train model when enough data is available
                 if (!node.isTrained && node.dataBuffer.length >= 10) {
                     trainModel();
                 }
                 
-                // Wenn Isolation Forest nicht verfügbar oder nicht trainiert, einfache Fallback-Methode
+                // If Isolation Forest is not available or not trained, use simple fallback method
                 if (!IsolationForest || !node.isTrained) {
-                    // Fallback: Z-Score basierte Erkennung
+                    // Fallback: Z-Score based detection
                     if (node.dataBuffer.length < 2) {
                         node.send(msg);
                         return;
@@ -113,16 +113,18 @@ module.exports = function(RED) {
                     return;
                 }
                 
-                // Isolation Forest Vorhersage
+                // Isolation Forest prediction
                 var currentIndex = node.dataBuffer.length - 1;
                 var prevValue = currentIndex > 0 ? node.dataBuffer[currentIndex - 1].value : value;
                 var features = [value, value - prevValue, currentIndex];
                 
                 var prediction = node.model.predict([features]);
-                var isAnomaly = prediction[0] === -1; // -1 = Anomalie, 1 = Normal
-                var score = node.model.decisionFunction([features])[0];
+                var isAnomaly = prediction[0] === -1; // -1 = anomaly, 1 = normal
                 
-                // Ausgabe-Nachricht erstellen
+                // Calculate score (approximation, as decisionFunction is not available)
+                var score = isAnomaly ? -0.5 : 0.5;
+                
+                // Create output message
                 var outputMsg = {
                     payload: value,
                     isAnomaly: isAnomaly,
@@ -132,7 +134,7 @@ module.exports = function(RED) {
                     timestamp: Date.now()
                 };
                 
-                // Original-Nachrichteneigenschaften kopieren
+                // Copy original message properties
                 Object.keys(msg).forEach(function(key) {
                     if (key !== 'payload' && key !== 'isAnomaly' && key !== 'anomalyScore' && 
                         key !== 'method' && key !== 'contamination' && key !== 'timestamp') {
@@ -140,7 +142,7 @@ module.exports = function(RED) {
                     }
                 });
                 
-                // Anomalien an Ausgang 1, normale Werte an Ausgang 0
+                // Anomalies to output 1, normal values to output 0
                 if (isAnomaly) {
                     node.send([null, outputMsg]);
                 } else {
@@ -148,7 +150,7 @@ module.exports = function(RED) {
                 }
                 
             } catch (err) {
-                node.error("Fehler bei Isolation Forest Berechnung: " + err.message, msg);
+                node.error("Error in Isolation Forest calculation: " + err.message, msg);
             }
         });
         

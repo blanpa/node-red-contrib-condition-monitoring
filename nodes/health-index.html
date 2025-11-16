@@ -1,0 +1,129 @@
+<script type="text/javascript">
+    RED.nodes.registerType('health-index', {
+        category: 'predictive maintenance',
+        color: '#FDD835',
+        defaults: {
+            name: { value: "" },
+            sensorWeights: { value: '{"temp":1.0,"vibration":1.5,"pressure":1.0}' },
+            aggregationMethod: { value: "weighted" },
+            outputScale: { value: "0-100" }
+        },
+        inputs: 1,
+        outputs: 2,
+        icon: "icon-predictive-maintanance.png",
+        label: function() {
+            return this.name || "Health Index";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        outputLabels: ["healthy", "degraded/critical"],
+        oneditprepare: function() {
+        },
+        oneditsave: function() {
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="health-index">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-sensorWeights"><i class="fa fa-balance-scale"></i> Sensor Weights (JSON)</label>
+        <input type="text" id="node-input-sensorWeights" placeholder='{"temp":1.0,"vibration":1.5}'>
+    </div>
+    <div class="form-row">
+        <label for="node-input-aggregationMethod"><i class="fa fa-cog"></i> Aggregation Method</label>
+        <select id="node-input-aggregationMethod">
+            <option value="weighted">Weighted Average</option>
+            <option value="minimum">Minimum (Worst Case)</option>
+            <option value="average">Simple Average</option>
+            <option value="geometric">Geometric Mean</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-outputScale"><i class="fa fa-arrows-h"></i> Output Scale</label>
+        <select id="node-input-outputScale">
+            <option value="0-100">0-100 (Percentage)</option>
+        </select>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="health-index">
+    <p>Calculates an overall equipment health index by aggregating multiple sensor readings and anomaly detection results.</p>
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">array | object</span></dt>
+        <dd>Array or object containing sensor readings with optional anomaly detection metadata</dd>
+    </dl>
+    <p><b>Expected sensor data format:</b></p>
+    <pre>{
+  "temp": {
+    "value": 75.2,
+    "isAnomaly": false,
+    "zScore": 1.2
+  },
+  "vibration": {
+    "value": 0.5,
+    "isAnomaly": true,
+    "zScore": 3.5
+  }
+}</pre>
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Output 1 (top)</dt>
+        <dd>Healthy status (health index ≥ 60)</dd>
+        <dt>Output 2 (bottom)</dt>
+        <dd>Degraded or critical status (health index < 60)</dd>
+    </dl>
+    <p><b>Output properties:</b></p>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>Overall health index (0-100)</dd>
+        <dt>status <span class="property-type">string</span></dt>
+        <dd>"healthy", "degraded", "warning", or "critical"</dd>
+        <dt>sensorScores <span class="property-type">object</span></dt>
+        <dd>Individual health scores per sensor</dd>
+        <dt>worstSensor <span class="property-type">object</span></dt>
+        <dd>Sensor with lowest health score</dd>
+        <dt>contributingFactors <span class="property-type">array</span></dt>
+        <dd>List of issues reducing health index</dd>
+    </dl>
+    <h3>Details</h3>
+    <p>The health index combines multiple sensor signals into a single 0-100 score representing overall equipment condition.</p>
+    <p><b>Health Score Calculation:</b></p>
+    <ul>
+        <li>Starts at 100 (perfect health)</li>
+        <li>Deductions for anomalies (-30)</li>
+        <li>Deductions for high Z-scores (-20 to -40)</li>
+        <li>Deductions for high deviations (-15 to -30)</li>
+        <li>Deductions for negative trends (-10)</li>
+    </ul>
+    <p><b>Aggregation Methods:</b></p>
+    <ul>
+        <li><b>Weighted Average:</b> Different sensors have different importance (configure weights)</li>
+        <li><b>Minimum (Worst Case):</b> Health equals worst sensor (conservative)</li>
+        <li><b>Simple Average:</b> All sensors equally important</li>
+        <li><b>Geometric Mean:</b> Emphasizes poor sensors more than average</li>
+    </ul>
+    <p><b>Health Status Thresholds:</b></p>
+    <ul>
+        <li><b>Healthy:</b> 80-100 - Normal operation</li>
+        <li><b>Degraded:</b> 60-80 - Monitor closely</li>
+        <li><b>Warning:</b> 40-60 - Maintenance recommended</li>
+        <li><b>Critical:</b> 0-40 - Urgent maintenance required</li>
+    </ul>
+    <p><b>Sensor Weights Example:</b></p>
+    <pre>{"temp": 1.0, "vibration": 1.5, "pressure": 0.8}</pre>
+    <p>Higher weights mean sensor has more impact on overall health (vibration is 1.5× more important than temperature).</p>
+    <p><b>Use Cases:</b></p>
+    <ul>
+        <li>Overall equipment effectiveness (OEE)</li>
+        <li>Maintenance prioritization</li>
+        <li>Dashboard health indicators</li>
+        <li>Predictive maintenance scheduling</li>
+    </ul>
+</script>
+

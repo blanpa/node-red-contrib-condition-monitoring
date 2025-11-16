@@ -18,7 +18,7 @@ module.exports = function(RED) {
                 var value = parseFloat(msg.payload);
                 
                 if (isNaN(value)) {
-                    node.error("Payload ist keine gültige Zahl", msg);
+                    node.error("Payload is not a valid number", msg);
                     return;
                 }
                 
@@ -37,13 +37,13 @@ module.exports = function(RED) {
                 // EMA berechnen: EMA = alpha * value + (1 - alpha) * previous_EMA
                 node.ema = node.alpha * value + (1 - node.alpha) * node.ema;
                 
-                // Wert zum Buffer hinzufügen
+                // Add value to buffer
                 node.dataBuffer.push({
                     timestamp: Date.now(),
                     value: value
                 });
                 
-                // Buffer auf maximale Größe begrenzen (für Standardabweichung)
+                // Limit buffer to maximum size (for standard deviation)
                 if (node.dataBuffer.length > 100) {
                     node.dataBuffer.shift();
                 }
@@ -68,7 +68,7 @@ module.exports = function(RED) {
                     deviation = Math.abs(value - node.ema);
                     deviationPercent = stdDev === 0 ? 0 : (deviation / stdDev) * 100;
                     
-                    // Anomalie wenn Abweichung größer als threshold * Standardabweichung
+                    // Anomaly if deviation is greater than threshold * standard deviation
                     isAnomaly = deviation > (node.threshold * stdDev);
                     
                 } else if (node.method === "percentage") {
@@ -76,7 +76,7 @@ module.exports = function(RED) {
                     deviation = Math.abs(value - node.ema);
                     deviationPercent = node.ema === 0 ? 0 : (deviation / Math.abs(node.ema)) * 100;
                     
-                    // Anomalie wenn prozentuale Abweichung größer als threshold
+                    // Anomaly if percentage deviation is greater than threshold
                     isAnomaly = deviationPercent > node.threshold;
                 }
                 

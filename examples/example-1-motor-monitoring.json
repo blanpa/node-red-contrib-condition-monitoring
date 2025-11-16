@@ -1,0 +1,419 @@
+[
+    {
+        "id": "motor_flow_tab",
+        "type": "tab",
+        "label": "Example 1: Motor Monitoring",
+        "disabled": false,
+        "info": "Complete motor monitoring with temperature, vibration, and power consumption.\nUses: Z-Score, Trend Prediction, Health Index, Rate of Change"
+    },
+    {
+        "id": "inject_motor_1",
+        "type": "inject",
+        "z": "motor_flow_tab",
+        "name": "Simulate Motor Data (1s)",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "1",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 180,
+        "y": 100,
+        "wires": [
+            [
+                "function_motor_sim"
+            ]
+        ]
+    },
+    {
+        "id": "function_motor_sim",
+        "type": "function",
+        "z": "motor_flow_tab",
+        "name": "Motor Simulator",
+        "func": "// Simulate motor degradation over time\nconst degradation = (context.get('degradation') || 0) + 0.001;\ncontext.set('degradation', degradation);\n\n// Base values\nconst baseTemp = 65;\nconst baseVibration = 0.3;\nconst basePower = 5.5;\n\n// Add degradation and noise\nconst temp = baseTemp + degradation * 15 + (Math.random() - 0.5) * 2;\nconst vibration = baseVibration + degradation * 0.5 + (Math.random() - 0.5) * 0.1;\nconst power = basePower + degradation * 1.5 + (Math.random() - 0.5) * 0.3;\n\nmsg.payload = {\n    temperature: temp,\n    vibration: vibration,\n    power: power\n};\n\nmsg.timestamp = Date.now();\n\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 420,
+        "y": 100,
+        "wires": [
+            [
+                "multi_value_splitter_1",
+                "health_index_1",
+                "correlation_1"
+            ]
+        ]
+    },
+    {
+        "id": "multi_value_splitter_1",
+        "type": "multi-value-splitter",
+        "z": "motor_flow_tab",
+        "name": "Split Sensors",
+        "field": "payload",
+        "outputMode": "sequential",
+        "preserveOriginal": true,
+        "x": 650,
+        "y": 100,
+        "wires": [
+            [
+                "switch_by_sensor"
+            ]
+        ]
+    },
+    {
+        "id": "switch_by_sensor",
+        "type": "switch",
+        "z": "motor_flow_tab",
+        "name": "Route by Sensor",
+        "property": "valueName",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "temperature",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "vibration",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "power",
+                "vt": "str"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 3,
+        "x": 860,
+        "y": 100,
+        "wires": [
+            [
+                "zscore_temp",
+                "trend_temp",
+                "rate_temp"
+            ],
+            [
+                "zscore_vib"
+            ],
+            [
+                "zscore_power"
+            ]
+        ]
+    },
+    {
+        "id": "zscore_temp",
+        "type": "zscore-anomaly",
+        "z": "motor_flow_tab",
+        "name": "Z-Score Temperature",
+        "threshold": 3,
+        "windowSize": 50,
+        "x": 1100,
+        "y": 60,
+        "wires": [
+            [
+                "debug_temp_normal"
+            ],
+            [
+                "debug_temp_anomaly"
+            ]
+        ]
+    },
+    {
+        "id": "trend_temp",
+        "type": "trend-prediction",
+        "z": "motor_flow_tab",
+        "name": "Predict Temperature Trend",
+        "method": "linear",
+        "predictionSteps": 20,
+        "windowSize": 30,
+        "threshold": "85",
+        "x": 1120,
+        "y": 120,
+        "wires": [
+            [
+                "debug_trend"
+            ]
+        ]
+    },
+    {
+        "id": "rate_temp",
+        "type": "rate-of-change",
+        "z": "motor_flow_tab",
+        "name": "Temperature Rate",
+        "threshold": "2",
+        "timeWindow": 1,
+        "method": "absolute",
+        "x": 1100,
+        "y": 180,
+        "wires": [
+            [
+                "debug_rate_normal"
+            ],
+            [
+                "debug_rate_rapid"
+            ]
+        ]
+    },
+    {
+        "id": "zscore_vib",
+        "type": "zscore-anomaly",
+        "z": "motor_flow_tab",
+        "name": "Z-Score Vibration",
+        "threshold": 2.5,
+        "windowSize": 50,
+        "x": 1100,
+        "y": 260,
+        "wires": [
+            [],
+            [
+                "debug_vib_anomaly"
+            ]
+        ]
+    },
+    {
+        "id": "zscore_power",
+        "type": "zscore-anomaly",
+        "z": "motor_flow_tab",
+        "name": "Z-Score Power",
+        "threshold": 3,
+        "windowSize": 50,
+        "x": 1100,
+        "y": 320,
+        "wires": [
+            [],
+            [
+                "debug_power_anomaly"
+            ]
+        ]
+    },
+    {
+        "id": "health_index_1",
+        "type": "health-index",
+        "z": "motor_flow_tab",
+        "name": "Motor Health Index",
+        "sensorWeights": "{\"temperature\":1.0,\"vibration\":1.5,\"power\":1.0}",
+        "aggregationMethod": "weighted",
+        "outputScale": "0-100",
+        "x": 660,
+        "y": 200,
+        "wires": [
+            [
+                "debug_health_ok"
+            ],
+            [
+                "debug_health_degraded"
+            ]
+        ]
+    },
+    {
+        "id": "correlation_1",
+        "type": "correlation-anomaly",
+        "z": "motor_flow_tab",
+        "name": "Temp vs Power Correlation",
+        "sensor1": "temperature",
+        "sensor2": "power",
+        "threshold": 0.7,
+        "windowSize": 30,
+        "method": "pearson",
+        "x": 680,
+        "y": 280,
+        "wires": [
+            [],
+            [
+                "debug_correlation_broken"
+            ]
+        ]
+    },
+    {
+        "id": "debug_temp_normal",
+        "type": "debug",
+        "z": "motor_flow_tab",
+        "name": "Temp Normal",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1340,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "debug_temp_anomaly",
+        "type": "debug",
+        "z": "motor_flow_tab",
+        "name": "⚠️ Temp ANOMALY",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1360,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "debug_trend",
+        "type": "debug",
+        "z": "motor_flow_tab",
+        "name": "RUL Prediction",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1350,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "debug_rate_normal",
+        "type": "debug",
+        "z": "motor_flow_tab",
+        "name": "Rate Normal",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1340,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "debug_rate_rapid",
+        "type": "debug",
+        "z": "motor_flow_tab",
+        "name": "⚠️ RAPID Change",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1350,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "debug_vib_anomaly",
+        "type": "debug",
+        "z": "motor_flow_tab",
+        "name": "⚠️ Vibration ANOMALY",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1370,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "debug_power_anomaly",
+        "type": "debug",
+        "z": "motor_flow_tab",
+        "name": "⚠️ Power ANOMALY",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1360,
+        "y": 320,
+        "wires": []
+    },
+    {
+        "id": "debug_health_ok",
+        "type": "debug",
+        "z": "motor_flow_tab",
+        "name": "✓ Health OK",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "healthIndex",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 890,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "debug_health_degraded",
+        "type": "debug",
+        "z": "motor_flow_tab",
+        "name": "⚠️ Health DEGRADED",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 920,
+        "y": 220,
+        "wires": []
+    },
+    {
+        "id": "debug_correlation_broken",
+        "type": "debug",
+        "z": "motor_flow_tab",
+        "name": "⚠️ Correlation BROKEN",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 930,
+        "y": 280,
+        "wires": []
+    },
+    {
+        "id": "comment_1",
+        "type": "comment",
+        "z": "motor_flow_tab",
+        "name": "Motor Monitoring: Temperature, Vibration & Power",
+        "info": "This flow demonstrates:\n- Multi-sensor monitoring\n- Z-Score anomaly detection\n- Trend prediction with RUL\n- Rate of change detection\n- Health index calculation\n- Correlation analysis\n\nThe motor simulator gradually degrades,\nshowing how predictive maintenance works.",
+        "x": 230,
+        "y": 40,
+        "wires": []
+    }
+]
+

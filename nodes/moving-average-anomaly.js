@@ -16,22 +16,22 @@ module.exports = function(RED) {
                 var value = parseFloat(msg.payload);
                 
                 if (isNaN(value)) {
-                    node.error("Payload ist keine gültige Zahl", msg);
+                    node.error("Payload is not a valid number", msg);
                     return;
                 }
                 
-                // Wert zum Buffer hinzufügen
+                // Add value to buffer
                 node.dataBuffer.push({
                     timestamp: Date.now(),
                     value: value
                 });
                 
-                // Buffer auf maximale Größe begrenzen
+                // Limit buffer to maximum size
                 if (node.dataBuffer.length > node.windowSize) {
                     node.dataBuffer.shift();
                 }
                 
-                // Mindestens windowSize Werte benötigt
+                // At least windowSize values required
                 if (node.dataBuffer.length < node.windowSize) {
                     node.send(msg);
                     return;
@@ -54,7 +54,7 @@ module.exports = function(RED) {
                     deviation = Math.abs(value - movingAverage);
                     deviationPercent = stdDev === 0 ? 0 : (deviation / stdDev) * 100;
                     
-                    // Anomalie wenn Abweichung größer als threshold * Standardabweichung
+                    // Anomaly if deviation is greater than threshold * standard deviation
                     isAnomaly = deviation > (node.threshold * stdDev);
                     
                 } else if (node.method === "percentage") {
@@ -62,7 +62,7 @@ module.exports = function(RED) {
                     deviation = Math.abs(value - movingAverage);
                     deviationPercent = movingAverage === 0 ? 0 : (deviation / Math.abs(movingAverage)) * 100;
                     
-                    // Anomalie wenn prozentuale Abweichung größer als threshold
+                    // Anomaly if percentage deviation is greater than threshold
                     isAnomaly = deviationPercent > node.threshold;
                 }
                 

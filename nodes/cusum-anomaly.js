@@ -21,17 +21,17 @@ module.exports = function(RED) {
                 var value = parseFloat(msg.payload);
                 
                 if (isNaN(value)) {
-                    node.error("Payload ist keine gültige Zahl", msg);
+                    node.error("Payload is not a valid number", msg);
                     return;
                 }
                 
-                // Wert zum Buffer hinzufügen
+                // Add value to buffer
                 node.dataBuffer.push({
                     timestamp: Date.now(),
                     value: value
                 });
                 
-                // Buffer auf maximale Größe begrenzen
+                // Limit buffer to maximum size
                 if (node.dataBuffer.length > node.windowSize) {
                     node.dataBuffer.shift();
                 }
@@ -85,7 +85,7 @@ module.exports = function(RED) {
                 // Anomalien an Ausgang 1, normale Werte an Ausgang 0
                 if (isAnomaly) {
                     node.send([null, outputMsg]);
-                    // CUSUM zurücksetzen nach Erkennung
+                    // Reset CUSUM after detection
                     node.cusumPos = 0;
                     node.cusumNeg = 0;
                 } else {

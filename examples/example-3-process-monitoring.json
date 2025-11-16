@@ -1,0 +1,341 @@
+[
+    {
+        "id": "process_flow_tab",
+        "type": "tab",
+        "label": "Example 3: Process Monitoring (Pump System)",
+        "disabled": false,
+        "info": "Complete process monitoring for a pump system.\nUses: Threshold, Percentile, EMA, CUSUM, Multi-Value Anomaly"
+    },
+    {
+        "id": "inject_process_1",
+        "type": "inject",
+        "z": "process_flow_tab",
+        "name": "Simulate Process (1s)",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "1",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 180,
+        "y": 100,
+        "wires": [
+            [
+                "function_process_sim"
+            ]
+        ]
+    },
+    {
+        "id": "function_process_sim",
+        "type": "function",
+        "z": "process_flow_tab",
+        "name": "Pump Process Simulator",
+        "func": "// Simulate pump system with slow degradation\nconst t = (context.get('t') || 0) + 1;\ncontext.set('t', t);\n\n// Simulate slow pressure drop (leak)\nconst leak = Math.min(t / 500, 10);\n\n// Flow rate (gradually decreasing)\nconst flow = 100 - leak + (Math.random() - 0.5) * 5;\n\n// Pressure (gradually decreasing due to leak)\nconst pressure = 120 - leak * 1.5 + (Math.random() - 0.5) * 3;\n\n// Temperature (increasing with pump wear)\nconst temp = 55 + leak * 0.5 + (Math.random() - 0.5) * 2;\n\n// Occasionally simulate transient\nlet transient = 0;\nif (Math.random() < 0.02) {\n    transient = (Math.random() - 0.5) * 20;\n}\n\nmsg.payload = {\n    flow: flow + transient,\n    pressure: pressure + transient * 0.5,\n    temperature: temp\n};\n\nmsg.timestamp = Date.now();\n\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 430,
+        "y": 100,
+        "wires": [
+            [
+                "multi_value_anomaly_1",
+                "extract_flow",
+                "extract_pressure",
+                "extract_temp"
+            ]
+        ]
+    },
+    {
+        "id": "multi_value_anomaly_1",
+        "type": "multi-value-anomaly",
+        "z": "process_flow_tab",
+        "name": "Multi-Value Z-Score",
+        "method": "zscore",
+        "threshold": 3,
+        "windowSize": 50,
+        "minThreshold": "",
+        "maxThreshold": "",
+        "x": 710,
+        "y": 60,
+        "wires": [
+            [
+                "debug_multivalue_ok"
+            ],
+            [
+                "debug_multivalue_anomaly"
+            ]
+        ]
+    },
+    {
+        "id": "extract_flow",
+        "type": "change",
+        "z": "process_flow_tab",
+        "name": "Extract Flow",
+        "rules": [
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "payload.flow",
+                "tot": "msg"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 680,
+        "y": 140,
+        "wires": [
+            [
+                "threshold_flow",
+                "cusum_flow"
+            ]
+        ]
+    },
+    {
+        "id": "extract_pressure",
+        "type": "change",
+        "z": "process_flow_tab",
+        "name": "Extract Pressure",
+        "rules": [
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "payload.pressure",
+                "tot": "msg"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 690,
+        "y": 220,
+        "wires": [
+            [
+                "percentile_pressure"
+            ]
+        ]
+    },
+    {
+        "id": "extract_temp",
+        "type": "change",
+        "z": "process_flow_tab",
+        "name": "Extract Temperature",
+        "rules": [
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "payload.temperature",
+                "tot": "msg"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 710,
+        "y": 300,
+        "wires": [
+            [
+                "ema_temp"
+            ]
+        ]
+    },
+    {
+        "id": "threshold_flow",
+        "type": "threshold-anomaly",
+        "z": "process_flow_tab",
+        "name": "Flow Threshold",
+        "minThreshold": "80",
+        "maxThreshold": "120",
+        "inclusive": false,
+        "x": 910,
+        "y": 120,
+        "wires": [
+            [],
+            [
+                "debug_flow_outofrange"
+            ]
+        ]
+    },
+    {
+        "id": "cusum_flow",
+        "type": "cusum-anomaly",
+        "z": "process_flow_tab",
+        "name": "CUSUM Flow Drift",
+        "target": "",
+        "threshold": 5,
+        "drift": 0.5,
+        "windowSize": 100,
+        "x": 920,
+        "y": 160,
+        "wires": [
+            [],
+            [
+                "debug_flow_drift"
+            ]
+        ]
+    },
+    {
+        "id": "percentile_pressure",
+        "type": "percentile-anomaly",
+        "z": "process_flow_tab",
+        "name": "Pressure Percentiles",
+        "lowerPercentile": 5,
+        "upperPercentile": 95,
+        "windowSize": 100,
+        "x": 930,
+        "y": 220,
+        "wires": [
+            [],
+            [
+                "debug_pressure_extreme"
+            ]
+        ]
+    },
+    {
+        "id": "ema_temp",
+        "type": "ema-anomaly",
+        "z": "process_flow_tab",
+        "name": "EMA Temperature",
+        "alpha": 0.3,
+        "threshold": 2,
+        "method": "stddev",
+        "x": 920,
+        "y": 300,
+        "wires": [
+            [],
+            [
+                "debug_temp_spike"
+            ]
+        ]
+    },
+    {
+        "id": "debug_multivalue_ok",
+        "type": "debug",
+        "z": "process_flow_tab",
+        "name": "All Sensors OK",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 950,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "debug_multivalue_anomaly",
+        "type": "debug",
+        "z": "process_flow_tab",
+        "name": "⚠️ Multi-Value ANOMALY",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 990,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "debug_flow_outofrange",
+        "type": "debug",
+        "z": "process_flow_tab",
+        "name": "⚠️ Flow OUT OF RANGE",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1150,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "debug_flow_drift",
+        "type": "debug",
+        "z": "process_flow_tab",
+        "name": "⚠️ Flow DRIFT Detected",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1160,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "debug_pressure_extreme",
+        "type": "debug",
+        "z": "process_flow_tab",
+        "name": "⚠️ Pressure EXTREME",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1160,
+        "y": 220,
+        "wires": []
+    },
+    {
+        "id": "debug_temp_spike",
+        "type": "debug",
+        "z": "process_flow_tab",
+        "name": "⚠️ Temp SPIKE",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1130,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "comment_3",
+        "type": "comment",
+        "z": "process_flow_tab",
+        "name": "Pump System: Flow, Pressure & Temperature Monitoring",
+        "info": "This flow demonstrates:\n- Multi-value anomaly detection\n- Threshold monitoring\n- CUSUM for drift detection\n- Percentile for extreme values\n- EMA for quick spike detection\n\nSimulates:\n- Slow pressure drop (leak)\n- Flow rate decrease\n- Temperature increase\n- Occasional transients",
+        "x": 230,
+        "y": 40,
+        "wires": []
+    }
+]
+

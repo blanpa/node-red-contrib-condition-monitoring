@@ -1,0 +1,118 @@
+<script type="text/javascript">
+    RED.nodes.registerType('peak-detection', {
+        category: 'predictive maintenance',
+        color: '#FDD835',
+        defaults: {
+            name: { value: "" },
+            minPeakHeight: { value: "", validate: function(v) { return v === "" || !isNaN(v); } },
+            minPeakDistance: { value: 5, validate: RED.validators.number() },
+            peakType: { value: "both" },
+            windowSize: { value: 20, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 2,
+        icon: "icon-predictive-maintanance.png",
+        label: function() {
+            return this.name || "Peak Detection";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        outputLabels: ["normal", "peak detected"],
+        oneditprepare: function() {
+        },
+        oneditsave: function() {
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="peak-detection">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-peakType"><i class="fa fa-cog"></i> Peak Type</label>
+        <select id="node-input-peakType">
+            <option value="both">Both (Max & Min)</option>
+            <option value="positive">Positive (Maximum)</option>
+            <option value="negative">Negative (Minimum)</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-minPeakHeight"><i class="fa fa-arrows-v"></i> Minimum Peak Height (leave empty for auto)</label>
+        <input type="number" id="node-input-minPeakHeight" placeholder="" step="any">
+    </div>
+    <div class="form-row">
+        <label for="node-input-minPeakDistance"><i class="fa fa-arrows-h"></i> Minimum Peak Distance (samples)</label>
+        <input type="number" id="node-input-minPeakDistance" placeholder="5" min="1">
+    </div>
+    <div class="form-row">
+        <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Window Size</label>
+        <input type="number" id="node-input-windowSize" placeholder="20" min="3">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="peak-detection">
+    <p>Detects peaks (local maxima/minima) in time series data, useful for impact detection and impulsive events.</p>
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>The numeric value to analyze for peaks</dd>
+        <dt>timestamp <span class="property-type">number</span> <span class="optional">optional</span></dt>
+        <dd>Timestamp in milliseconds (defaults to current time)</dd>
+    </dl>
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Output 1 (top)</dt>
+        <dd>Normal values (not peaks)</dd>
+        <dt>Output 2 (bottom)</dt>
+        <dd>Peak detected</dd>
+    </dl>
+    <p><b>Output properties:</b></p>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>The current value</dd>
+        <dt>isPeak <span class="property-type">boolean</span></dt>
+        <dd>True if current value is a peak</dd>
+        <dt>peaks <span class="property-type">array</span></dt>
+        <dd>All peaks in current window with index, value, timestamp, direction</dd>
+        <dt>peakCount <span class="property-type">number</span></dt>
+        <dd>Number of peaks in window</dd>
+        <dt>stats <span class="property-type">object</span></dt>
+        <dd>Statistics: averagePeakHeight, maxPeakHeight, peakFrequency, averageTimeBetweenPeaks</dd>
+    </dl>
+    <h3>Details</h3>
+    <p>Peak detection identifies sudden spikes or drops in signals, which are important indicators 
+    of impacts, shocks, and other impulsive events in machinery.</p>
+    <p><b>Parameters:</b></p>
+    <ul>
+        <li><b>Peak Type:</b>
+            <ul>
+                <li><b>Both:</b> Detect both maxima and minima</li>
+                <li><b>Positive:</b> Only detect maxima (upward spikes)</li>
+                <li><b>Negative:</b> Only detect minima (downward dips)</li>
+            </ul>
+        </li>
+        <li><b>Minimum Peak Height:</b> Absolute threshold for peaks (leave empty for automatic threshold = mean + 2×std)</li>
+        <li><b>Minimum Peak Distance:</b> Minimum samples between consecutive peaks (prevents detecting tiny fluctuations)</li>
+        <li><b>Window Size:</b> Number of samples to analyze (larger = more context, slower response)</li>
+    </ul>
+    <p><b>Use Cases:</b></p>
+    <ul>
+        <li><b>Impact Detection:</b> Mechanical shocks, collisions, or sudden forces</li>
+        <li><b>Bearing Defects:</b> Impulsive vibration peaks indicate bearing faults</li>
+        <li><b>Cavitation:</b> Pressure pulses in pumps/valves</li>
+        <li><b>Electrical Transients:</b> Voltage/current spikes</li>
+        <li><b>Process Excursions:</b> Brief out-of-spec conditions</li>
+    </ul>
+    <p><b>Peak Statistics:</b></p>
+    <ul>
+        <li><b>Peak Frequency:</b> How often peaks occur (high frequency = unstable/faulty)</li>
+        <li><b>Average Peak Height:</b> Typical severity of events</li>
+        <li><b>Time Between Peaks:</b> Regularity of events (regular = cyclical fault)</li>
+    </ul>
+    <p><b>Example:</b> Vibration sensor on a bearing - regular peaks every rotation indicate bearing defect. 
+    Increasing peak height over time indicates progressive wear.</p>
+</script>
+

@@ -1,0 +1,103 @@
+<script type="text/javascript">
+    RED.nodes.registerType('rate-of-change', {
+        category: 'predictive maintenance',
+        color: '#FDD835',
+        defaults: {
+            name: { value: "" },
+            threshold: { value: "", validate: function(v) { return v === "" || !isNaN(v); } },
+            timeWindow: { value: 1, validate: RED.validators.number() },
+            method: { value: "absolute" }
+        },
+        inputs: 1,
+        outputs: 2,
+        icon: "icon-predictive-maintanance.png",
+        label: function() {
+            return this.name || "Rate of Change";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        outputLabels: ["normal", "rapid change"],
+        oneditprepare: function() {
+        },
+        oneditsave: function() {
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="rate-of-change">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-method"><i class="fa fa-cog"></i> Method</label>
+        <select id="node-input-method">
+            <option value="absolute">Absolute Rate</option>
+            <option value="percentage">Percentage Rate</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-threshold"><i class="fa fa-sliders"></i> Threshold (leave empty to disable)</label>
+        <input type="number" id="node-input-threshold" placeholder="" step="any">
+    </div>
+    <div class="form-row">
+        <label for="node-input-timeWindow"><i class="fa fa-clock-o"></i> Time Window (seconds)</label>
+        <input type="number" id="node-input-timeWindow" placeholder="1" min="0.1" step="0.1">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="rate-of-change">
+    <p>Calculates how fast a value is changing over time (derivative) and detects rapid changes.</p>
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>The numeric value to analyze</dd>
+        <dt>timestamp <span class="property-type">number</span> <span class="optional">optional</span></dt>
+        <dd>Timestamp in milliseconds (defaults to current time)</dd>
+    </dl>
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Output 1 (top)</dt>
+        <dd>Normal rate of change</dd>
+        <dt>Output 2 (bottom)</dt>
+        <dd>Rapid/anomalous rate of change</dd>
+    </dl>
+    <p><b>Output properties:</b></p>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>The current value</dd>
+        <dt>rateOfChange <span class="property-type">number</span></dt>
+        <dd>Rate of change per second (derivative)</dd>
+        <dt>acceleration <span class="property-type">number</span></dt>
+        <dd>Rate of change of rate of change (second derivative)</dd>
+        <dt>isAnomalous <span class="property-type">boolean</span></dt>
+        <dd>True if rate exceeds threshold</dd>
+    </dl>
+    <h3>Details</h3>
+    <p>This node calculates the first derivative (rate of change) and optionally the second derivative (acceleration) 
+    to detect rapid changes that might indicate equipment problems.</p>
+    <p><b>Methods:</b></p>
+    <ul>
+        <li><b>Absolute Rate:</b> Change per second (e.g., +5.2°C/s)</li>
+        <li><b>Percentage Rate:</b> Percentage change per second relative to previous value (e.g., +10%/s)</li>
+    </ul>
+    <p><b>Parameters:</b></p>
+    <ul>
+        <li><b>Threshold:</b> Maximum acceptable rate of change (leave empty to disable anomaly detection)</li>
+        <li><b>Time Window:</b> Time period in seconds for calculating rate (larger = smoother)</li>
+    </ul>
+    <p><b>Use Cases:</b></p>
+    <ul>
+        <li><b>Rapid Temperature Rise:</b> Detect overheating (e.g., >2°C/s)</li>
+        <li><b>Pressure Drop:</b> Detect leaks (e.g., <-5 PSI/s)</li>
+        <li><b>Sudden Vibration Change:</b> Detect impacts or mechanical issues</li>
+        <li><b>Power Surge Detection:</b> Rapid current changes</li>
+        <li><b>Process Instability:</b> Oscillations or erratic behavior</li>
+    </ul>
+    <p><b>Acceleration (2nd Derivative):</b> Indicates if the rate itself is changing. 
+    Useful for detecting when a slow trend suddenly accelerates.</p>
+    <p><b>Example:</b> Temperature rising slowly (+0.5°C/s) is normal, but sudden jump to +5°C/s 
+    indicates a problem like coolant failure.</p>
+</script>
+

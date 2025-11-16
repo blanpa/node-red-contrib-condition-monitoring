@@ -11,7 +11,7 @@ module.exports = function(RED) {
         
         node.on('input', function(msg) {
             try {
-                // Feld extrahieren (standardmäßig payload)
+                // Extract field (defaults to payload)
                 var sourceField = node.field === "payload" ? msg.payload : RED.util.getMessageProperty(msg, node.field);
                 
                 if (sourceField === undefined || sourceField === null) {
@@ -22,12 +22,12 @@ module.exports = function(RED) {
                 var values = [];
                 var valueNames = [];
                 
-                // Prüfen ob es ein Array ist
+                // Check if it's an array
                 if (Array.isArray(sourceField)) {
                     values = sourceField;
                     valueNames = values.map(function(v, i) { return "value" + i; });
                 }
-                // Prüfen ob es ein Objekt mit numerischen Werten ist
+                // Check if it's an object with numeric values
                 else if (typeof sourceField === 'object' && sourceField !== null) {
                     var keys = Object.keys(sourceField);
                     values = keys.map(function(key) {
@@ -46,7 +46,7 @@ module.exports = function(RED) {
                         values = [val];
                         valueNames = ["value"];
                     } else {
-                        node.error("Keine gültigen numerischen Werte gefunden", msg);
+                        node.error("No valid numeric values found", msg);
                         return;
                     }
                 }

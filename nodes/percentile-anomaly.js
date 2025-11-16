@@ -30,22 +30,22 @@ module.exports = function(RED) {
                 var value = parseFloat(msg.payload);
                 
                 if (isNaN(value)) {
-                    node.error("Payload ist keine gültige Zahl", msg);
+                    node.error("Payload is not a valid number", msg);
                     return;
                 }
                 
-                // Wert zum Buffer hinzufügen
+                // Add value to buffer
                 node.dataBuffer.push({
                     timestamp: Date.now(),
                     value: value
                 });
                 
-                // Buffer auf maximale Größe begrenzen
+                // Limit buffer to maximum size
                 if (node.dataBuffer.length > node.windowSize) {
                     node.dataBuffer.shift();
                 }
                 
-                // Mindestens 2 Werte benötigt
+                // At least 2 values required
                 if (node.dataBuffer.length < 2) {
                     node.send(msg);
                     return;

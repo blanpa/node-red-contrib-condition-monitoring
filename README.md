@@ -1,36 +1,244 @@
 # node-red-contrib-condition-monitoring
 
-Ein Node-RED Modul für Anomalieerkennung und Zeitreihenanalyse mit verschiedenen Erkennungsmethoden.
+A comprehensive Node-RED module for **anomaly detection**, **predictive maintenance**, and **time series analysis**.
 
-## Installation
+[![npm version](https://img.shields.io/npm/v/node-red-contrib-condition-monitoring.svg)](https://www.npmjs.com/package/node-red-contrib-condition-monitoring)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Status: Beta](https://img.shields.io/badge/Status-Beta-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.1.0-blue.svg)](CHANGELOG.md)
+
+---
+
+## 🚧 Project Status: BETA (v0.1.0)
+
+**⚠️ This is the first public release - currently in beta testing.**
+
+- 🎉 **First Release:** All core features are implemented and functional
+- 🧪 **Beta Phase:** Undergoing real-world validation and testing
+- 📊 **Feedback Welcome:** Please report issues and share your experience
+- 🔄 **API May Change:** Breaking changes possible before v1.0 stable release
+- ✅ **Production Use:** Use with caution and proper testing in your environment
+- 🎯 **Goal:** Reach v1.0.0 stable after community feedback and validation
+
+---
+
+## ⚠️ Important Disclaimer
+
+**This software is provided for condition monitoring and predictive maintenance purposes.**
+
+- ❌ **NOT** a replacement for safety-critical systems
+- ❌ **NOT** suitable as the sole means of safety decision-making
+- ✅ **Should** be used as an additional monitoring layer
+- ✅ **Always** validate results with domain experts
+- ✅ **Follow** proper safety protocols and regulations for your industry
+
+**Use at your own risk. See LICENSE file for full legal terms.**
+
+## 🎯 Features
+
+- **10 Anomaly Detection Methods** - Z-Score, IQR, Moving Average, Isolation Forest, Threshold, Percentile, EMA, CUSUM, Multi-Value
+- **7 Predictive Maintenance Nodes** - Trend Prediction (RUL), FFT Analysis, Vibration Features, Health Index, Rate of Change, Peak Detection, Correlation Analysis
+- **Real-time Processing** - Continuous data stream analysis
+- **Ready-to-Use Examples** - 5 complete example flows in `/examples` directory
+- **Fully Documented** - Built-in help for every node
+
+## 📦 Installation
 
 ```bash
 npm install node-red-contrib-condition-monitoring
 ```
 
-Oder für die Entwicklung:
+Or install directly from Node-RED:
+1. Menu → Manage palette
+2. Install tab
+3. Search for `node-red-contrib-condition-monitoring`
+4. Click install
+
+## 🚀 Quick Start
+
+### With Docker Compose (Recommended)
 
 ```bash
-cd node-red-contrib-condition-monitoring
-npm install
+# Start Node-RED with the module
+docker-compose up -d
+
+# Access at http://localhost:1880
 ```
 
-## Verfügbare Nodes
+### Import Example Flows
 
-### 1. Z-Score Anomalieerkennung
+1. Open Node-RED: `http://localhost:1880`
+2. Menu (☰) → Import → Examples
+3. Select one of the 4 example flows:
+   - **Example 1:** Motor Monitoring (Z-Score, Trend Prediction, Health Index, Correlation)
+   - **Example 2:** Bearing Vibration Analysis (FFT, Peak Detection, IQR)
+   - **Example 3:** Process Monitoring (Threshold, CUSUM, EMA, Percentile)
+   - **Example 4:** ML Anomaly Detection (Isolation Forest)
 
-Erkennt Anomalien basierend auf dem Z-Score-Verfahren (Standardabweichung vom Mittelwert).
+📖 **See `/examples/README.md` for detailed documentation of all examples.**
 
-**Eigenschaften:**
-- **Schwellenwert**: Anzahl der Standardabweichungen vom Mittelwert (Standard: 3.0)
-- **Fenstergröße**: Anzahl der Werte für die Berechnung (Standard: 100)
+## 📊 Available Nodes
 
-**Ausgaben:**
-- Ausgang 1: Normale Werte mit Metadaten (zScore, mean, stdDev, isAnomaly)
-- Ausgang 2: Anomalien mit Metadaten
+### Anomaly Detection (10 Nodes)
 
-**Beispiel:**
-```json
+| Node | Method | Best For | Output |
+|------|--------|----------|--------|
+| **Z-Score** | Statistical | General purpose anomalies | 2 outputs (normal/anomaly) |
+| **IQR** | Quartile-based | Robust to outliers | 2 outputs |
+| **Moving Average** | Trend-based | Gradual changes | 2 outputs |
+| **Isolation Forest** | Machine Learning | Complex patterns | 2 outputs |
+| **Threshold** | Min/Max limits | Hard boundaries | 2 outputs |
+| **Percentile** | Rank-based | Dynamic thresholds | 2 outputs |
+| **EMA** | Exponential smoothing | Recent changes | 2 outputs |
+| **CUSUM** | Cumulative sum | Drift detection | 2 outputs |
+| **Multi-Value Anomaly** | Any method | Multiple sensors | 2 outputs |
+| **Multi-Value Splitter** | Utility | Split sensor arrays | 1 output |
+
+### Predictive Maintenance (7 Nodes)
+
+| Node | Function | Output | Use Case |
+|------|----------|--------|----------|
+| **Trend Prediction** | RUL calculation | Future values, time-to-threshold | "Motor fails in 48h" |
+| **FFT Analysis** | Frequency analysis | Peaks, spectral features | Bearing fault detection |
+| **Vibration Features** | Feature extraction | RMS, Crest Factor, Kurtosis, Skewness | Comprehensive vibration analysis |
+| **Health Index** | Multi-sensor aggregation | 0-100 health score | Overall equipment status |
+| **Rate of Change** | Derivative analysis | Speed of change, acceleration | Rapid temperature rise |
+| **Peak Detection** | Impact detection | Peak events | Bearing impacts, shocks |
+| **Correlation Anomaly** | Sensor relationship | Correlation coefficient | Temp vs Power relationship |
+
+## 🤔 Which Node Should I Use?
+
+### For Anomaly Detection:
+
+**Simple Use Cases:**
+- 📊 **Hard boundaries (min/max)?** → **Threshold Anomaly**
+  - Example: Temperature must stay between 20-80°C
+  
+- 📈 **Statistical outliers?** → **Z-Score** or **IQR Anomaly**
+  - Z-Score: Best for normally distributed data
+  - IQR: More robust, works with any distribution
+
+**Trend & Drift Detection:**
+- 📉 **Slow gradual changes?** → **CUSUM Anomaly**
+  - Example: Pump flow slowly decreasing over days
+  
+- 🔄 **Moving baseline?** → **Moving Average** or **EMA Anomaly**
+  - Moving Average: Equal weight to all values in window
+  - EMA: Recent values weighted more (faster response)
+
+**Advanced Cases:**
+- 🤖 **Complex patterns, no clear rules?** → **Isolation Forest**
+  - Machine learning approach, learns automatically
+  
+- 🔢 **Extreme values only?** → **Percentile Anomaly**
+  - Example: Detect only top 5% and bottom 5%
+
+**Multiple Sensors:**
+- 🎛️ **Analyze multiple sensors together?** → **Multi-Value Anomaly**
+- 📤 **Split sensor array for separate processing?** → **Multi-Value Splitter**
+
+---
+
+### For Predictive Maintenance:
+
+**Vibration Analysis:**
+- 🌊 **Time-domain features (RMS, Crest Factor, Kurtosis)?** → **Vibration Features**
+  - Best for: Bearing condition, overall vibration health
+  
+- 📊 **Frequency analysis (FFT, harmonics)?** → **FFT Analysis**
+  - Best for: Finding specific fault frequencies (bearing, gear defects)
+  
+- 💥 **Count impacts/shocks?** → **Peak Detection**
+  - Best for: Impact counting, shock detection
+
+**Trend & Prediction:**
+- ⏱️ **Predict when threshold will be reached?** → **Trend Prediction**
+  - Calculates Remaining Useful Life (RUL)
+  - Example: "Temperature will exceed 100°C in 48 hours"
+  
+- 📈 **Measure rate of degradation?** → **Rate of Change**
+  - Detects rapid changes (acceleration)
+  - Example: "Temperature rising 5°C per hour"
+
+**Health Assessment:**
+- 💯 **Single health score from multiple sensors?** → **Health Index**
+  - Combines temperature, vibration, pressure into 0-100% score
+  
+- 🔗 **Validate sensor relationships?** → **Correlation Anomaly**
+  - Example: Check if temperature and power consumption correlate correctly
+
+---
+
+### Quick Decision Tree:
+
+```
+Do you have historical data?
+├─ NO  → Start with Threshold or Z-Score
+└─ YES → Continue below
+
+Is it vibration data?
+├─ YES → Vibration Features + FFT Analysis + Peak Detection
+└─ NO  → Continue below
+
+Single sensor or multiple?
+├─ SINGLE → Z-Score / Moving Average / CUSUM
+└─ MULTIPLE → Multi-Value Splitter + Individual Analysis → Health Index
+
+Need to predict failures?
+└─ YES → Trend Prediction + Rate of Change + Health Index
+```
+
+## 💡 Usage Examples
+
+### Simple Temperature Monitoring
+
+```
+[MQTT Sensor] → [Z-Score Anomaly] → [Normal] → [Dashboard]
+                                   → [Anomaly] → [Alarm]
+```
+
+### Motor Predictive Maintenance
+
+```
+[Sensors] → [Multi-Value Splitter] → [Z-Score]
+                                   → [Trend Prediction] → RUL Display
+                                   → [FFT Analysis] → Frequency Chart
+         → [Health Index] → Health Dashboard
+```
+
+### Bearing Vibration Analysis
+
+```
+[Vibration Sensor] → [Vibration Features] → RMS, Crest Factor, Kurtosis
+                   → [FFT Analysis] → Frequency Peaks
+                   → [Peak Detection] → Impact Counter
+                   → [IQR Anomaly] → Outlier Detection
+```
+
+## 📖 Documentation
+
+### Node-Specific Help
+Each node has comprehensive built-in documentation:
+1. Drag node to canvas
+2. Select it
+3. Click **ℹ️** in sidebar
+4. Read detailed docs with examples
+
+### Additional Documentation
+- **[examples/README.md](examples/README.md)** - Detailed guide for all 5 example flows
+- **[PAYLOAD_FORMAT.md](PAYLOAD_FORMAT.md)** - Input format specifications
+- **[MULTI_VALUE.md](MULTI_VALUE.md)** - Working with multiple sensors
+- **[DOCKER.md](DOCKER.md)** - Docker deployment guide
+
+## 🔧 Node Configuration
+
+### Example: Z-Score Anomaly
+
+```javascript
+// Input
+msg.payload = 42.5;
+
+// Output (Anomaly)
 {
   "payload": 42.5,
   "zScore": 3.2,
@@ -41,407 +249,167 @@ Erkennt Anomalien basierend auf dem Z-Score-Verfahren (Standardabweichung vom Mi
 }
 ```
 
-### 2. IQR (Interquartile Range) Anomalieerkennung
+### Example: Trend Prediction
 
-Erkennt Anomalien basierend auf dem Interquartile Range Verfahren (Box-Plot Methode).
-
-**Eigenschaften:**
-- **Multiplikator**: Faktor für die IQR-Berechnung (Standard: 1.5)
-- **Fenstergröße**: Anzahl der Werte für die Quartilberechnung (Standard: 100, mindestens 4)
-
-**Ausgaben:**
-- Ausgang 1: Normale Werte mit Metadaten (q1, q3, iqr, lowerBound, upperBound, isAnomaly)
-- Ausgang 2: Anomalien mit Metadaten
-
-**Beispiel:**
-```json
-{
-  "payload": 150.0,
-  "q1": 100.0,
-  "q3": 120.0,
-  "iqr": 20.0,
-  "lowerBound": 70.0,
-  "upperBound": 150.0,
-  "isAnomaly": true,
-  "multiplier": 1.5
-}
-```
-
-### 3. Moving Average Anomalieerkennung
-
-Erkennt Anomalien basierend auf einem gleitenden Durchschnitt.
-
-**Eigenschaften:**
-- **Fenstergröße**: Anzahl der Werte für den gleitenden Durchschnitt (Standard: 10)
-- **Methode**: 
-  - `stddev`: Standardabweichung (Standard)
-  - `percentage`: Prozentuale Abweichung
-- **Schwellenwert**: Abhängig von der gewählten Methode (Standard: 2.0)
-
-**Ausgaben:**
-- Ausgang 1: Normale Werte mit Metadaten (movingAverage, deviation, deviationPercent, isAnomaly)
-- Ausgang 2: Anomalien mit Metadaten
-
-**Beispiel:**
-```json
-{
-  "payload": 45.0,
-  "movingAverage": 35.0,
-  "deviation": 10.0,
-  "deviationPercent": 28.6,
-  "isAnomaly": true,
-  "method": "stddev",
-  "threshold": 2.0
-}
-```
-
-### 4. Isolation Forest Anomalieerkennung
-
-Erkennt Anomalien mit einem Machine-Learning-Algorithmus (Isolation Forest).
-
-**Eigenschaften:**
-- **Kontamination**: Erwarteter Anteil der Anomalien (0.0 - 0.5, Standard: 0.1)
-- **Fenstergröße**: Anzahl der Werte für das Training (Standard: 100, mindestens 10)
-
-**Ausgaben:**
-- Ausgang 1: Normale Werte mit Metadaten (isAnomaly, anomalyScore, method)
-- Ausgang 2: Anomalien mit Metadaten
-
-**Beispiel:**
-```json
-{
-  "payload": 42.5,
-  "isAnomaly": true,
-  "anomalyScore": -0.85,
-  "method": "isolation-forest",
-  "contamination": 0.1
-}
-```
-
-**Hinweis:** Erfordert das npm-Paket `ml-isolation-forest`. Falls nicht verfügbar, wird automatisch eine Z-Score Fallback-Methode verwendet.
-
-### 5. Threshold Anomalieerkennung
-
-Einfache statische Schwellenwertprüfung mit Min/Max-Grenzen.
-
-**Eigenschaften:**
-- **Minimum-Schwellenwert**: Untere Grenze (optional, leer lassen zum Deaktivieren)
-- **Maximum-Schwellenwert**: Obere Grenze (optional, leer lassen zum Deaktivieren)
-- **Inklusiv**: Wenn aktiviert, gelten Werte genau an der Grenze als Anomalien
-
-**Ausgaben:**
-- Ausgang 1: Normale Werte mit Metadaten
-- Ausgang 2: Anomalien mit Metadaten (reason, minThreshold, maxThreshold)
-
-**Beispiel:**
-```json
-{
-  "payload": 150.0,
-  "isAnomaly": true,
-  "minThreshold": 10.0,
-  "maxThreshold": 100.0,
-  "reason": "Über Maximum-Schwellenwert",
-  "method": "threshold"
-}
-```
-
-### 6. Percentile Anomalieerkennung
-
-Erkennt Anomalien basierend auf konfigurierbaren Perzentilen (ähnlich IQR, aber flexibler).
-
-**Eigenschaften:**
-- **Unteres Perzentil**: Untere Grenze in Prozent (Standard: 5.0)
-- **Oberes Perzentil**: Obere Grenze in Prozent (Standard: 95.0)
-- **Fenstergröße**: Anzahl der Werte für die Perzentilberechnung (Standard: 100)
-
-**Ausgaben:**
-- Ausgang 1: Normale Werte mit Metadaten (lowerPercentile, upperPercentile, lowerBound, upperBound)
-- Ausgang 2: Anomalien mit Metadaten
-
-**Beispiel:**
-```json
-{
-  "payload": 150.0,
-  "lowerPercentile": 5.0,
-  "upperPercentile": 95.0,
-  "lowerBound": 70.0,
-  "upperBound": 150.0,
-  "isAnomaly": true,
-  "method": "percentile"
-}
-```
-
-### 7. EMA (Exponential Moving Average) Anomalieerkennung
-
-Erkennt Anomalien basierend auf einem exponentiell gewichteten gleitenden Durchschnitt.
-
-**Eigenschaften:**
-- **Alpha**: Gewichtung für neue Werte (0.0-1.0, Standard: 0.3)
-- **Methode**: 
-  - `stddev`: Standardabweichung (Standard)
-  - `percentage`: Prozentuale Abweichung
-- **Schwellenwert**: Abhängig von der gewählten Methode (Standard: 2.0)
-
-**Ausgaben:**
-- Ausgang 1: Normale Werte mit Metadaten (ema, deviation, deviationPercent, isAnomaly)
-- Ausgang 2: Anomalien mit Metadaten
-
-**Beispiel:**
-```json
-{
-  "payload": 45.0,
-  "ema": 35.0,
-  "deviation": 10.0,
-  "deviationPercent": 28.6,
-  "isAnomaly": true,
-  "method": "ema-stddev",
-  "alpha": 0.3,
-  "threshold": 2.0
-}
-```
-
-**Vorteil:** Reagiert schneller auf Änderungen als einfacher Moving Average, da neuere Werte mehr Gewicht haben.
-
-### 8. CUSUM (Cumulative Sum) Anomalieerkennung
-
-Erkennt schrittweise Änderungen und Drifts durch Akkumulation kleiner Abweichungen.
-
-**Eigenschaften:**
-- **Zielwert**: Erwarteter Wert (optional, leer lassen für automatischen Mittelwert)
-- **Schwellenwert**: Grenze für die kumulative Summe (Standard: 5.0)
-- **Drift**: Toleranz für kleine Abweichungen (Standard: 0.5)
-- **Fenstergröße**: Anzahl der Werte für automatische Mittelwertberechnung (Standard: 100)
-
-**Ausgaben:**
-- Ausgang 1: Normale Werte mit Metadaten (target, cusumPos, cusumNeg, deviation)
-- Ausgang 2: Anomalien mit Metadaten
-
-**Beispiel:**
-```json
-{
-  "payload": 42.5,
-  "target": 35.0,
-  "cusumPos": 5.2,
-  "cusumNeg": 0.0,
-  "deviation": 7.5,
-  "isAnomaly": true,
-  "threshold": 5.0,
-  "drift": 0.5,
-  "method": "cusum"
-}
-```
-
-**Anwendung:** Besonders nützlich für die Erkennung von:
-- Schrittweisen Drifts
-- Trendänderungen
-- Kleinen, aber kontinuierlichen Abweichungen
-
-### 9. Multi-Value Splitter
-
-Teilt Payloads mit mehreren Werten (Arrays oder Objekte) auf, um sie einzeln zu verarbeiten.
-
-**Eigenschaften:**
-- **Quellfeld**: Feld mit den Werten (Standard: "payload")
-- **Ausgabemodus**: 
-  - `Sequentiell`: Sendet jeden Wert einzeln nacheinander
-  - `Parallel`: Sendet alle Werte als Array
-- **Original-Nachricht beibehalten**: Kopiert alle ursprünglichen Felder
-
-**Eingabe:**
 ```javascript
-{"payload": [35.2, 36.5, 34.8]}
-// oder
-{"payload": {"temp1": 35.2, "temp2": 36.5}}
-```
+// Input
+msg.payload = 75.2;  // Temperature
+msg.timestamp = Date.now();
 
-**Ausgabe (Sequentiell):**
-```javascript
-{"payload": 35.2, "valueIndex": 0, "valueName": "temp1", "totalValues": 2}
-{"payload": 36.5, "valueIndex": 1, "valueName": "temp2", "totalValues": 2}
-```
-
-### 10. Multi-Value Anomaly
-
-Analysiert mehrere Werte gleichzeitig auf Anomalien (jeder Wert hat einen eigenen Buffer).
-
-**Eigenschaften:**
-- **Methode**: Z-Score, IQR oder Threshold
-- **Schwellenwert**: Für Z-Score Methode
-- **Min/Max-Schwellenwert**: Für Threshold Methode
-- **Fenstergröße**: Anzahl der Werte pro Buffer
-
-**Eingabe:**
-```javascript
-{"payload": [35.2, 36.5, 45.8]}
-```
-
-**Ausgabe:**
-```javascript
+// Output
 {
-  "payload": [
-    {"valueName": "value0", "value": 35.2, "isAnomaly": false, "zScore": 1.2},
-    {"valueName": "value1", "value": 36.5, "isAnomaly": false, "zScore": 0.8},
-    {"valueName": "value2", "value": 45.8, "isAnomaly": true, "zScore": 4.2}
+  "payload": 75.2,
+  "trend": "increasing",
+  "slope": 0.5,
+  "predictedValues": [76.2, 76.7, 77.2, ...],
+  "timeToThreshold": 172800000,  // 48 hours in ms
+  "stepsToThreshold": 96
+}
+```
+
+### Example: FFT Analysis
+
+```javascript
+// Input (continuous stream at 1000 Hz)
+msg.payload = 0.45;  // Vibration amplitude
+
+// Output
+{
+  "payload": 0.45,
+  "peaks": [
+    { "frequency": 30, "magnitude": 0.5 },
+    { "frequency": 157, "magnitude": 0.3 }  // Bearing fault!
   ],
-  "hasAnomaly": true,
-  "anomalyCount": 1
+  "dominantFrequency": 30,
+  "features": {
+    "spectralCentroid": 85.2,
+    "crestFactor": 3.5,  // High = impulsive behavior
+    "rms": 0.42
+  }
 }
 ```
 
-## Payload Format
+## 🎓 Learning Path
 
-**Wichtig:** Alle Nodes erwarten einen **numerischen Wert** im `msg.payload` Feld.
+1. **Start Simple** - Import Example 3 (Process Monitoring)
+2. **Learn Basics** - Understand threshold and Z-Score detection
+3. **Advanced Methods** - Try FFT and Trend Prediction
+4. **Combine Nodes** - Build complete predictive maintenance system
 
-### Einfachste Form
-```javascript
-{
-  "payload": 42.5
-}
-```
+## 🏭 Real-World Applications
 
-Oder als String (wird automatisch konvertiert):
-```javascript
-{
-  "payload": "42.5"
-}
-```
+- **Manufacturing** - Machine health monitoring, quality control
+- **Energy** - Battery degradation, power quality monitoring
+- **Automotive** - Vehicle diagnostics, fleet management
+- **HVAC** - Climate system optimization, energy efficiency
+- **Water Treatment** - Pump monitoring, leak detection
+- **Aerospace** - Engine monitoring, structural health
+- **Medical** - Equipment monitoring, vital sign analysis
 
-### Kontinuierlicher Datenfluss
-Die Nodes sind für **kontinuierliche Zeitreihendaten** ausgelegt:
-- Jede Nachricht enthält **einen einzelnen Wert**
-- Werte kommen **nacheinander** (z.B. jede Sekunde)
-- Die Nodes verwenden ein **gleitendes Fenster** für Berechnungen
+## 🔬 Technical Details
 
-### Beispiel mit Metadaten
-Zusätzliche Felder werden in der Ausgabe beibehalten:
-```javascript
-// Eingabe
-{
-  "payload": 42.5,
-  "sensorId": "sensor-001",
-  "timestamp": 1234567890
-}
+### Statistical Methods
 
-// Ausgabe
-{
-  "payload": 42.5,
-  "zScore": 1.2,
-  "isAnomaly": false,
-  "sensorId": "sensor-001",  // ← beibehalten
-  "timestamp": 1234567890    // ← beibehalten
-}
-```
+| Method | Type | Complexity | Speed | Accuracy |
+|--------|------|------------|-------|----------|
+| Threshold | Rule-based | Low | Fast | Medium |
+| Z-Score | Statistical | Low | Fast | High |
+| IQR | Statistical | Medium | Fast | High |
+| Percentile | Statistical | Medium | Fast | High |
+| Moving Average | Trend | Low | Fast | Medium |
+| EMA | Trend | Low | Fast | Medium |
+| CUSUM | Cumulative | Medium | Fast | High |
+| Isolation Forest | ML | High | Medium | Very High |
 
-**Weitere Details:** 
-- [PAYLOAD_FORMAT.md](PAYLOAD_FORMAT.md) - Ausführliche Beispiele und Fehlerbehandlung
-- [MULTI_VALUE.md](MULTI_VALUE.md) - Umgang mit mehreren Werten in einer Payload
+### Predictive Maintenance Capabilities
 
-## Verwendung
+| Feature | Node | Output |
+|---------|------|--------|
+| RUL Estimation | Trend Prediction | Time until failure |
+| Frequency Analysis | FFT Analysis | Fault frequencies |
+| Overall Health | Health Index | 0-100 score |
+| Change Speed | Rate of Change | Derivative |
+| Impact Events | Peak Detection | Peak count |
+| Sensor Validation | Correlation | Relationship strength |
 
-1. Installieren Sie das Modul in Node-RED
-2. Ziehen Sie einen der Anomalieerkennungs-Nodes in Ihren Flow
-3. Konfigurieren Sie die Parameter entsprechend Ihren Anforderungen
-4. Verbinden Sie den Node mit einer Datenquelle (z.B. MQTT, HTTP, etc.)
-   - **Wichtig:** Stellen Sie sicher, dass `msg.payload` einen numerischen Wert enthält
-   - Falls Ihre Daten ein Objekt sind, verwenden Sie einen Function Node, um den Wert zu extrahieren:
-     ```javascript
-     msg.payload = msg.payload.value; // oder msg.payload.temperature, etc.
-     return msg;
-     ```
-5. Die Nodes haben zwei Ausgänge:
-   - Ausgang 1 (oben): Normale Werte
-   - Ausgang 2 (unten): Anomalien
+## 🛠️ Development
 
-## Beispiel-Flow
-
-```
-[inject] -> [Z-Score Anomalie] -> [switch] -> [debug normal]
-                              -> [debug anomalie]
-```
-
-## Abhängigkeiten
-
-- `ml-isolation-forest`: Für Isolation Forest Anomalieerkennung (optional)
-- `simple-statistics`: Für erweiterte statistische Funktionen (optional)
-
-## Entwicklung
-
-### Mit Docker Compose (Empfohlen)
-
-Das einfachste Setup für die Entwicklung:
+### Run with Docker
 
 ```bash
-# Repository klonen
-git clone <repository-url>
-cd node-red-contrib-condition-monitoring
+# Development mode (with hot-reload)
+docker-compose -f docker-compose.dev.yml up
 
-# Mit Docker Compose starten (Entwicklungsmodus)
-docker-compose -f docker-compose.dev.yml up --build
-
-# Node-RED ist jetzt verfügbar unter:
-# http://localhost:1880
+# Production mode
+docker-compose up
 ```
 
-**Vorteile:**
-- Automatisches Hot-Reload: Änderungen an den Nodes werden automatisch erkannt
-- Isoliertes Environment
-- Keine lokale Node-RED Installation nötig
-- Node-RED Daten werden in `./node-red-data` gespeichert
-
-**Stoppen:**
-```bash
-docker-compose -f docker-compose.dev.yml down
-```
-
-**Logs anzeigen:**
-```bash
-docker-compose -f docker-compose.dev.yml logs -f
-```
-
-### Lokale Entwicklung
+### Local Development
 
 ```bash
-# Repository klonen
-git clone <repository-url>
-cd node-red-contrib-condition-monitoring
-
-# Abhängigkeiten installieren
+# Install dependencies
 npm install
 
-# In Node-RED entwickeln
-# Option 1: npm link verwenden
+# Link to Node-RED
 npm link
 cd ~/.node-red
 npm link node-red-contrib-condition-monitoring
 
-# Option 2: Manuell kopieren
-# Kopieren Sie den Ordner nach ~/.node-red/node_modules/node-red-contrib-condition-monitoring
+# Restart Node-RED
+node-red-restart
 ```
 
-### Docker Compose Optionen
+## 📚 Dependencies
 
-**Produktionsmodus:**
-```bash
-docker-compose up --build
-```
+### Required
+- Node-RED >= 1.0.0
+- Node.js >= 14.0.0
 
-**Entwicklungsmodus (mit Hot-Reload):**
-```bash
-docker-compose -f docker-compose.dev.yml up --build
-```
+### Optional
+- `ml-isolation-forest` - For Isolation Forest node (falls back to Z-Score if not available)
+- `simple-statistics` - For advanced statistical functions
 
-Im Entwicklungsmodus wird das gesamte Projekt als Volume gemountet, sodass Änderungen sofort sichtbar sind.
+## 🤝 Contributing
 
-**Weitere Informationen:** Siehe [DOCKER.md](DOCKER.md) für detaillierte Docker-Dokumentation.
+Contributions are welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Add tests if applicable
+4. Submit a pull request
 
-## Lizenz
+## 📄 License
 
-MIT License - siehe LICENSE Datei für Details.
+MIT License - see [LICENSE](LICENSE) file for details.
 
-## Autor
+## 👨‍💻 Author
 
-blanpa
+**blanpa**
 
-## Beitragen
+## 🐛 Issues & Support
 
-Beiträge sind willkommen! Bitte erstellen Sie einen Pull Request oder öffnen Sie ein Issue für Vorschläge oder Fehler.
+- **Bug Reports:** Open an issue on GitHub
+- **Questions:** Check `/examples/README.md` first
+- **Feature Requests:** Submit via GitHub issues
+
+## 📈 Roadmap
+
+- [ ] Dashboard UI components
+- [ ] Export/import of trained models
+- [ ] MQTT examples
+- [ ] Real-time charting integration
+- [ ] More ML algorithms (LSTM, Prophet)
+- [ ] Automated reporting
+
+## ⭐ Show Your Support
+
+If you find this useful, please consider:
+- ⭐ Starring the repository
+- 📦 Sharing with others
+- 🐛 Reporting bugs
+- 💡 Suggesting features
+
+---
+
+**Made with ❤️ for the Node-RED community**
+
+**Get Started:** Import an example flow and start monitoring in minutes!

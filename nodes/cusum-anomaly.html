@@ -1,7 +1,7 @@
 <script type="text/javascript">
     RED.nodes.registerType('cusum-anomaly', {
-        category: 'condition-monitoring',
-        color: '#E6E0F8',
+        category: 'anomaly detection',
+        color: '#FDD835',
         defaults: {
             name: { value: "" },
             target: { value: "", validate: function(v) { return v === "" || !isNaN(v); } },
@@ -11,9 +11,9 @@
         },
         inputs: 1,
         outputs: 2,
-        icon: "chart-line.png",
+        icon: "icon-anomaly-detection.png",
         label: function() {
-            return this.name || "CUSUM Anomalie";
+            return this.name || "CUSUM Anomaly";
         },
         labelStyle: function() {
             return this.name ? "node_label_italic" : "";
@@ -31,52 +31,52 @@
         <input type="text" id="node-input-name" placeholder="Name">
     </div>
     <div class="form-row">
-        <label for="node-input-target"><i class="fa fa-bullseye"></i> Zielwert (leer lassen für automatischen Mittelwert)</label>
+        <label for="node-input-target"><i class="fa fa-bullseye"></i> Target Value (leave empty for automatic mean)</label>
         <input type="number" id="node-input-target" placeholder="" step="any">
     </div>
     <div class="form-row">
-        <label for="node-input-threshold"><i class="fa fa-sliders"></i> Schwellenwert</label>
+        <label for="node-input-threshold"><i class="fa fa-sliders"></i> Threshold</label>
         <input type="number" id="node-input-threshold" placeholder="5.0" step="0.1" min="0">
     </div>
     <div class="form-row">
-        <label for="node-input-drift"><i class="fa fa-sliders"></i> Drift (Toleranz für kleine Abweichungen)</label>
+        <label for="node-input-drift"><i class="fa fa-sliders"></i> Drift (tolerance for small deviations)</label>
         <input type="number" id="node-input-drift" placeholder="0.5" step="0.1" min="0">
     </div>
     <div class="form-row">
-        <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Fenstergröße (für automatischen Mittelwert)</label>
+        <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Window Size (for automatic mean)</label>
         <input type="number" id="node-input-windowSize" placeholder="100" min="2">
     </div>
 </script>
 
 <script type="text/html" data-help-name="cusum-anomaly">
-    <p>Erkennt Anomalien basierend auf CUSUM (Cumulative Sum) - ideal für schrittweise Änderungen.</p>
-    <h3>Eingaben</h3>
+    <p>Detects anomalies based on CUSUM (Cumulative Sum) - ideal for gradual changes.</p>
+    <h3>Inputs</h3>
     <dl class="message-properties">
         <dt>payload <span class="property-type">number</span></dt>
-        <dd>Der numerische Wert, der auf Anomalien geprüft werden soll.</dd>
+        <dd>The numeric value to be checked for anomalies.</dd>
     </dl>
-    <h3>Ausgaben</h3>
+    <h3>Outputs</h3>
     <dl class="message-properties">
-        <dt>Ausgang 1 (oben)</dt>
-        <dd>Normale Werte mit zusätzlichen Metadaten (target, cusumPos, cusumNeg, deviation)</dd>
-        <dt>Ausgang 2 (unten)</dt>
-        <dd>Anomalien mit zusätzlichen Metadaten</dd>
+        <dt>Output 1 (top)</dt>
+        <dd>Normal values with additional metadata (target, cusumPos, cusumNeg, deviation)</dd>
+        <dt>Output 2 (bottom)</dt>
+        <dd>Anomalies with additional metadata</dd>
     </dl>
     <h3>Details</h3>
-    <p>CUSUM akkumuliert kleine Abweichungen über die Zeit und erkennt schrittweise Änderungen, 
-    die einzeln zu klein wären, um als Anomalien erkannt zu werden.</p>
-    <p><b>Parameter:</b></p>
+    <p>CUSUM accumulates small deviations over time and detects gradual changes 
+    that individually would be too small to be recognized as anomalies.</p>
+    <p><b>Parameters:</b></p>
     <ul>
-        <li><b>Zielwert:</b> Erwarteter Wert (leer lassen für automatischen Mittelwert aus Fenster)</li>
-        <li><b>Schwellenwert:</b> Grenze für die kumulative Summe (Standard: 5.0)</li>
-        <li><b>Drift:</b> Toleranz für kleine Abweichungen, die ignoriert werden (Standard: 0.5)</li>
-        <li><b>Fenstergröße:</b> Anzahl der Werte für automatische Mittelwertberechnung</li>
+        <li><b>Target Value:</b> Expected value (leave empty for automatic mean from window)</li>
+        <li><b>Threshold:</b> Limit for the cumulative sum (default: 5.0)</li>
+        <li><b>Drift:</b> Tolerance for small deviations to be ignored (default: 0.5)</li>
+        <li><b>Window Size:</b> Number of values for automatic mean calculation</li>
     </ul>
-    <p><b>Anwendung:</b> Besonders nützlich für die Erkennung von:
+    <p><b>Use Cases:</b> Particularly useful for detecting:
     <ul>
-        <li>Schrittweisen Drifts</li>
-        <li>Trendänderungen</li>
-        <li>Kleinen, aber kontinuierlichen Abweichungen</li>
+        <li>Gradual drifts</li>
+        <li>Trend changes</li>
+        <li>Small but continuous deviations</li>
     </ul>
     </p>
 </script>

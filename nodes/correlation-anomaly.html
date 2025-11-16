@@ -1,0 +1,130 @@
+<script type="text/javascript">
+    RED.nodes.registerType('correlation-anomaly', {
+        category: 'predictive maintenance',
+        color: '#FDD835',
+        defaults: {
+            name: { value: "" },
+            sensor1: { value: "sensor1" },
+            sensor2: { value: "sensor2" },
+            threshold: { value: 0.7, validate: RED.validators.number() },
+            windowSize: { value: 30, validate: RED.validators.number() },
+            method: { value: "pearson" }
+        },
+        inputs: 1,
+        outputs: 2,
+        icon: "icon-predictive-maintanance.png",
+        label: function() {
+            return this.name || "Correlation Anomaly";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        outputLabels: ["normal correlation", "anomalous correlation"],
+        oneditprepare: function() {
+        },
+        oneditsave: function() {
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="correlation-anomaly">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-sensor1"><i class="fa fa-random"></i> Sensor 1 Field Name</label>
+        <input type="text" id="node-input-sensor1" placeholder="sensor1">
+    </div>
+    <div class="form-row">
+        <label for="node-input-sensor2"><i class="fa fa-random"></i> Sensor 2 Field Name</label>
+        <input type="text" id="node-input-sensor2" placeholder="sensor2">
+    </div>
+    <div class="form-row">
+        <label for="node-input-method"><i class="fa fa-cog"></i> Correlation Method</label>
+        <select id="node-input-method">
+            <option value="pearson">Pearson (Linear)</option>
+            <option value="spearman">Spearman (Rank-based)</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-threshold"><i class="fa fa-sliders"></i> Correlation Threshold</label>
+        <input type="number" id="node-input-threshold" placeholder="0.7" step="0.01" min="-1" max="1">
+    </div>
+    <div class="form-row">
+        <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Window Size</label>
+        <input type="number" id="node-input-windowSize" placeholder="30" min="3">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="correlation-anomaly">
+    <p>Detects anomalies by analyzing the correlation between two sensors. Normal equipment shows consistent relationships between sensors.</p>
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">object</span></dt>
+        <dd>Object containing both sensor values</dd>
+    </dl>
+    <p><b>Example input:</b></p>
+    <pre>{"temp": 75.2, "vibration": 0.5, "pressure": 120}</pre>
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>Output 1 (top)</dt>
+        <dd>Normal correlation (sensors behaving as expected)</dd>
+        <dt>Output 2 (bottom)</dt>
+        <dd>Anomalous correlation (relationship broken)</dd>
+    </dl>
+    <p><b>Output properties:</b></p>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">object</span></dt>
+        <dd>Original sensor data</dd>
+        <dt>correlation <span class="property-type">number</span></dt>
+        <dd>Correlation coefficient (-1 to +1)</dd>
+        <dt>isAnomalous <span class="property-type">boolean</span></dt>
+        <dd>True if correlation below threshold</dd>
+        <dt>stats <span class="property-type">object</span></dt>
+        <dd>Additional statistics (means, buffer size)</dd>
+    </dl>
+    <h3>Details</h3>
+    <p>Correlation analysis detects when the normal relationship between sensors breaks down, 
+    which often indicates equipment malfunction even if individual sensor readings are within normal ranges.</p>
+    <p><b>Correlation Methods:</b></p>
+    <ul>
+        <li><b>Pearson:</b> Measures linear relationship (-1 to +1)
+            <ul>
+                <li>+1 = perfect positive correlation</li>
+                <li>0 = no correlation</li>
+                <li>-1 = perfect negative correlation</li>
+            </ul>
+        </li>
+        <li><b>Spearman:</b> Measures monotonic relationship (rank-based, robust to outliers)</li>
+    </ul>
+    <p><b>Parameters:</b></p>
+    <ul>
+        <li><b>Sensor 1/2 Field Names:</b> Object keys for the two sensors to correlate</li>
+        <li><b>Correlation Threshold:</b> Minimum correlation considered normal (default: 0.7)</li>
+        <li><b>Window Size:</b> Number of samples for correlation calculation (larger = more stable)</li>
+    </ul>
+    <p><b>Use Cases:</b></p>
+    <ul>
+        <li><b>Temperature vs Power:</b> Motor temperature should correlate with power draw</li>
+        <li><b>Flow vs Pressure:</b> Pump flow rate should correlate with outlet pressure</li>
+        <li><b>Vibration vs Load:</b> Vibration increases with mechanical load</li>
+        <li><b>Speed vs Temperature:</b> Higher speed = higher temperature</li>
+        <li><b>Multi-Sensor Validation:</b> Redundant sensors should match</li>
+    </ul>
+    <p><b>Example Scenarios:</b></p>
+    <ul>
+        <li><b>Bearing Failure:</b> Temperature rises but vibration doesn't follow normal pattern</li>
+        <li><b>Sensor Fault:</b> One sensor drifts, breaking correlation with others</li>
+        <li><b>Process Change:</b> Normal relationships shift due to equipment degradation</li>
+        <li><b>Blockage:</b> Flow drops but pressure doesn't drop proportionally</li>
+    </ul>
+    <p><b>Threshold Selection:</b></p>
+    <ul>
+        <li>0.9-1.0: Very strong correlation expected</li>
+        <li>0.7-0.9: Strong correlation (default)</li>
+        <li>0.5-0.7: Moderate correlation</li>
+        <li>Lower thresholds mean more tolerance for variation</li>
+    </ul>
+</script>
+
