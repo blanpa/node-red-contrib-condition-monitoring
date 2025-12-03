@@ -5,11 +5,11 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 [![npm version](https://img.shields.io/npm/v/node-red-contrib-condition-monitoring.svg)](https://www.npmjs.com/package/node-red-contrib-condition-monitoring)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Beta](https://img.shields.io/badge/Status-Beta-orange.svg)](CHANGELOG.md)
-[![Version](https://img.shields.io/badge/Version-0.1.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg)](CHANGELOG.md)
 
 ---
 
-## 🚧 Project Status: BETA (v0.1.0)
+## 🚧 Project Status: BETA (v0.1.1)
 
 **⚠️ This is the first public release - currently in beta testing.**
 

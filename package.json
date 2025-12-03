@@ -1,11 +1,12 @@
 {
   "name": "node-red-contrib-condition-monitoring",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Node-RED Nodes for anomaly detection, predictive maintenance, and time series analysis",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "node-red": {
+    "version": ">=2.0.0",
     "nodes": {
       "zscore-anomaly": "nodes/zscore-anomaly.js",
       "iqr-anomaly": "nodes/iqr-anomaly.js",
@@ -63,7 +64,7 @@
   },
   "homepage": "https://github.com/blanpa/node-red-contrib-condition-monitoring#readme",
   "dependencies": {
-    "ml-isolation-forest": "^0.0.4",
+    "ml-isolation-forest": "^0.1.0",
     "simple-statistics": "^7.8.2"
   },
   "devDependencies": {},

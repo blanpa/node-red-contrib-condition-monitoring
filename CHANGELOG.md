@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.1] - 2025-12-03 - Bug Fix Release
+
+### 🐛 Fixed
+
+- **Dependency Update**: Updated `ml-isolation-forest` from `^0.0.4` to `^0.1.0` to fix installation errors
+  - Version 0.0.4 is no longer available on npm registry
+  - Resolves `npm error code ETARGET` during installation
+- **API Compatibility**: Updated Isolation Forest Anomaly node to work with new API
+  - Changed from binary prediction (-1/1) to score-based detection
+  - Implemented dynamic threshold calculation based on contamination parameter
+  - Improved anomaly detection accuracy with adaptive scoring
+
+### 📦 Dependencies
+
+- `ml-isolation-forest`: `^0.0.4` → `^0.1.0`
+- `simple-statistics`: `^7.8.2` (unchanged)
+
+### ✅ Testing
+
+- Verified npm installation works correctly
+- Confirmed API compatibility with ml-isolation-forest 0.1.0
+- Tested Isolation Forest node functionality
+
+---
+
 ## [0.1.0] - 2024-11-16 - INITIAL BETA RELEASE
 
 ### 🎉 First Public Release

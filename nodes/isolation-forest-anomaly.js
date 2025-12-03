@@ -16,8 +16,10 @@ module.exports = function(RED) {
         this.contamination = parseFloat(config.contamination) || 0.1;
         this.windowSize = parseInt(config.windowSize) || 100;
         this.dataBuffer = [];
+        this.scoreBuffer = []; // Store prediction scores for threshold calculation
         this.model = null;
         this.isTrained = false;
+        this.anomalyThreshold = 0.5; // Default threshold, will be updated dynamically
         
         function trainModel() {
             if (!IsolationForest || node.dataBuffer.length < 10) {
@@ -47,6 +49,14 @@ module.exports = function(RED) {
                 
                 node.model.train(trainingData);
                 node.isTrained = true;
+                
+                // Calculate threshold based on training data scores
+                var trainingScores = trainingData.map(function(features) {
+                    return node.model.predict([features])[0];
+                });
+                trainingScores.sort(function(a, b) { return b - a; }); // Sort descending
+                var thresholdIndex = Math.floor(trainingScores.length * node.contamination);
+                node.anomalyThreshold = thresholdIndex > 0 ? trainingScores[thresholdIndex] : trainingScores[0] || 0.5;
                 
             } catch (err) {
                 node.error("Error training Isolation Forest: " + err.message);
@@ -119,10 +129,23 @@ module.exports = function(RED) {
                 var features = [value, value - prevValue, currentIndex];
                 
                 var prediction = node.model.predict([features]);
-                var isAnomaly = prediction[0] === -1; // -1 = anomaly, 1 = normal
+                var score = prediction[0]; // Score: higher values indicate anomalies
                 
-                // Calculate score (approximation, as decisionFunction is not available)
-                var score = isAnomaly ? -0.5 : 0.5;
+                // Add score to buffer for dynamic threshold updates
+                node.scoreBuffer.push(score);
+                if (node.scoreBuffer.length > node.windowSize) {
+                    node.scoreBuffer.shift();
+                }
+                
+                // Update threshold dynamically based on recent scores
+                if (node.scoreBuffer.length >= 10) {
+                    var sortedScores = node.scoreBuffer.slice().sort(function(a, b) { return b - a; });
+                    var thresholdIndex = Math.floor(sortedScores.length * node.contamination);
+                    node.anomalyThreshold = thresholdIndex > 0 ? sortedScores[thresholdIndex] : sortedScores[0] || 0.5;
+                }
+                
+                // Higher scores indicate anomalies (points that are easier to isolate)
+                var isAnomaly = score >= node.anomalyThreshold;
                 
                 // Create output message
                 var outputMsg = {
@@ -156,6 +179,7 @@ module.exports = function(RED) {
         
         node.on('close', function() {
             node.dataBuffer = [];
+            node.scoreBuffer = [];
             node.model = null;
             node.isTrained = false;
         });
