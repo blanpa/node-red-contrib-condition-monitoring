@@ -262,12 +262,7 @@ After importing examples:
    - Detailed explanation of each example
    - Learn use cases and patterns
 
-3. **Check Node Coverage**
-   - See `NODE_COVERAGE.md`
-   - Understand which nodes are where
-   - Learn node combinations
-
-4. **Build Your Own**
+3. **Build Your Own**
    - Start with example as template
    - Replace simulator with real data
    - Add your own logic
@@ -319,7 +314,6 @@ Node-RED Interface:
 
 - **Main README:** `../README.md` - Overview
 - **Examples README:** `./README.md` - Detailed examples
-- **Node Coverage:** `../NODE_COVERAGE.md` - All nodes
 - **Payload Format:** `../PAYLOAD_FORMAT.md` - Data format
 - **Docker Guide:** `../DOCKER.md` - Deployment
 

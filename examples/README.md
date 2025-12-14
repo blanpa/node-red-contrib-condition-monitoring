@@ -2,21 +2,21 @@
 
 This directory contains ready-to-use example flows demonstrating all nodes in the condition monitoring package.
 
-## 📋 Overview of Examples
+## Overview of Examples
 
 | Example | Nodes Used | Use Case | Complexity |
 |---------|-----------|----------|------------|
-| **Example 1** | Z-Score, Trend Prediction, Health Index, Rate of Change, Correlation, Multi-Value Splitter | Motor Monitoring | ⭐⭐⭐ |
-| **Example 2** | FFT Analysis, Peak Detection, IQR, Moving Average | Bearing Vibration Analysis | ⭐⭐⭐⭐ |
-| **Example 3** | Threshold, Percentile, EMA, CUSUM, Multi-Value Anomaly | Process Monitoring (Pump) | ⭐⭐ |
-| **Example 4** | Isolation Forest | ML Anomaly Detection | ⭐⭐ |
-| **Example 5** | Vibration Features | Comprehensive Feature Extraction | ⭐⭐ |
+| **Example 1** | Z-Score, Trend Prediction, Health Index, Rate of Change, Correlation, Multi-Value Splitter | Motor Monitoring | Medium |
+| **Example 2** | FFT Analysis, Peak Detection, IQR, Moving Average | Bearing Vibration Analysis | High |
+| **Example 3** | Threshold, Percentile, EMA, CUSUM, Multi-Value Anomaly | Process Monitoring (Pump) | Low |
+| **Example 4** | Isolation Forest | ML Anomaly Detection | Low |
+| **Example 5** | Vibration Features | Comprehensive Feature Extraction | Low |
 
-## 🚀 How to Import
+## How to Import
 
 ### Method 1: Via Node-RED UI
 1. Open Node-RED in your browser: `http://localhost:1880`
-2. Click the menu (☰) → Import
+2. Click the menu → Import
 3. Select the JSON file or paste its contents
 4. Click "Import"
 
@@ -26,7 +26,7 @@ This directory contains ready-to-use example flows demonstrating all nodes in th
 cp example-1-motor-monitoring.json ~/.node-red/flows/
 ```
 
-## 📊 Example 1: Motor Monitoring
+## Example 1: Motor Monitoring
 
 **File:** `example-1-motor-monitoring.json`
 
@@ -38,12 +38,12 @@ cp example-1-motor-monitoring.json ~/.node-red/flows/
 - Detects rapid changes and correlation breakdowns
 
 ### Nodes Used:
-- ✅ **Z-Score Anomaly** (3x) - Individual sensor anomaly detection
-- ✅ **Trend Prediction** - RUL calculation for temperature
-- ✅ **Rate of Change** - Detects rapid temperature changes
-- ✅ **Health Index** - Overall motor health (0-100)
-- ✅ **Correlation Anomaly** - Temperature vs Power relationship
-- ✅ **Multi-Value Splitter** - Splits sensor data for parallel processing
+- **Z-Score Anomaly** (3x) - Individual sensor anomaly detection
+- **Trend Prediction** - RUL calculation for temperature
+- **Rate of Change** - Detects rapid temperature changes
+- **Health Index** - Overall motor health (0-100)
+- **Correlation Anomaly** - Temperature vs Power relationship
+- **Multi-Value Splitter** - Splits sensor data for parallel processing
 
 ### What to Watch For:
 1. As the motor degrades, temperature rises gradually
@@ -61,7 +61,7 @@ Correlation: 0.95 → 0.82 → 0.65 (broken!)
 
 ---
 
-## 🔊 Example 2: Bearing Vibration Analysis
+## Example 2: Bearing Vibration Analysis
 
 **File:** `example-2-bearing-vibration-analysis.json`
 
@@ -72,10 +72,10 @@ Correlation: 0.95 → 0.82 → 0.65 (broken!)
 - Uses multiple statistical methods
 
 ### Nodes Used:
-- ✅ **FFT Analysis** - Frequency domain analysis (157 Hz bearing fault)
-- ✅ **Peak Detection** - Impact event detection
-- ✅ **IQR Anomaly** - Robust outlier detection
-- ✅ **Moving Average Anomaly** - Trend-based detection
+- **FFT Analysis** - Frequency domain analysis (157 Hz bearing fault)
+- **Peak Detection** - Impact event detection
+- **IQR Anomaly** - Robust outlier detection
+- **Moving Average Anomaly** - Trend-based detection
 
 ### What to Watch For:
 1. **FFT Analysis** shows increasing peak at ~157 Hz (bearing fault frequency)
@@ -97,7 +97,7 @@ Crest Factor: 2.5 → 3.2 → 4.5 (indicates fault)
 
 ---
 
-## 💧 Example 3: Process Monitoring (Pump System)
+## Example 3: Process Monitoring (Pump System)
 
 **File:** `example-3-process-monitoring.json`
 
@@ -108,11 +108,11 @@ Crest Factor: 2.5 → 3.2 → 4.5 (indicates fault)
 - Uses complementary detection methods
 
 ### Nodes Used:
-- ✅ **Multi-Value Anomaly** - Analyzes all sensors together
-- ✅ **Threshold Anomaly** - Hard limits for flow rate
-- ✅ **CUSUM Anomaly** - Detects slow drift in flow
-- ✅ **Percentile Anomaly** - Extreme pressure detection
-- ✅ **EMA Anomaly** - Fast temperature spike detection
+- **Multi-Value Anomaly** - Analyzes all sensors together
+- **Threshold Anomaly** - Hard limits for flow rate
+- **CUSUM Anomaly** - Detects slow drift in flow
+- **Percentile Anomaly** - Extreme pressure detection
+- **EMA Anomaly** - Fast temperature spike detection
 
 ### What to Watch For:
 1. Flow rate gradually decreases (leak simulation)
@@ -130,7 +130,7 @@ Threshold: Triggered when flow < 80
 
 ---
 
-## 🤖 Example 4: Machine Learning Anomaly Detection
+## Example 4: Machine Learning Anomaly Detection
 
 **File:** `example-4-isolation-forest-ml.json`
 
@@ -141,7 +141,7 @@ Threshold: Triggered when flow < 80
 - No threshold tuning required
 
 ### Nodes Used:
-- ✅ **Isolation Forest Anomaly** - ML-based detection
+- **Isolation Forest Anomaly** - ML-based detection
 
 ### What to Watch For:
 1. System operates in 3 different modes (low/medium/high power)
@@ -158,40 +158,40 @@ Anomaly Score: Normal = 0.4, Anomaly = 0.8+
 ```
 
 ### Advantages:
-- ✅ No threshold tuning needed
-- ✅ Handles multi-modal data
-- ✅ Adapts to changing patterns
-- ✅ Works with complex relationships
+- No threshold tuning needed
+- Handles multi-modal data
+- Adapts to changing patterns
+- Works with complex relationships
 
 ---
 
-## 📈 Node Coverage Summary
+## Node Coverage Summary
 
 ### All 16 Nodes Demonstrated:
 
 #### Anomaly Detection (10 nodes):
-1. ✅ **Z-Score** - Example 1
-2. ✅ **IQR** - Example 2
-3. ✅ **Moving Average** - Example 2
-4. ✅ **Isolation Forest** - Example 4
-5. ✅ **Threshold** - Example 3
-6. ✅ **Percentile** - Example 3
-7. ✅ **EMA** - Example 3
-8. ✅ **CUSUM** - Example 3
-9. ✅ **Multi-Value Anomaly** - Example 3
-10. ✅ **Multi-Value Splitter** - Example 1
+1. **Z-Score** - Example 1
+2. **IQR** - Example 2
+3. **Moving Average** - Example 2
+4. **Isolation Forest** - Example 4
+5. **Threshold** - Example 3
+6. **Percentile** - Example 3
+7. **EMA** - Example 3
+8. **CUSUM** - Example 3
+9. **Multi-Value Anomaly** - Example 3
+10. **Multi-Value Splitter** - Example 1
 
 #### Predictive Maintenance (6 nodes):
-11. ✅ **Trend Prediction** - Example 1
-12. ✅ **FFT Analysis** - Example 2
-13. ✅ **Health Index** - Example 1
-14. ✅ **Rate of Change** - Example 1
-15. ✅ **Peak Detection** - Example 2
-16. ✅ **Correlation Anomaly** - Example 1
+11. **Trend Prediction** - Example 1
+12. **FFT Analysis** - Example 2
+13. **Health Index** - Example 1
+14. **Rate of Change** - Example 1
+15. **Peak Detection** - Example 2
+16. **Correlation Anomaly** - Example 1
 
 ---
 
-## 🎯 Tips for Using Examples
+## Tips for Using Examples
 
 ### 1. Start Simple
 Begin with **Example 3** (Process Monitoring) - it's the easiest to understand.
@@ -229,7 +229,7 @@ msg.payload = {
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### Issue: Nodes not showing up
 **Solution:** Restart Node-RED
@@ -255,13 +255,13 @@ npm install ml-isolation-forest
 
 ---
 
-## 📚 Learn More
+## Learn More
 
 ### Node Documentation
 Each node has built-in help:
 1. Drag node to canvas
 2. Select it
-3. Click "ℹ️" button in sidebar
+3. Click "Info" button in sidebar
 4. Read detailed documentation
 
 ### Combine Examples
@@ -272,7 +272,7 @@ Mix and match nodes from different examples:
 
 ---
 
-## 🎓 Next Steps
+## Next Steps
 
 1. **Import all examples** to see different approaches
 2. **Run them** and watch the debug output
@@ -283,7 +283,7 @@ Mix and match nodes from different examples:
 
 ---
 
-## 📊 Example 5: Vibration Feature Extraction
+## Example 5: Vibration Feature Extraction
 
 **File:** `example-5-vibration-feature-extraction.json`
 
@@ -295,7 +295,7 @@ Mix and match nodes from different examples:
 - Shows feature interpretation for fault diagnosis
 
 ### Nodes Used:
-- ✅ **Vibration Features** (2x) - All-in-one mode and separate outputs mode
+- **Vibration Features** (2x) - All-in-one mode and separate outputs mode
 
 ### What to Watch For:
 1. **First 10 seconds:** Normal operation
@@ -322,37 +322,37 @@ Mix and match nodes from different examples:
 - **Health Score:** Simplified 0-100% condition indicator
 
 ### Use Cases:
-- 🔩 Bearing condition monitoring
-- ⚙️ Gearbox fault detection
-- 🔄 Motor imbalance detection
-- 📊 Feature trending for predictive maintenance
-- 🤖 ML model input preparation
+- Bearing condition monitoring
+- Gearbox fault detection
+- Motor imbalance detection
+- Feature trending for predictive maintenance
+- ML model input preparation
 
 ---
 
-## 💡 Real-World Applications
+## Real-World Applications
 
 These examples can be adapted for:
 
-- 🏭 **Manufacturing:** Machine health monitoring
-- 🔋 **Energy:** Battery degradation prediction
-- 🚗 **Automotive:** Vehicle diagnostics
-- 🏥 **Healthcare:** Medical equipment monitoring
-- 🌡️ **HVAC:** Climate system optimization
-- 💧 **Water Treatment:** Pump and valve monitoring
-- ⚡ **Electrical:** Power quality monitoring
+- **Manufacturing:** Machine health monitoring
+- **Energy:** Battery degradation prediction
+- **Automotive:** Vehicle diagnostics
+- **Healthcare:** Medical equipment monitoring
+- **HVAC:** Climate system optimization
+- **Water Treatment:** Pump and valve monitoring
+- **Electrical:** Power quality monitoring
 
 ---
 
-## 📞 Support
+## Support
 
 For questions or issues:
-1. Check node documentation (ℹ️ icon)
+1. Check node documentation (Info icon)
 2. Review this README
 3. Examine example flows
 4. Check Node-RED logs: `docker logs node-red-condition-monitoring`
 
 ---
 
-**Happy Monitoring! 🎉**
+**Happy Monitoring!**
 

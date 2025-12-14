@@ -9,32 +9,32 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## 🚧 Project Status: BETA (v0.1.1)
+## Project Status: BETA (v0.1.1)
 
-**⚠️ This is the first public release - currently in beta testing.**
+**This is the first public release - currently in beta testing.**
 
-- 🎉 **First Release:** All core features are implemented and functional
-- 🧪 **Beta Phase:** Undergoing real-world validation and testing
-- 📊 **Feedback Welcome:** Please report issues and share your experience
-- 🔄 **API May Change:** Breaking changes possible before v1.0 stable release
-- ✅ **Production Use:** Use with caution and proper testing in your environment
-- 🎯 **Goal:** Reach v1.0.0 stable after community feedback and validation
+- **First Release:** All core features are implemented and functional
+- **Beta Phase:** Undergoing real-world validation and testing
+- **Feedback Welcome:** Please report issues and share your experience
+- **API May Change:** Breaking changes possible before v1.0 stable release
+- **Production Use:** Use with caution and proper testing in your environment
+- **Goal:** Reach v1.0.0 stable after community feedback and validation
 
 ---
 
-## ⚠️ Important Disclaimer
+## Important Disclaimer
 
 **This software is provided for condition monitoring and predictive maintenance purposes.**
 
-- ❌ **NOT** a replacement for safety-critical systems
-- ❌ **NOT** suitable as the sole means of safety decision-making
-- ✅ **Should** be used as an additional monitoring layer
-- ✅ **Always** validate results with domain experts
-- ✅ **Follow** proper safety protocols and regulations for your industry
+- **NOT** a replacement for safety-critical systems
+- **NOT** suitable as the sole means of safety decision-making
+- **Should** be used as an additional monitoring layer
+- **Always** validate results with domain experts
+- **Follow** proper safety protocols and regulations for your industry
 
 **Use at your own risk. See LICENSE file for full legal terms.**
 
-## 🎯 Features
+## Features
 
 - **10 Anomaly Detection Methods** - Z-Score, IQR, Moving Average, Isolation Forest, Threshold, Percentile, EMA, CUSUM, Multi-Value
 - **7 Predictive Maintenance Nodes** - Trend Prediction (RUL), FFT Analysis, Vibration Features, Health Index, Rate of Change, Peak Detection, Correlation Analysis
@@ -42,7 +42,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 - **Ready-to-Use Examples** - 5 complete example flows in `/examples` directory
 - **Fully Documented** - Built-in help for every node
 
-## 📦 Installation
+## Installation
 
 ```bash
 npm install node-red-contrib-condition-monitoring
@@ -54,7 +54,7 @@ Or install directly from Node-RED:
 3. Search for `node-red-contrib-condition-monitoring`
 4. Click install
 
-## 🚀 Quick Start
+## Quick Start
 
 ### With Docker Compose (Recommended)
 
@@ -68,16 +68,16 @@ docker-compose up -d
 ### Import Example Flows
 
 1. Open Node-RED: `http://localhost:1880`
-2. Menu (☰) → Import → Examples
+2. Menu → Import → Examples
 3. Select one of the 4 example flows:
    - **Example 1:** Motor Monitoring (Z-Score, Trend Prediction, Health Index, Correlation)
    - **Example 2:** Bearing Vibration Analysis (FFT, Peak Detection, IQR)
    - **Example 3:** Process Monitoring (Threshold, CUSUM, EMA, Percentile)
    - **Example 4:** ML Anomaly Detection (Isolation Forest)
 
-📖 **See `/examples/README.md` for detailed documentation of all examples.**
+**See `/examples/README.md` for detailed documentation of all examples.**
 
-## 📊 Available Nodes
+## Available Nodes
 
 ### Anomaly Detection (10 Nodes)
 
@@ -106,65 +106,65 @@ docker-compose up -d
 | **Peak Detection** | Impact detection | Peak events | Bearing impacts, shocks |
 | **Correlation Anomaly** | Sensor relationship | Correlation coefficient | Temp vs Power relationship |
 
-## 🤔 Which Node Should I Use?
+## Which Node Should I Use?
 
 ### For Anomaly Detection:
 
 **Simple Use Cases:**
-- 📊 **Hard boundaries (min/max)?** → **Threshold Anomaly**
+- **Hard boundaries (min/max)?** → **Threshold Anomaly**
   - Example: Temperature must stay between 20-80°C
   
-- 📈 **Statistical outliers?** → **Z-Score** or **IQR Anomaly**
+- **Statistical outliers?** → **Z-Score** or **IQR Anomaly**
   - Z-Score: Best for normally distributed data
   - IQR: More robust, works with any distribution
 
 **Trend & Drift Detection:**
-- 📉 **Slow gradual changes?** → **CUSUM Anomaly**
+- **Slow gradual changes?** → **CUSUM Anomaly**
   - Example: Pump flow slowly decreasing over days
   
-- 🔄 **Moving baseline?** → **Moving Average** or **EMA Anomaly**
+- **Moving baseline?** → **Moving Average** or **EMA Anomaly**
   - Moving Average: Equal weight to all values in window
   - EMA: Recent values weighted more (faster response)
 
 **Advanced Cases:**
-- 🤖 **Complex patterns, no clear rules?** → **Isolation Forest**
+- **Complex patterns, no clear rules?** → **Isolation Forest**
   - Machine learning approach, learns automatically
   
-- 🔢 **Extreme values only?** → **Percentile Anomaly**
+- **Extreme values only?** → **Percentile Anomaly**
   - Example: Detect only top 5% and bottom 5%
 
 **Multiple Sensors:**
-- 🎛️ **Analyze multiple sensors together?** → **Multi-Value Anomaly**
-- 📤 **Split sensor array for separate processing?** → **Multi-Value Splitter**
+- **Analyze multiple sensors together?** → **Multi-Value Anomaly**
+- **Split sensor array for separate processing?** → **Multi-Value Splitter**
 
 ---
 
 ### For Predictive Maintenance:
 
 **Vibration Analysis:**
-- 🌊 **Time-domain features (RMS, Crest Factor, Kurtosis)?** → **Vibration Features**
+- **Time-domain features (RMS, Crest Factor, Kurtosis)?** → **Vibration Features**
   - Best for: Bearing condition, overall vibration health
   
-- 📊 **Frequency analysis (FFT, harmonics)?** → **FFT Analysis**
+- **Frequency analysis (FFT, harmonics)?** → **FFT Analysis**
   - Best for: Finding specific fault frequencies (bearing, gear defects)
   
-- 💥 **Count impacts/shocks?** → **Peak Detection**
+- **Count impacts/shocks?** → **Peak Detection**
   - Best for: Impact counting, shock detection
 
 **Trend & Prediction:**
-- ⏱️ **Predict when threshold will be reached?** → **Trend Prediction**
+- **Predict when threshold will be reached?** → **Trend Prediction**
   - Calculates Remaining Useful Life (RUL)
   - Example: "Temperature will exceed 100°C in 48 hours"
   
-- 📈 **Measure rate of degradation?** → **Rate of Change**
+- **Measure rate of degradation?** → **Rate of Change**
   - Detects rapid changes (acceleration)
   - Example: "Temperature rising 5°C per hour"
 
 **Health Assessment:**
-- 💯 **Single health score from multiple sensors?** → **Health Index**
+- **Single health score from multiple sensors?** → **Health Index**
   - Combines temperature, vibration, pressure into 0-100% score
   
-- 🔗 **Validate sensor relationships?** → **Correlation Anomaly**
+- **Validate sensor relationships?** → **Correlation Anomaly**
   - Example: Check if temperature and power consumption correlate correctly
 
 ---
@@ -188,7 +188,7 @@ Need to predict failures?
 └─ YES → Trend Prediction + Rate of Change + Health Index
 ```
 
-## 💡 Usage Examples
+## Usage Examples
 
 ### Simple Temperature Monitoring
 
@@ -215,13 +215,13 @@ Need to predict failures?
                    → [IQR Anomaly] → Outlier Detection
 ```
 
-## 📖 Documentation
+## Documentation
 
 ### Node-Specific Help
 Each node has comprehensive built-in documentation:
 1. Drag node to canvas
 2. Select it
-3. Click **ℹ️** in sidebar
+3. Click **Info** in sidebar
 4. Read detailed docs with examples
 
 ### Additional Documentation
@@ -230,7 +230,7 @@ Each node has comprehensive built-in documentation:
 - **[MULTI_VALUE.md](MULTI_VALUE.md)** - Working with multiple sensors
 - **[DOCKER.md](DOCKER.md)** - Docker deployment guide
 
-## 🔧 Node Configuration
+## Node Configuration
 
 ### Example: Z-Score Anomaly
 
@@ -289,14 +289,14 @@ msg.payload = 0.45;  // Vibration amplitude
 }
 ```
 
-## 🎓 Learning Path
+## Learning Path
 
 1. **Start Simple** - Import Example 3 (Process Monitoring)
 2. **Learn Basics** - Understand threshold and Z-Score detection
 3. **Advanced Methods** - Try FFT and Trend Prediction
 4. **Combine Nodes** - Build complete predictive maintenance system
 
-## 🏭 Real-World Applications
+## Real-World Applications
 
 - **Manufacturing** - Machine health monitoring, quality control
 - **Energy** - Battery degradation, power quality monitoring
@@ -306,7 +306,7 @@ msg.payload = 0.45;  // Vibration amplitude
 - **Aerospace** - Engine monitoring, structural health
 - **Medical** - Equipment monitoring, vital sign analysis
 
-## 🔬 Technical Details
+## Technical Details
 
 ### Statistical Methods
 
@@ -332,7 +332,7 @@ msg.payload = 0.45;  // Vibration amplitude
 | Impact Events | Peak Detection | Peak count |
 | Sensor Validation | Correlation | Relationship strength |
 
-## 🛠️ Development
+## Development
 
 ### Run with Docker
 
@@ -359,7 +359,7 @@ npm link node-red-contrib-condition-monitoring
 node-red-restart
 ```
 
-## 📚 Dependencies
+## Dependencies
 
 ### Required
 - Node-RED >= 1.0.0
@@ -369,7 +369,7 @@ node-red-restart
 - `ml-isolation-forest` - For Isolation Forest node (falls back to Z-Score if not available)
 - `simple-statistics` - For advanced statistical functions
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please:
 1. Fork the repository
@@ -377,21 +377,21 @@ Contributions are welcome! Please:
 3. Add tests if applicable
 4. Submit a pull request
 
-## 📄 License
+## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
-## 👨‍💻 Author
+## Author
 
 **blanpa**
 
-## 🐛 Issues & Support
+## Issues & Support
 
 - **Bug Reports:** Open an issue on GitHub
 - **Questions:** Check `/examples/README.md` first
 - **Feature Requests:** Submit via GitHub issues
 
-## 📈 Roadmap
+## Roadmap
 
 - [ ] Dashboard UI components
 - [ ] Export/import of trained models
@@ -400,16 +400,16 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - [ ] More ML algorithms (LSTM, Prophet)
 - [ ] Automated reporting
 
-## ⭐ Show Your Support
+## Show Your Support
 
 If you find this useful, please consider:
-- ⭐ Starring the repository
-- 📦 Sharing with others
-- 🐛 Reporting bugs
-- 💡 Suggesting features
+- Starring the repository
+- Sharing with others
+- Reporting bugs
+- Suggesting features
 
 ---
 
-**Made with ❤️ for the Node-RED community**
+**Made with love for the Node-RED community**
 
 **Get Started:** Import an example flow and start monitoring in minutes!
