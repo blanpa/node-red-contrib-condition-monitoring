@@ -5,11 +5,11 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 [![npm version](https://img.shields.io/npm/v/node-red-contrib-condition-monitoring.svg)](https://www.npmjs.com/package/node-red-contrib-condition-monitoring)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Beta](https://img.shields.io/badge/Status-Beta-orange.svg)](CHANGELOG.md)
-[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg)](CHANGELOG.md)
 
 ---
 
-## Project Status: BETA (v0.1.1)
+## Project Status: BETA (v0.1.2)
 
 **This is the first public release - currently in beta testing.**
 
@@ -238,15 +238,22 @@ Each node has comprehensive built-in documentation:
 // Input
 msg.payload = 42.5;
 
-// Output (Anomaly)
+// Output (Anomaly) - v0.1.2+
 {
   "payload": 42.5,
   "zScore": 3.2,
   "mean": 35.0,
   "stdDev": 2.3,
   "isAnomaly": true,
-  "threshold": 3.0
+  "severity": "critical",     // NEW: "normal", "warning", or "critical"
+  "threshold": 3.0,
+  "warningThreshold": 2.1,    // NEW
+  "bufferSize": 100,          // NEW
+  "windowSize": 100           // NEW
 }
+
+// Reset the node
+msg.reset = true;  // NEW: Clears buffer and restarts learning
 ```
 
 ### Example: Trend Prediction

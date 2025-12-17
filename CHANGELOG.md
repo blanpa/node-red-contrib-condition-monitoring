@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.2] - 2024-12-17 - Quality & Testing Release
+
+### ✨ New Features
+
+#### Node Improvements
+- **Severity Levels**: All anomaly nodes now output `severity` field with values:
+  - `"normal"` - No anomaly detected
+  - `"warning"` - Approaching threshold (configurable)
+  - `"critical"` - Threshold exceeded
+- **Node Status Display**: Live status showing:
+  - Blue ring: Waiting for data
+  - Yellow: Warmup phase (collecting data)
+  - Green: Normal operation with current statistics
+  - Yellow dot: Warning detected
+  - Red dot: Critical anomaly detected
+- **Reset Function**: Send `msg.reset = true` to clear buffer and restart learning
+- **Buffer Info**: Output now includes `bufferSize` and `windowSize` for transparency
+
+#### Improved Nodes
+- `zscore-anomaly` - Added `warningThreshold` config option
+- `threshold-anomaly` - Added `warningMargin` (%) for approach warnings
+- `iqr-anomaly` - Added `warningMultiplier`, now outputs `median`
+- `ema-anomaly` - Added `warningThreshold`, configurable `windowSize`
+- `moving-average-anomaly` - Added `warningThreshold`, outputs `stdDev`
+- `cusum-anomaly` - Added `warningThreshold`, outputs `cusumMax`
+
+### 🧪 Testing
+
+- **47 Unit Tests** - Comprehensive test suite with realistic industrial scenarios
+- **Jest Framework** - Professional testing with node-red-node-test-helper
+- **CI/CD Integration** - Tests run automatically on npm publish workflow
+- **Realistic Test Data** - Tests use actual industrial values:
+  - Motor temperature monitoring (45-47°C normal, 52.5°C anomaly)
+  - Pump vibration analysis (2.3-2.7 mm/s normal, 4.2 mm/s bearing defect)
+  - Hydraulic pressure monitoring (150-250 bar operating range)
+  - Compressor current analysis (12-13A normal, 18.5A mechanical jam)
+  - CNC spindle load monitoring (45-52% normal, 72% tool wear)
+
+### 📦 Package Improvements
+
+- **Icons Optimized**: Reduced from 2.8 MB to 55 KB (99.9% smaller)
+- **Package Size**: 58 KB compressed, 287 KB unpacked
+- **Dev Dependencies**: Added jest, node-red, node-red-node-test-helper
+
+### 📝 Documentation
+
+- **Updated Help Text**: Z-Score node now has comprehensive built-in documentation
+- **Severity Levels**: Documented in node help panels
+- **Reset Function**: Documented with examples
+
+### 🔧 Technical Changes
+
+- Improved message property preservation (no longer overwrites existing fields)
+- Consistent output format across all anomaly detection nodes
+- Better error handling with status display
+
+---
+
 ## [0.1.1] - 2025-12-03 - Bug Fix Release
 
 ### 🐛 Fixed
@@ -88,16 +146,15 @@ All features are working and ready for real-world testing. API may change before
 - `simple-statistics` ^7.8.2 - Statistical calculations
 
 ### ⚠️ Known Limitations
-- No unit tests yet (example-based testing only)
 - API may change before v1.0 release
 - Some features require validation in production environments
 
 ### 🔮 Planned for v1.0
-- [ ] Comprehensive unit test suite
+- [x] ~~Comprehensive unit test suite~~ (Added in v0.1.2 - 47 tests)
 - [ ] Performance benchmarks
 - [ ] Additional validation with real industrial data
 - [ ] API stabilization
-- [ ] npm package publication
+- [x] ~~npm package publication~~ (Published)
 
 ---
 
