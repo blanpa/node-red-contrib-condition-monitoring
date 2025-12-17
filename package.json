@@ -3,7 +3,7 @@
   "version": "0.1.1",
   "description": "Node-RED Nodes for anomaly detection, predictive maintenance, and time series analysis",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "jest --testTimeout=10000"
   },
   "node-red": {
     "version": ">=2.0.0",
@@ -57,7 +57,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/blanpa/node-red-contrib-condition-monitoring.git"
+    "url": "git+https://github.com/blanpa/node-red-contrib-condition-monitoring.git"
   },
   "bugs": {
     "url": "https://github.com/blanpa/node-red-contrib-condition-monitoring/issues"
@@ -67,9 +67,12 @@
     "ml-isolation-forest": "^0.1.0",
     "simple-statistics": "^7.8.2"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "jest": "^30.2.0",
+    "node-red": "^4.1.2",
+    "node-red-node-test-helper": "^0.3.5"
+  },
   "engines": {
     "node": ">=14.0.0"
   }
 }
-
