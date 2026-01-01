@@ -1,0 +1,274 @@
+<script type="text/javascript">
+    RED.nodes.registerType('pca-anomaly', {
+        category: 'condition-monitoring',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            nComponents: { value: 2, validate: RED.validators.number() },
+            windowSize: { value: 100, validate: RED.validators.number() },
+            threshold: { value: 3.0, validate: RED.validators.number() },
+            method: { value: "combined" },
+            autoComponents: { value: true },
+            varianceThreshold: { value: 0.95, validate: RED.validators.number() },
+            contributionThreshold: { value: 0.1, validate: RED.validators.number() },
+            showTopContributors: { value: 3, validate: RED.validators.number() },
+            outputTopic: { value: "" },
+            debug: { value: false }
+        },
+        inputs: 1,
+        outputs: 2,
+        icon: "icon.png",
+        label: function() {
+            return this.name || "PCA Anomaly Detection";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        outputLabels: ["normal", "anomaly"],
+        paletteLabel: "PCA Anomaly",
+        oneditprepare: function() {
+            var node = this;
+            
+            $("#node-input-autoComponents").on("change", function() {
+                if ($(this).is(":checked")) {
+                    $(".variance-row").show();
+                    $(".components-row").hide();
+                } else {
+                    $(".variance-row").hide();
+                    $(".components-row").show();
+                }
+            }).trigger("change");
+            
+            // Collapsible sections
+            $(".cm-section-header").on("click", function() {
+                var $content = $(this).next(".cm-section-content");
+                var $icon = $(this).find(".cm-collapse-icon");
+                $content.slideToggle(200);
+                $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
+        }
+    });
+</script>
+
+<style>
+    .cm-section {
+        background: #fafafa;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        overflow: hidden;
+    }
+    
+    .cm-section-header {
+        background: linear-gradient(135deg, #9482f1 0%, #7d6bd3 100%);
+        color: #fff;
+        padding: 10px 14px;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        user-select: none;
+    }
+    
+    .cm-section-header:hover {
+        background: linear-gradient(135deg, #a896f5 0%, #9482f1 100%);
+    }
+    
+    .cm-section-content {
+        padding: 12px 14px;
+    }
+    
+    .cm-section-content .form-row {
+        margin-bottom: 8px;
+    }
+    
+    .cm-section-content .form-row:last-child {
+        margin-bottom: 0;
+    }
+    
+    .cm-hint {
+        font-size: 11px;
+        color: #888;
+        margin-left: 5px;
+    }
+</style>
+
+<script type="text/html" data-template-name="pca-anomaly">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    
+    <!-- Detection Settings -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-search"></i> Detection Settings</span>
+            <i class="fa fa-chevron-up cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="form-row">
+                <label for="node-input-method"><i class="fa fa-calculator"></i> Method</label>
+                <select id="node-input-method">
+                    <option value="combined">Combined (T² + SPE)</option>
+                    <option value="t2">Hotelling's T² only</option>
+                    <option value="spe">SPE (Q-statistic) only</option>
+                </select>
+            </div>
+            
+            <div class="form-row">
+                <label for="node-input-windowSize"><i class="fa fa-bars"></i> Training Window</label>
+                <input type="number" id="node-input-windowSize" min="20" value="100">
+                <span class="cm-hint">samples</span>
+            </div>
+            
+            <div class="form-row">
+                <label for="node-input-threshold"><i class="fa fa-exclamation-triangle"></i> Sensitivity</label>
+                <input type="number" id="node-input-threshold" step="0.1" min="1" value="3.0">
+                <span class="cm-hint">lower = more sensitive</span>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Component Selection -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cogs"></i> Component Selection</span>
+            <i class="fa fa-chevron-up cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="form-row">
+                <label for="node-input-autoComponents" style="width: auto;">
+                    <input type="checkbox" id="node-input-autoComponents" style="width: auto; margin-right: 5px;" checked>
+                    Auto-select components by explained variance
+                </label>
+            </div>
+            
+            <div class="form-row variance-row">
+                <label for="node-input-varianceThreshold"><i class="fa fa-percent"></i> Variance Threshold</label>
+                <input type="number" id="node-input-varianceThreshold" step="0.01" min="0.5" max="0.99" value="0.95">
+                <span class="cm-hint">0.95 = 95% variance explained</span>
+            </div>
+            
+            <div class="form-row components-row" style="display: none;">
+                <label for="node-input-nComponents"><i class="fa fa-layer-group"></i> Number of Components</label>
+                <input type="number" id="node-input-nComponents" min="1" value="2">
+            </div>
+        </div>
+    </div>
+    
+    <!-- Contribution Analysis -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-chart-pie"></i> Contribution Analysis</span>
+            <i class="fa fa-chevron-up cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="form-row">
+                <label for="node-input-contributionThreshold"><i class="fa fa-filter"></i> Min. Contribution</label>
+                <input type="number" id="node-input-contributionThreshold" step="0.01" min="0" max="1" value="0.1">
+                <span class="cm-hint">0.1 = show > 10%</span>
+            </div>
+            
+            <div class="form-row">
+                <label for="node-input-showTopContributors"><i class="fa fa-list-ol"></i> Top Contributors</label>
+                <input type="number" id="node-input-showTopContributors" min="1" max="20" value="3">
+                <span class="cm-hint">Max sensors to show</span>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Advanced -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cog"></i> Advanced</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content" style="display: none;">
+            <div class="form-row">
+                <label for="node-input-outputTopic"><i class="fa fa-envelope"></i> Output Topic</label>
+                <input type="text" id="node-input-outputTopic" placeholder="Optional topic">
+            </div>
+            
+            <div class="form-row">
+                <label for="node-input-debug" style="width: auto;">
+                    <input type="checkbox" id="node-input-debug" style="width: auto; margin-right: 5px;">
+                    Enable debug logging
+                </label>
+            </div>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="pca-anomaly">
+    <p>Detects anomalies in multi-sensor data using Principal Component Analysis (PCA).</p>
+    
+    <h3>Overview</h3>
+    <p>PCA reduces high-dimensional sensor data to principal components and detects anomalies using:</p>
+    <ul>
+        <li><b>Hotelling's T²</b>: Measures variation within the principal component subspace</li>
+        <li><b>SPE (Q-statistic)</b>: Measures variation outside the principal component subspace</li>
+    </ul>
+    
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">object | array</span></dt>
+        <dd>Multi-sensor data as object <code>{sensor1: value, sensor2: value, ...}</code> or array <code>[value1, value2, ...]</code></dd>
+        <dt class="optional">reset <span class="property-type">boolean</span></dt>
+        <dd>Set to <code>true</code> to reset the model and retrain</dd>
+    </dl>
+    
+    <h3>Outputs</h3>
+    <ol class="node-ports">
+        <li>Normal
+            <dl class="message-properties">
+                <dt>payload <span class="property-type">object</span></dt>
+                <dd>Original sensor values (no anomaly detected)</dd>
+            </dl>
+        </li>
+        <li>Anomaly
+            <dl class="message-properties">
+                <dt>payload <span class="property-type">object</span></dt>
+                <dd>Original sensor values (anomaly detected)</dd>
+                <dt>pca <span class="property-type">object</span></dt>
+                <dd>PCA statistics: scores, T², SPE, thresholds, explained variance</dd>
+                <dt>contributions <span class="property-type">array</span></dt>
+                <dd>Sensor contributions to anomaly, sorted by importance</dd>
+            </dl>
+        </li>
+    </ol>
+    
+    <h3>Detection Methods</h3>
+    <ul>
+        <li><b>Combined</b>: Anomaly if T² OR SPE exceeds threshold (recommended)</li>
+        <li><b>T² only</b>: Detects unusual sensor combinations within normal operating space</li>
+        <li><b>SPE only</b>: Detects new fault patterns not seen during training</li>
+    </ul>
+    
+    <h3>Contribution Analysis</h3>
+    <p>When an anomaly is detected, PCA identifies which sensors contribute most:</p>
+    <ul>
+        <li><b>Min. Contribution</b>: Only show sensors with contribution above this threshold (0.1 = 10%)</li>
+        <li><b>Top Contributors</b>: Maximum number of sensors to include in output</li>
+        <li><b>topContributor</b>: Sensor name with highest contribution (for easy alerting)</li>
+        <li><b>percentContribution</b>: Human-readable percentage per sensor</li>
+    </ul>
+    
+    <h3>Use Cases</h3>
+    <ul>
+        <li>Multi-sensor anomaly detection in complex systems</li>
+        <li>Early fault detection in rotating machinery</li>
+        <li>Process monitoring with correlated sensors</li>
+        <li>Root cause analysis via contribution plots</li>
+    </ul>
+    
+    <h3>Example Input</h3>
+    <pre>{
+  "payload": {
+    "temperature": 45.2,
+    "vibration": 0.82,
+    "pressure": 101.3,
+    "current": 12.5
+  }
+}</pre>
+</script>

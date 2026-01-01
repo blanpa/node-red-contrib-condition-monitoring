@@ -1,6 +1,6 @@
 {
   "name": "node-red-contrib-condition-monitoring",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Node-RED Nodes for anomaly detection, predictive maintenance, and time series analysis",
   "scripts": {
     "test": "jest --testTimeout=10000"
@@ -14,7 +14,8 @@
       "signal-analyzer": "nodes/signal-analyzer.js",
       "trend-predictor": "nodes/trend-predictor.js",
       "health-index": "nodes/health-index.js",
-      "ml-inference": "nodes/ml-inference.js"
+      "ml-inference": "nodes/ml-inference.js",
+      "pca-anomaly": "nodes/pca-anomaly.js"
     }
   },
   "keywords": [

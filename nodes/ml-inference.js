@@ -1225,6 +1225,94 @@ print(json.dumps(prediction.tolist()))
         res.json(runtimes);
     });
     
+    // API endpoint to check Python availability
+    RED.httpAdmin.get("/ml-inference/python-status", function(req, res) {
+        const { spawn } = require('child_process');
+        const pythonCandidates = ['python3', 'python'];
+        
+        function checkPython(candidates, index) {
+            if (index >= candidates.length) {
+                res.json({ available: false, version: null, packages: [] });
+                return;
+            }
+            
+            const proc = spawn(candidates[index], ['-c', 'import sys; print(sys.version.split()[0])'], { 
+                stdio: ['pipe', 'pipe', 'pipe'],
+                timeout: 5000
+            });
+            
+            let stdout = '';
+            proc.stdout.on('data', (data) => { stdout += data.toString(); });
+            
+            proc.on('close', (code) => {
+                if (code === 0 && stdout.trim()) {
+                    // Check for ML packages
+                    const checkPackages = spawn(candidates[index], ['-c', `
+import json
+packages = []
+try:
+    import sklearn; packages.append('sklearn')
+except: pass
+try:
+    import tensorflow; packages.append('tensorflow')
+except: pass
+try:
+    import tflite_runtime; packages.append('tflite')
+except: pass
+print(json.dumps(packages))
+`], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
+                    
+                    let pkgOut = '';
+                    checkPackages.stdout.on('data', (data) => { pkgOut += data.toString(); });
+                    
+                    checkPackages.on('close', () => {
+                        let packages = [];
+                        try { packages = JSON.parse(pkgOut.trim()); } catch(e) {}
+                        res.json({ 
+                            available: true, 
+                            version: stdout.trim(),
+                            python: candidates[index],
+                            packages: packages
+                        });
+                    });
+                    
+                    checkPackages.on('error', () => {
+                        res.json({ available: true, version: stdout.trim(), python: candidates[index], packages: [] });
+                    });
+                } else {
+                    checkPython(candidates, index + 1);
+                }
+            });
+            
+            proc.on('error', () => {
+                checkPython(candidates, index + 1);
+            });
+        }
+        
+        checkPython(pythonCandidates, 0);
+    });
+    
+    // API endpoint to check Coral TPU availability
+    RED.httpAdmin.get("/ml-inference/coral-status", function(req, res) {
+        const { spawn } = require('child_process');
+        const proc = spawn('python3', ['-c', 'from pycoral.utils.edgetpu import list_edge_tpus; print(len(list_edge_tpus()))'], {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: 5000
+        });
+        
+        let stdout = '';
+        proc.stdout.on('data', (data) => { stdout += data.toString(); });
+        
+        proc.on('close', (code) => {
+            const count = parseInt(stdout.trim()) || 0;
+            res.json({ available: count > 0, count: count });
+        });
+        
+        proc.on('error', () => {
+            res.json({ available: false, count: 0 });
+        });
+    });
+    
     // Ensure models directory exists
     function ensureModelsDir() {
         if (!fs.existsSync(MODELS_DIR)) {

@@ -12,6 +12,15 @@
             rocMethod: { value: "absolute" },
             timeWindow: { value: 1 },
             rocThreshold: { value: "" },
+            // RUL settings
+            failureThreshold: { value: "" },
+            warningThreshold: { value: "" },
+            rulUnit: { value: "hours" },
+            degradationModel: { value: "linear" },
+            confidenceLevel: { value: 0.95 },
+            // Weibull settings
+            weibullBeta: { value: 2.0 },
+            weibullEta: { value: 1000 },
             outputTopic: { value: "" },
             debug: { value: false }
         },
@@ -32,11 +41,22 @@
                 $("#config-" + mode).show();
             }
             
+            function showWeibullParams() {
+                if ($("#node-input-degradationModel").val() === "weibull") {
+                    $("#weibull-params").show();
+                } else {
+                    $("#weibull-params").hide();
+                }
+            }
+            
             $("#node-input-mode").on("change", function() {
                 showModeConfig($(this).val());
             });
             
+            $("#node-input-degradationModel").on("change", showWeibullParams);
+            
             showModeConfig(this.mode || "prediction");
+            showWeibullParams();
             
             $(".cm-section-header").on("click", function() {
                 var $content = $(this).next(".cm-section-content");
@@ -76,7 +96,8 @@
             <div class="cm-config-item">
                 <label for="node-input-mode"><i class="fa fa-cog"></i> Mode</label>
                 <select id="node-input-mode">
-                    <option value="prediction">Trend Prediction (RUL)</option>
+                    <option value="prediction">Trend Prediction</option>
+                    <option value="rul">Remaining Useful Life (RUL)</option>
                     <option value="rate-of-change">Rate of Change</option>
                 </select>
                 <div class="cm-help-text">Select the analysis mode</div>
@@ -94,13 +115,13 @@
                         </select>
                     </div>
                     <div class="cm-config-item">
-                        <label>Prediction Steps</label>
-                        <input type="number" id="node-input-predictionSteps" min="1">
+                        <label>Prediction Steps (default: 10)</label>
+                        <input type="number" id="node-input-predictionSteps" min="1" value="10">
                         <div class="cm-help-text">Number of future steps to predict</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Window Size</label>
-                        <input type="number" id="node-input-windowSize" min="3">
+                        <label>Window Size (default: 50)</label>
+                        <input type="number" id="node-input-windowSize" min="3" value="50">
                         <div class="cm-help-text">Historical samples to use</div>
                     </div>
                     <div class="cm-config-item">
@@ -123,8 +144,8 @@
                         </select>
                     </div>
                     <div class="cm-config-item">
-                        <label>Time Window (seconds)</label>
-                        <input type="number" id="node-input-timeWindow" min="1">
+                        <label>Time Window (default: 1 sec)</label>
+                        <input type="number" id="node-input-timeWindow" min="1" value="1">
                         <div class="cm-help-text">Window for rate calculation</div>
                     </div>
                     <div class="cm-config-item">
@@ -132,6 +153,78 @@
                         <input type="number" id="node-input-rocThreshold" step="any">
                         <div class="cm-help-text">Optional: Rate above this is anomalous</div>
                     </div>
+                </div>
+            </div>
+            
+            <!-- RUL Config -->
+            <div id="config-rul" class="mode-config">
+                <h4><i class="fa fa-hourglass-half"></i> Remaining Useful Life (RUL) Settings</h4>
+                <p style="font-size: 11px; color: #666; margin-bottom: 12px;">
+                    Estimates time until failure based on degradation trend analysis.
+                </p>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label><i class="fa fa-exclamation-triangle" style="color: #f44336;"></i> Failure Threshold</label>
+                        <input type="number" id="node-input-failureThreshold" step="any">
+                        <div class="cm-help-text">Value at which failure occurs (required)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label><i class="fa fa-exclamation-circle" style="color: #ff9800;"></i> Warning Threshold</label>
+                        <input type="number" id="node-input-warningThreshold" step="any">
+                        <div class="cm-help-text">Early warning level (optional)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>RUL Unit</label>
+                        <select id="node-input-rulUnit">
+                            <option value="hours">Hours</option>
+                            <option value="minutes">Minutes</option>
+                            <option value="days">Days</option>
+                            <option value="cycles">Cycles</option>
+                        </select>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Degradation Model</label>
+                        <select id="node-input-degradationModel">
+                            <option value="linear" selected>Linear</option>
+                            <option value="exponential">Exponential</option>
+                            <option value="weibull">Weibull (Reliability)</option>
+                        </select>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Confidence Level</label>
+                        <input type="number" id="node-input-confidenceLevel" min="0.5" max="0.99" step="0.01" value="0.95">
+                        <div class="cm-help-text">For prediction interval (0.5-0.99)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Window Size (default: 50)</label>
+                        <input type="number" id="node-input-windowSize" min="5" value="50">
+                        <div class="cm-help-text">Number of samples for trend analysis</div>
+                    </div>
+                </div>
+                
+                <!-- Weibull Parameters (shown when Weibull selected) -->
+                <div id="weibull-params" style="margin-top: 12px; padding: 12px; background: #f3e5f5; border-radius: 4px; display: none;">
+                    <h5 style="margin: 0 0 10px 0; color: #7b1fa2;"><i class="fa fa-chart-line"></i> Weibull Distribution Parameters</h5>
+                    <div class="cm-config-grid">
+                        <div class="cm-config-item">
+                            <label>Shape Parameter (β)</label>
+                            <input type="number" id="node-input-weibullBeta" min="0.1" max="10" step="0.1" value="2.0">
+                            <div class="cm-help-text">β&lt;1: infant mortality, β=1: random, β&gt;1: wear-out</div>
+                        </div>
+                        <div class="cm-config-item">
+                            <label>Scale Parameter (η)</label>
+                            <input type="number" id="node-input-weibullEta" min="1" step="100" value="1000">
+                            <div class="cm-help-text">Characteristic life (63.2% failure) in hours</div>
+                        </div>
+                    </div>
+                    <div style="font-size: 10px; color: #666; margin-top: 8px;">
+                        <b>Typical values:</b> Bearings β≈2.0, Electronics β≈1.0, Fatigue β≈3.5
+                    </div>
+                </div>
+                
+                <div style="margin-top: 12px; padding: 10px; background: #e8f5e9; border-radius: 4px; font-size: 11px;">
+                    <i class="fa fa-lightbulb" style="color: #4caf50;"></i>
+                    <strong>Output:</strong> msg.rul contains value, unit, confidence, and status (healthy/warning/critical/failed)
                 </div>
             </div>
         </div>
@@ -170,10 +263,22 @@
     
     <h3>Analysis Modes</h3>
     <dl>
-        <dt><b>Trend Prediction (RUL)</b></dt>
-        <dd>Predicts future values using regression and estimates when a failure threshold will be reached.
+        <dt><b>Trend Prediction</b></dt>
+        <dd>Predicts future values using regression.
         <br><b>Methods:</b> Linear Regression, Exponential Smoothing (Holt)
-        <br><b>Use case:</b> Predict bearing failure time, estimate maintenance window</dd>
+        <br><b>Outputs:</b> Predicted values, trend direction, slope
+        <br><b>Use case:</b> General trend analysis, time series forecasting</dd>
+        
+        <dt><b>Remaining Useful Life (RUL)</b></dt>
+        <dd>Estimates time until failure based on degradation trend.
+        <br><b>Features:</b>
+        <ul>
+            <li>Configurable failure and warning thresholds</li>
+            <li>Confidence intervals based on R-squared</li>
+            <li>Multiple time units: hours, minutes, days, cycles</li>
+            <li>Status output: healthy, warning, critical, failed</li>
+        </ul>
+        <br><b>Use case:</b> Predictive maintenance, remaining lifetime estimation</dd>
         
         <dt><b>Rate of Change</b></dt>
         <dd>Calculates instantaneous rate (1st derivative) and acceleration (2nd derivative).

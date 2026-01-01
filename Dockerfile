@@ -14,17 +14,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python ML packages for TFLite, Keras, and scikit-learn support
+# Pin numpy<2 for tflite-runtime compatibility (compiled with NumPy 1.x)
 RUN pip3 install --break-system-packages --no-cache-dir \
+    "numpy<2" \
+    tensorflow \
     tflite-runtime \
     scikit-learn \
     joblib \
-    2>/dev/null || \
-    pip3 install --break-system-packages --no-cache-dir \
+    || pip3 install --break-system-packages --no-cache-dir \
+    "numpy<2" \
     tensorflow-cpu \
     scikit-learn \
     joblib \
-    2>/dev/null || \
-    echo "Some Python ML packages installation skipped"
+    || echo "Some Python ML packages installation skipped"
 
 # Switch to node-red user for npm installs
 USER node-red

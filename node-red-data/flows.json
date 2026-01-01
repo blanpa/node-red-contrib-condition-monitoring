@@ -77,25 +77,66 @@
         "info": "PyTorch model exported to ONNX for vibration-based anomaly detection"
     },
     {
+        "id": "keras-example-tab",
+        "type": "tab",
+        "label": "Example 11: Keras Models",
+        "disabled": false,
+        "info": "Keras models in .keras and .h5 format for anomaly detection"
+    },
+    {
+        "id": "sklearn-example-tab",
+        "type": "tab",
+        "label": "Example 12: scikit-learn",
+        "disabled": false,
+        "info": "scikit-learn models - Random Forest, Gradient Boosting, SVM, etc."
+    },
+    {
+        "id": "pca-example-tab",
+        "type": "tab",
+        "label": "Example 13: PCA Anomaly Detection",
+        "disabled": false,
+        "info": "PCA-based multi-sensor anomaly detection with contribution analysis"
+    },
+    {
         "id": "comment-overview",
         "type": "comment",
         "z": "overview-tab",
-        "name": "📊 Condition Monitoring - All 7 Nodes",
+        "name": "Condition Monitoring - All 7 Nodes",
         "info": "This tab shows all available nodes in the condition-monitoring package.",
         "x": 200,
         "y": 40,
         "wires": []
     },
     {
-        "id": "overview-anomaly",
+        "id": "857496978ac08f0b",
         "type": "anomaly-detector",
         "z": "overview-tab",
-        "name": "Anomaly Detector",
+        "name": "",
         "method": "zscore",
         "windowSize": 100,
         "zscoreThreshold": 3,
         "zscoreWarning": 2,
-        "x": 260,
+        "iqrMultiplier": 1.5,
+        "iqrWarningMultiplier": 1.2,
+        "minThreshold": "",
+        "maxThreshold": "",
+        "warningMargin": 10,
+        "lowerPercentile": 5,
+        "upperPercentile": 95,
+        "emaAlpha": 0.3,
+        "emaThreshold": 2,
+        "emaWarning": 1.5,
+        "emaMethod": "stddev",
+        "cusumTarget": "",
+        "cusumThreshold": 5,
+        "cusumWarning": 3.5,
+        "cusumDrift": 0.5,
+        "maThreshold": 2,
+        "maWarning": 1.5,
+        "maMethod": "stddev",
+        "outputTopic": "",
+        "debug": false,
+        "x": 250,
         "y": 100,
         "wires": [
             [],
@@ -103,15 +144,21 @@
         ]
     },
     {
-        "id": "overview-isolation",
+        "id": "dbb3dde70706a8be",
         "type": "isolation-forest-anomaly",
         "z": "overview-tab",
-        "name": "Isolation Forest",
+        "name": "",
         "contamination": 0.1,
         "windowSize": 100,
         "numEstimators": 100,
         "maxSamples": 256,
-        "x": 260,
+        "learningMode": "batch",
+        "retrainInterval": 50,
+        "adaptRate": 0.1,
+        "persistModel": false,
+        "outputTopic": "",
+        "debug": false,
+        "x": 270,
         "y": 160,
         "wires": [
             [],
@@ -119,12 +166,29 @@
         ]
     },
     {
-        "id": "overview-multi",
+        "id": "80db75e8583d1e3b",
         "type": "multi-value-processor",
         "z": "overview-tab",
-        "name": "Multi-Value Processor",
+        "name": "",
         "mode": "split",
-        "x": 280,
+        "field": "payload",
+        "outputMode": "sequential",
+        "preserveOriginal": true,
+        "anomalyMethod": "zscore",
+        "threshold": 3,
+        "warningThreshold": 2,
+        "windowSize": 100,
+        "minThreshold": "",
+        "maxThreshold": "",
+        "sensor1": "sensor1",
+        "sensor2": "sensor2",
+        "correlationThreshold": 0.7,
+        "correlationMethod": "pearson",
+        "aggregateMethod": "mean",
+        "aggregateOutput": "single",
+        "outputTopic": "",
+        "debug": false,
+        "x": 260,
         "y": 220,
         "wires": [
             [],
@@ -132,15 +196,36 @@
         ]
     },
     {
-        "id": "overview-signal",
+        "id": "f89bd734a61b16b7",
         "type": "signal-analyzer",
         "z": "overview-tab",
-        "name": "Signal Analyzer",
+        "name": "",
         "mode": "fft",
         "windowSize": 256,
         "fftSize": 256,
         "samplingRate": 1000,
-        "x": 260,
+        "peakThreshold": 0.1,
+        "outputFormat": "peaks",
+        "windowFunction": "hann",
+        "overlapPercent": 50,
+        "minPeakHeight": "",
+        "minPeakDistance": 5,
+        "peakType": "both",
+        "vibOutputMode": "all",
+        "envelopeBandLow": 500,
+        "envelopeBandHigh": 5000,
+        "bearingBPFO": "",
+        "bearingBPFI": "",
+        "bearingBSF": "",
+        "bearingFTF": "",
+        "shaftSpeed": "",
+        "quefrencyRangeLow": 0.001,
+        "quefrencyRangeHigh": 0.1,
+        "gearToothCount": "",
+        "cepstrumThreshold": 0.1,
+        "outputTopic": "",
+        "debug": false,
+        "x": 240,
         "y": 280,
         "wires": [
             [],
@@ -148,15 +233,28 @@
         ]
     },
     {
-        "id": "overview-trend",
+        "id": "b2fe3663ef83d804",
         "type": "trend-predictor",
         "z": "overview-tab",
-        "name": "Trend Predictor",
+        "name": "",
         "mode": "prediction",
         "method": "linear",
         "predictionSteps": 10,
         "windowSize": 50,
-        "x": 260,
+        "threshold": "",
+        "rocMethod": "absolute",
+        "timeWindow": 1,
+        "rocThreshold": "",
+        "failureThreshold": "",
+        "warningThreshold": "",
+        "rulUnit": "hours",
+        "degradationModel": "linear",
+        "confidenceLevel": 0.95,
+        "weibullBeta": 2,
+        "weibullEta": 1000,
+        "outputTopic": "",
+        "debug": false,
+        "x": 240,
         "y": 340,
         "wires": [
             [],
@@ -164,13 +262,20 @@
         ]
     },
     {
-        "id": "overview-health",
+        "id": "c7d2495668446c7a",
         "type": "health-index",
         "z": "overview-tab",
-        "name": "Health Index",
+        "name": "",
         "sensorWeights": "{\"temp\":1.0,\"vibration\":1.5,\"pressure\":1.0}",
         "aggregationMethod": "weighted",
-        "x": 250,
+        "outputScale": "0-100",
+        "healthyThreshold": 80,
+        "warningThreshold": 60,
+        "degradedThreshold": 40,
+        "criticalThreshold": 20,
+        "outputTopic": "",
+        "debug": false,
+        "x": 230,
         "y": 400,
         "wires": [
             [],
@@ -178,30 +283,74 @@
         ]
     },
     {
-        "id": "overview-ml",
+        "id": "cb31b0f4e9e4c746",
         "type": "ml-inference",
         "z": "overview-tab",
-        "name": "ML Inference",
+        "name": "",
         "modelSource": "local",
         "modelPath": "",
         "modelType": "auto",
-        "x": 250,
+        "urlAuthType": "",
+        "urlAuthToken": "",
+        "hfModelId": "",
+        "hfRevision": "main",
+        "hfToken": "",
+        "mlflowRegistryUri": "",
+        "mlflowModelName": "",
+        "mlflowVersion": "latest",
+        "mlflowStage": "production",
+        "mlflowAuthToken": "",
+        "customRegistryUrl": "",
+        "customModelId": "",
+        "customApiKey": "",
+        "autoUpdate": false,
+        "updateCheckInterval": 3600,
+        "modelStage": "production",
+        "inputShape": "",
+        "inputProperty": "payload",
+        "outputProperty": "prediction",
+        "preprocessMode": "array",
+        "batchSize": 1,
+        "warmup": true,
+        "x": 230,
         "y": 460,
         "wires": [
             []
         ]
     },
-            {
+    {
+        "id": "763aa1d0ae216ccb",
+        "type": "pca-anomaly",
+        "z": "overview-tab",
+        "name": "",
+        "nComponents": 2,
+        "windowSize": 100,
+        "threshold": 3,
+        "method": "combined",
+        "autoComponents": true,
+        "varianceThreshold": 0.95,
+        "contributionThreshold": 0.1,
+        "showTopContributors": 3,
+        "outputTopic": "",
+        "debug": false,
+        "x": 270,
+        "y": 520,
+        "wires": [
+            [],
+            []
+        ]
+    },
+    {
         "id": "comment-motor-header",
         "type": "comment",
         "z": "motor-monitoring-tab",
-        "name": "🔧 Motor Monitoring System",
+        "name": "Motor Monitoring System",
         "info": "This example demonstrates comprehensive motor monitoring using the consolidated nodes.",
         "x": 150,
         "y": 40,
         "wires": []
-            },
-            {
+    },
+    {
         "id": "inject-motor",
         "type": "inject",
         "z": "motor-monitoring-tab",
@@ -343,7 +492,7 @@
         "id": "debug-temp-anomaly",
         "type": "debug",
         "z": "motor-monitoring-tab",
-        "name": "⚠️ Temp Anomaly",
+        "name": "Temp Anomaly",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -388,7 +537,7 @@
         "id": "debug-health-warning",
         "type": "debug",
         "z": "motor-monitoring-tab",
-        "name": "⚠️ Health Warning",
+        "name": "Health Warning",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -418,7 +567,7 @@
         "id": "debug-corr-broken",
         "type": "debug",
         "z": "motor-monitoring-tab",
-        "name": "⚠️ Correlation Broken",
+        "name": "Correlation Broken",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -433,7 +582,7 @@
         "id": "comment-bearing-header",
         "type": "comment",
         "z": "bearing-analysis-tab",
-        "name": "🔊 Bearing Vibration Analysis",
+        "name": "\ud83d\udd0a Bearing Vibration Analysis",
         "info": "Demonstrates signal analysis using the consolidated Signal Analyzer node.",
         "x": 170,
         "y": 40,
@@ -591,7 +740,7 @@
         "id": "debug-vib-anomaly",
         "type": "debug",
         "z": "bearing-analysis-tab",
-        "name": "⚠️ Vibration Anomaly",
+        "name": "Vibration Anomaly",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -621,7 +770,7 @@
         "id": "debug-iqr-anomaly",
         "type": "debug",
         "z": "bearing-analysis-tab",
-        "name": "⚠️ IQR Anomaly",
+        "name": "IQR Anomaly",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -636,7 +785,7 @@
         "id": "comment-process-header",
         "type": "comment",
         "z": "process-monitoring-tab",
-        "name": "🔧 Pump Process Monitoring",
+        "name": "Pump Process Monitoring",
         "info": "Demonstrates multiple anomaly detection methods using the consolidated Anomaly Detector node.",
         "x": 170,
         "y": 40,
@@ -836,7 +985,7 @@
         "id": "debug-multi-anomaly",
         "type": "debug",
         "z": "process-monitoring-tab",
-        "name": "⚠️ Multi-Sensor Anomaly",
+        "name": "Multi-Sensor Anomaly",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -851,7 +1000,7 @@
         "id": "debug-threshold-anomaly",
         "type": "debug",
         "z": "process-monitoring-tab",
-        "name": "⚠️ Flow Out of Range",
+        "name": "Flow Out of Range",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -866,7 +1015,7 @@
         "id": "debug-cusum-anomaly",
         "type": "debug",
         "z": "process-monitoring-tab",
-        "name": "⚠️ Drift Detected",
+        "name": "Drift Detected",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -881,7 +1030,7 @@
         "id": "debug-ema-anomaly",
         "type": "debug",
         "z": "process-monitoring-tab",
-        "name": "⚠️ Temperature Spike",
+        "name": "Temperature Spike",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -896,7 +1045,7 @@
         "id": "comment-ml-header",
         "type": "comment",
         "z": "isolation-forest-tab",
-        "name": "🤖 Machine Learning Anomaly Detection",
+        "name": "\ud83e\udd16 Machine Learning Anomaly Detection",
         "info": "Demonstrates the Isolation Forest node for complex pattern detection without manual thresholds.",
         "x": 200,
         "y": 40,
@@ -981,7 +1130,7 @@
         "id": "debug-ml-anomaly",
         "type": "debug",
         "z": "isolation-forest-tab",
-        "name": "⚠️ ML Anomaly Detected",
+        "name": "ML Anomaly Detected",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -996,7 +1145,7 @@
         "id": "comment-ml-info",
         "type": "comment",
         "z": "isolation-forest-tab",
-        "name": "ℹ️ Isolation Forest automatically adapts to multi-modal data",
+        "name": "\u2139 Isolation Forest automatically adapts to multi-modal data",
         "info": "Unlike threshold-based methods, Isolation Forest learns what 'normal' looks like from the data itself.\n\nIt handles:\n- Multiple operating modes\n- Changing patterns over time\n- Complex, non-linear relationships\n\nNo manual threshold tuning required!",
         "x": 250,
         "y": 200,
@@ -1006,7 +1155,7 @@
         "id": "comment-vib-header",
         "type": "comment",
         "z": "vibration-features-tab",
-        "name": "🔊 Vibration Feature Extraction",
+        "name": "\ud83d\udd0a Vibration Feature Extraction",
         "info": "Demonstrates the Signal Analyzer node in vibration mode for comprehensive feature extraction.",
         "x": 180,
         "y": 40,
@@ -1042,7 +1191,7 @@
         "type": "function",
         "z": "vibration-features-tab",
         "name": "Simulate Vibration Signal",
-        "func": "// Simulate realistic vibration with optional defect\nflow.t = (flow.t || 0) + 1;\nflow.defectActive = flow.defectActive || false;\n\n// After 1000 samples, activate defect\nif (flow.t === 1000) {\n    flow.defectActive = true;\n    node.warn('⚠️ Bearing defect simulation started!');\n}\n\nvar t = flow.t / 100;\n\n// Base vibration (normal operation)\nvar signal = Math.sin(2 * Math.PI * 30 * t); // 30 Hz rotation\nsignal += 0.3 * Math.sin(2 * Math.PI * 60 * t); // 2x harmonic\nsignal += (Math.random() - 0.5) * 0.5; // noise\n\n// Add defect signature\nif (flow.defectActive) {\n    // High frequency component (bearing fault)\n    signal += 0.4 * Math.sin(2 * Math.PI * 157 * t);\n    \n    // Random impulses (impacts)\n    if (Math.random() < 0.05) {\n        signal += (Math.random() > 0.5 ? 3 : -3);\n    }\n}\n\nmsg.payload = signal;\nmsg.defectActive = flow.defectActive;\n\nreturn msg;",
+        "func": "// Simulate realistic vibration with optional defect\nflow.t = (flow.t || 0) + 1;\nflow.defectActive = flow.defectActive || false;\n\n// After 1000 samples, activate defect\nif (flow.t === 1000) {\n    flow.defectActive = true;\n    node.warn(' Bearing defect simulation started!');\n}\n\nvar t = flow.t / 100;\n\n// Base vibration (normal operation)\nvar signal = Math.sin(2 * Math.PI * 30 * t); // 30 Hz rotation\nsignal += 0.3 * Math.sin(2 * Math.PI * 60 * t); // 2x harmonic\nsignal += (Math.random() - 0.5) * 0.5; // noise\n\n// Add defect signature\nif (flow.defectActive) {\n    // High frequency component (bearing fault)\n    signal += 0.4 * Math.sin(2 * Math.PI * 157 * t);\n    \n    // Random impulses (impacts)\n    if (Math.random() < 0.05) {\n        signal += (Math.random() > 0.5 ? 3 : -3);\n    }\n}\n\nmsg.payload = signal;\nmsg.defectActive = flow.defectActive;\n\nreturn msg;",
         "outputs": 1,
         "x": 430,
         "y": 120,
@@ -1108,7 +1257,7 @@
         "id": "debug-vib-problem",
         "type": "debug",
         "z": "vibration-features-tab",
-        "name": "⚠️ Vibration Problem",
+        "name": "Vibration Problem",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -1123,7 +1272,7 @@
         "id": "debug-issues",
         "type": "debug",
         "z": "vibration-features-tab",
-        "name": "⚠️ Issues Found",
+        "name": "Issues Found",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -1153,7 +1302,7 @@
         "id": "comment-vib-info",
         "type": "comment",
         "z": "vibration-features-tab",
-        "name": "ℹ️ Features: RMS, Peak-to-Peak, Crest Factor, Kurtosis, Skewness, Health Score",
+        "name": "\u2139 Features: RMS, Peak-to-Peak, Crest Factor, Kurtosis, Skewness, Health Score",
         "info": "The Signal Analyzer (Vibration mode) extracts all common vibration features:\n\n- **RMS**: Overall energy level\n- **Peak-to-Peak**: Total amplitude range\n- **Crest Factor**: Peak/RMS ratio (>6 = impulsive)\n- **Kurtosis**: Peakedness (>3 = impacts present)\n- **Skewness**: Asymmetry\n- **Health Score**: 0-100% condition indicator",
         "x": 290,
         "y": 200,
@@ -1163,8 +1312,8 @@
         "id": "comment-ml-sensor-header",
         "type": "comment",
         "z": "ml-sensor-tab",
-        "name": "🧠 ML Sensor Anomaly Detection (TensorFlow.js)",
-        "info": "This example demonstrates using a trained neural network model for sensor anomaly detection.\n\nThe model expects 5 sensor features:\n- Temperature (normalized 0-1)\n- Vibration (normalized 0-1)\n- Pressure (normalized 0-1)\n- Power (normalized 0-1)\n- Speed (normalized 0-1)\n\nOutput: Anomaly probability (0-1)",
+        "name": "ML Sensor Anomaly Detection (ONNX)",
+        "info": "This example demonstrates using a trained neural network model for sensor anomaly detection.\n\nThe model expects 8 sensor features (normalized 0-1):\n1. Temperature\n2. Vibration\n3. Pressure\n4. Power\n5. Speed\n6. Flow\n7. Current\n8. Humidity\n\nOutput: Anomaly probability (0-1)\n\nAnomaly patterns: High temp (>0.8) + Low pressure (<0.2) + High humidity (>0.8)",
         "x": 230,
         "y": 40,
         "wires": []
@@ -1198,8 +1347,8 @@
         "id": "function-sensor-sim",
         "type": "function",
         "z": "ml-sensor-tab",
-        "name": "Simulate 5 Sensors (Normalized)",
-        "func": "// Simulate 5 sensor values (normalized 0-1)\n// Temperature, Vibration, Pressure, Power, Speed\nflow.cycle = (flow.cycle || 0) + 1;\n\n// Normal operation values\nvar temp = 0.4 + (Math.random() - 0.5) * 0.1;      // ~0.4\nvar vibration = 0.3 + (Math.random() - 0.5) * 0.1; // ~0.3\nvar pressure = 0.5 + (Math.random() - 0.5) * 0.1;  // ~0.5\nvar power = 0.6 + (Math.random() - 0.5) * 0.1;     // ~0.6\nvar speed = 0.7 + (Math.random() - 0.5) * 0.1;     // ~0.7\n\n// Inject anomaly every 20 cycles (5%)\nif (flow.cycle % 20 === 0) {\n    // Random anomaly pattern\n    var anomalyType = Math.floor(Math.random() * 3);\n    switch(anomalyType) {\n        case 0: // Overheating\n            temp = 0.9 + Math.random() * 0.1;\n            vibration = 0.7 + Math.random() * 0.2;\n            break;\n        case 1: // Pressure drop\n            pressure = 0.1 + Math.random() * 0.1;\n            power = 0.9;\n            break;\n        case 2: // Vibration spike\n            vibration = 0.85 + Math.random() * 0.15;\n            speed = 0.4;\n            break;\n    }\n    msg.isAnomalyInjected = true;\n    msg.anomalyType = ['overheating', 'pressure_drop', 'vibration_spike'][anomalyType];\n} else {\n    msg.isAnomalyInjected = false;\n}\n\n// Model expects array of 5 normalized values\nmsg.payload = [temp, vibration, pressure, power, speed];\nmsg.sensorLabels = ['temperature', 'vibration', 'pressure', 'power', 'speed'];\nmsg.timestamp = Date.now();\n\nreturn msg;",
+        "name": "Simulate 8 Sensors (Normalized)",
+        "func": "// Simulate 8 sensor values (normalized 0-1)\n// Model trained with anomaly pattern: high temp + low pressure + high humidity\nflow.cycle = (flow.cycle || 0) + 1;\n\n// Normal operation values (centered around 0.5)\nvar temp = 0.50 + (Math.random() - 0.5) * 0.1;\nvar vibration = 0.48 + (Math.random() - 0.5) * 0.1;\nvar pressure = 0.52 + (Math.random() - 0.5) * 0.1;\nvar power = 0.49 + (Math.random() - 0.5) * 0.1;\nvar speed = 0.51 + (Math.random() - 0.5) * 0.1;\nvar flow = 0.50 + (Math.random() - 0.5) * 0.1;\nvar current = 0.48 + (Math.random() - 0.5) * 0.1;\nvar humidity = 0.52 + (Math.random() - 0.5) * 0.1;\n\n// Inject anomaly every 20 cycles (5%)\nif (flow.cycle % 20 === 0) {\n    // Anomaly pattern: high temp (idx 0) + low pressure (idx 2) + high humidity (idx 7)\n    temp = 0.92 + Math.random() * 0.08;\n    pressure = 0.05 + Math.random() * 0.1;\n    humidity = 0.85 + Math.random() * 0.1;\n    msg.isAnomalyInjected = true;\n    msg.anomalyType = 'high_temp_low_pressure';\n} else {\n    msg.isAnomalyInjected = false;\n}\n\n// Model expects array of 8 normalized values\nmsg.payload = [temp, vibration, pressure, power, speed, flow, current, humidity];\nmsg.sensorLabels = ['temp', 'vibration', 'pressure', 'power', 'speed', 'flow', 'current', 'humidity'];\nmsg.timestamp = Date.now();\n\nreturn msg;",
         "outputs": 1,
         "x": 460,
         "y": 120,
@@ -1218,7 +1367,7 @@
         "modelSource": "local",
         "modelPath": "/data/models/sensor-anomaly-onnx/model.onnx",
         "modelType": "onnx",
-        "inputShape": "[5]",
+        "inputShape": "[1,8]",
         "inputProperty": "payload",
         "outputProperty": "prediction",
         "preprocessMode": "array",
@@ -1269,7 +1418,7 @@
         "id": "debug-sensor-anomaly",
         "type": "debug",
         "z": "ml-sensor-tab",
-        "name": "⚠️ ML Anomaly",
+        "name": "ML Anomaly",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -1299,7 +1448,7 @@
         "id": "comment-ml-sensor-info",
         "type": "comment",
         "z": "ml-sensor-tab",
-        "name": "ℹ️ To use: Place your TensorFlow.js model in /data/models/sensor-anomaly/",
+        "name": "\u2139 To use: Place your TensorFlow.js model in /data/models/sensor-anomaly/",
         "info": "**Model Requirements:**\n\n1. Place your TensorFlow.js model files in:\n   - `/data/models/sensor-anomaly/model.json`\n   - `/data/models/sensor-anomaly/weights.bin`\n\n2. Expected input: Array of 5 normalized sensor values\n3. Expected output: Single value (anomaly probability 0-1)\n\n**Training your own model:**\n```python\nimport tensorflow as tf\n\nmodel = tf.keras.Sequential([\n    tf.keras.layers.Dense(16, activation='relu', input_shape=(5,)),\n    tf.keras.layers.Dense(8, activation='relu'),\n    tf.keras.layers.Dense(1, activation='sigmoid')\n])\n\nmodel.compile(optimizer='adam', loss='binary_crossentropy')\nmodel.fit(X_train, y_train, epochs=50)\n\n# Convert to TensorFlow.js\nimport tensorflowjs as tfjs\ntfjs.converters.save_keras_model(model, 'sensor-anomaly')\n```",
         "x": 270,
         "y": 200,
@@ -1309,7 +1458,7 @@
         "id": "comment-ml-image-header",
         "type": "comment",
         "z": "ml-image-tab",
-        "name": "📷 ML Image Classification (Defect Detection)",
+        "name": "\ud83d\udcf7 ML Image Classification (Defect Detection)",
         "info": "This example demonstrates using a trained image classification model for visual defect detection.\n\nUse cases:\n- Surface defect detection\n- Product quality inspection\n- Crack detection\n- Corrosion detection",
         "x": 220,
         "y": 40,
@@ -1439,7 +1588,7 @@
         "id": "debug-defect",
         "type": "debug",
         "z": "ml-image-tab",
-        "name": "⚠️ Defect Detected",
+        "name": "Defect Detected",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -1454,7 +1603,7 @@
         "id": "debug-good",
         "type": "debug",
         "z": "ml-image-tab",
-        "name": "✅ Good",
+        "name": "Good",
         "active": true,
         "tosidebar": true,
         "console": false,
@@ -1469,7 +1618,7 @@
         "id": "comment-ml-image-info",
         "type": "comment",
         "z": "ml-image-tab",
-        "name": "ℹ️ For real images: Use node-red-contrib-image-tools to load and preprocess",
+        "name": "\u2139 For real images: Use node-red-contrib-image-tools to load and preprocess",
         "info": "**Image Preprocessing Pipeline:**\n\n1. **Load Image:**\n   - Use `node-red-contrib-image-tools` to read image files\n   - Or receive base64 encoded images via HTTP\n\n2. **Resize:**\n   - Most models expect 224x224 or 256x256 pixels\n   - Use `image-tools` resize node\n\n3. **Normalize:**\n   - Convert pixel values to 0-1 range\n   - Some models need mean subtraction\n\n4. **Format:**\n   - Convert to flat array or tensor format\n   - Shape: [1, height, width, 3] for batch\n\n**Example Models:**\n- MobileNet (general classification)\n- Custom trained defect detection\n- YOLO for object detection (ONNX)\n\n**Training Tips:**\n- Collect 100+ images per defect class\n- Use data augmentation\n- Consider transfer learning from MobileNet",
         "x": 280,
         "y": 200,
@@ -1479,7 +1628,7 @@
         "id": "comment-ml-image-onnx",
         "type": "comment",
         "z": "ml-image-tab",
-        "name": "💡 TIP: Use ONNX for models trained in PyTorch",
+        "name": "TIP: Use ONNX for models trained in PyTorch",
         "info": "**Using ONNX Models:**\n\n1. Export from PyTorch:\n```python\nimport torch\nimport torchvision.models as models\n\nmodel = models.mobilenet_v2(pretrained=True)\nmodel.eval()\n\ndummy_input = torch.randn(1, 3, 224, 224)\ntorch.onnx.export(model, dummy_input, 'model.onnx')\n```\n\n2. Configure ML Inference node:\n   - Model Type: ONNX\n   - Model Path: /data/models/your-model.onnx\n\n3. ONNX supports:\n   - ResNet, VGG, MobileNet\n   - YOLOv5, YOLOv8\n   - Custom PyTorch models",
         "x": 220,
         "y": 260,
@@ -1569,7 +1718,7 @@
         "id": "comment-http-api",
         "type": "comment",
         "z": "ml-image-tab",
-        "name": "🌐 HTTP API: POST /api/classify (multipart/form-data with 'image' field)",
+        "name": "\ud83c\udf10 HTTP API: POST /api/classify (multipart/form-data with 'image' field)",
         "info": "**HTTP API for Image Classification:**\n\nEndpoint: POST http://localhost:1880/api/classify\n\n**Option 1: File Upload**\n```bash\ncurl -X POST http://localhost:1880/api/classify \\\n  -F 'image=@/path/to/image.jpg'\n```\n\n**Option 2: Base64 JSON**\n```bash\ncurl -X POST http://localhost:1880/api/classify \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"image\": \"<base64_encoded_image>\"}'\n```\n\n**Response:**\n```json\n{\n  \"success\": true,\n  \"filename\": \"image.jpg\",\n  \"prediction\": {\n    \"class\": \"good\",\n    \"confidence\": \"95.2%\",\n    \"isDefect\": false\n  }\n}\n```",
         "x": 280,
         "y": 400,
@@ -1579,7 +1728,7 @@
         "id": "comment-onnx-header",
         "type": "comment",
         "z": "onnx-example-tab",
-        "name": "🔷 ONNX Multi-Sensor Anomaly Detection (PyTorch Model)",
+        "name": "\ud83d\udd37 ONNX Multi-Sensor Anomaly Detection (PyTorch Model)",
         "info": "This example uses an ONNX model trained with PyTorch for anomaly detection.\n\n**Model Details:**\n- Input: 10 sensor values (normalized 0-1)\n- Output: Anomaly probability (0-1)\n- Threshold: 0.5 for anomaly classification\n- Accuracy: ~98% on test data\n\n**Features detected:**\n- Cascade failures (multiple sensors drift)\n- Sensor dropouts\n- Oscillation patterns\n- Single extreme outliers\n- Gradual drift\n- Correlation breaks",
         "x": 250,
         "y": 40,
@@ -1713,7 +1862,7 @@
         "type": "function",
         "z": "onnx-example-tab",
         "name": "Interpret Result",
-        "func": "// Interpret ONNX model output\nvar prediction = msg.prediction;\nvar probability = 0;\n\n// Handle different output formats\nif (Array.isArray(prediction)) {\n    probability = prediction[0];\n    if (Array.isArray(probability)) {\n        probability = probability[0];\n    }\n} else if (typeof prediction === 'object' && prediction.output) {\n    probability = prediction.output[0];\n} else if (typeof prediction === 'number') {\n    probability = prediction;\n}\n\nvar isAnomaly = probability > 0.5;\n\nmsg.payload = {\n    inputValues: msg.payload,\n    anomalyProbability: Math.round(probability * 1000) / 10 + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? '⚠️ ANOMALY DETECTED' : '✅ Normal',\n    confidence: isAnomaly \n        ? Math.round(probability * 100) + '%' \n        : Math.round((1 - probability) * 100) + '%',\n    modelType: 'ONNX (PyTorch)',\n    timestamp: new Date().toISOString()\n};\n\nreturn msg;",
+        "func": "// Interpret ONNX model output\nvar prediction = msg.prediction;\nvar probability = 0;\n\n// Handle different output formats\nif (Array.isArray(prediction)) {\n    probability = prediction[0];\n    if (Array.isArray(probability)) {\n        probability = probability[0];\n    }\n} else if (typeof prediction === 'object' && prediction.output) {\n    probability = prediction.output[0];\n} else if (typeof prediction === 'number') {\n    probability = prediction;\n}\n\nvar isAnomaly = probability > 0.5;\n\nmsg.payload = {\n    inputValues: msg.payload,\n    anomalyProbability: Math.round(probability * 1000) / 10 + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? ' ANOMALY DETECTED' : ' Normal',\n    confidence: isAnomaly \n        ? Math.round(probability * 100) + '%' \n        : Math.round((1 - probability) * 100) + '%',\n    modelType: 'ONNX (PyTorch)',\n    timestamp: new Date().toISOString()\n};\n\nreturn msg;",
         "outputs": 1,
         "x": 680,
         "y": 160,
@@ -1757,7 +1906,7 @@
         "id": "comment-onnx-info",
         "type": "comment",
         "z": "onnx-example-tab",
-        "name": "ℹ️ ONNX supports PyTorch, scikit-learn, and other ML frameworks",
+        "name": "\u2139 ONNX supports PyTorch, scikit-learn, and other ML frameworks",
         "info": "**ONNX (Open Neural Network Exchange):**\n\nONNX is an open format for representing ML models, enabling interoperability between frameworks.\n\n**Supported Sources:**\n- PyTorch: `torch.onnx.export()`\n- scikit-learn: `skl2onnx`\n- XGBoost, LightGBM, CatBoost\n- TensorFlow (via tf2onnx)\n\n**Advantages:**\n- Framework-agnostic\n- Optimized inference with ONNX Runtime\n- Supports GPU acceleration\n- Wide ecosystem support\n\n**This Model:**\n- Trained with PyTorch\n- 3-layer neural network\n- BatchNorm + Dropout for regularization\n- Binary classification (anomaly/normal)",
         "x": 260,
         "y": 340,
@@ -1767,7 +1916,7 @@
         "id": "comment-onnx-sensors",
         "type": "comment",
         "z": "onnx-example-tab",
-        "name": "📊 10 Sensors: temp1, temp2, pressure1, pressure2, flow1, flow2, vibration1, vibration2, current, voltage",
+        "name": "10 Sensors: temp1, temp2, pressure1, pressure2, flow1, flow2, vibration1, vibration2, current, voltage",
         "info": "**Sensor Mapping:**\n\n1. `sensor_1`: Temperature Sensor 1\n2. `sensor_2`: Temperature Sensor 2\n3. `sensor_3`: Pressure Sensor 1\n4. `sensor_4`: Pressure Sensor 2\n5. `sensor_5`: Flow Sensor 1\n6. `sensor_6`: Flow Sensor 2\n7. `sensor_7`: Vibration Sensor 1\n8. `sensor_8`: Vibration Sensor 2\n9. `sensor_9`: Current Sensor\n10. `sensor_10`: Voltage Sensor\n\n**All values should be normalized to 0-1 range!**\n\nExample normalization:\n```\nnormalized = (value - min) / (max - min)\n```",
         "x": 320,
         "y": 400,
@@ -1777,7 +1926,7 @@
         "id": "comment-tflite-header",
         "type": "comment",
         "z": "tflite-example-tab",
-        "name": "🔶 TFLite Model (.tflite) - Optimized for Edge Devices",
+        "name": "\ud83d\udd36 TFLite Model (.tflite) - Optimized for Edge Devices",
         "info": "This example uses a TensorFlow Lite model optimized for edge deployment.\n\n**TFLite Advantages:**\n- Smaller model size\n- Faster inference\n- Low power consumption\n- Mobile & IoT compatible\n- Google Coral Edge TPU support\n\n**Model Details:**\n- Input: 5 sensor values (normalized 0-1)\n- Output: Anomaly probability (0-1)\n- Optimizations: DEFAULT (quantization aware)",
         "x": 250,
         "y": 40,
@@ -1798,7 +1947,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.48, 0.52, 0.55, 0.47, 0.51]",
+        "payload": "[0.5, 0.48, 0.52, 0.49, 0.51, 0.5, 0.48, 0.52]",
         "payloadType": "json",
         "x": 150,
         "y": 100,
@@ -1823,7 +1972,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.48, 0.95, 0.55, 0.47, 0.51]",
+        "payload": "[0.95, 0.48, 0.05, 0.49, 0.92, 0.5, 0.03, 0.88]",
         "payloadType": "json",
         "x": 140,
         "y": 160,
@@ -1848,7 +1997,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.05, 0.52, 0.55, 0.47, 0.51]",
+        "payload": "[0.95, 0.48, 0.05, 0.49, 0.92, 0.5, 0.03, 0.88]",
         "payloadType": "json",
         "x": 140,
         "y": 220,
@@ -1886,7 +2035,7 @@
         "type": "function",
         "z": "tflite-example-tab",
         "name": "Interpret Result",
-        "func": "// Interpret TFLite model output\nvar prediction = msg.prediction;\nvar probability = 0;\n\n// Handle different output formats\nif (Array.isArray(prediction)) {\n    probability = prediction[0];\n    if (Array.isArray(probability)) {\n        probability = probability[0];\n    }\n} else if (typeof prediction === 'number') {\n    probability = prediction;\n}\n\nvar isAnomaly = probability > 0.5;\n\nmsg.payload = {\n    inputValues: msg.payload,\n    anomalyProbability: Math.round(probability * 1000) / 10 + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? '⚠️ ANOMALY DETECTED' : '✅ Normal',\n    modelType: 'TFLite',\n    edgeOptimized: true,\n    timestamp: new Date().toISOString()\n};\n\nreturn msg;",
+        "func": "// Interpret TFLite model output\nvar prediction = msg.prediction;\nvar probability = 0;\n\n// Handle different output formats\nif (Array.isArray(prediction)) {\n    probability = prediction[0];\n    if (Array.isArray(probability)) {\n        probability = probability[0];\n    }\n} else if (typeof prediction === 'number') {\n    probability = prediction;\n}\n\nvar isAnomaly = probability > 0.5;\n\nmsg.payload = {\n    inputValues: msg.payload,\n    anomalyProbability: Math.round(probability * 1000) / 10 + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? ' ANOMALY DETECTED' : ' Normal',\n    modelType: 'TFLite',\n    edgeOptimized: true,\n    timestamp: new Date().toISOString()\n};\n\nreturn msg;",
         "outputs": 1,
         "x": 620,
         "y": 140,
@@ -1930,7 +2079,7 @@
         "id": "comment-tflite-coral",
         "type": "comment",
         "z": "tflite-example-tab",
-        "name": "🐚 For Google Coral: Enable Edge TPU delegation in ml-inference settings",
+        "name": "\ud83d\udc1a For Google Coral: Enable Edge TPU delegation in ml-inference settings",
         "info": "**Google Coral Edge TPU:**\n\nThe Coral Edge TPU accelerates TFLite model inference.\n\n**Requirements:**\n1. Google Coral USB Accelerator or Dev Board\n2. Edge TPU runtime installed\n3. Model compiled for Edge TPU\n\n**Setup:**\n1. Install Edge TPU runtime\n2. Connect Coral device\n3. Enable 'Use Edge TPU' in ml-inference node\n\n**Performance:**\n- Up to 100x faster inference\n- 4 TOPS (trillion operations per second)\n- Low power consumption (2W)\n\nSee `CORAL_INTEGRATION.md` for detailed setup instructions.",
         "x": 270,
         "y": 280,
@@ -1940,7 +2089,7 @@
         "id": "comment-tflite-formats",
         "type": "comment",
         "z": "tflite-example-tab",
-        "name": "📁 Model Format: .tflite (TensorFlow Lite FlatBuffer)",
+        "name": "\ud83d\udcc1 Model Format: .tflite (TensorFlow Lite FlatBuffer)",
         "info": "**TFLite Model Format:**\n\nTFLite uses FlatBuffer serialization for efficient model loading.\n\n**File Extension:** `.tflite`\n\n**Advantages:**\n- Single file (no separate weights)\n- Memory-mapped loading\n- Minimal dependencies\n- Platform independent\n\n**Creating TFLite Models:**\n```python\nimport tensorflow as tf\n\nconverter = tf.lite.TFLiteConverter.from_keras_model(model)\nconverter.optimizations = [tf.lite.Optimize.DEFAULT]\ntflite_model = converter.convert()\n\nwith open('model.tflite', 'wb') as f:\n    f.write(tflite_model)\n```",
         "x": 230,
         "y": 340,
@@ -1950,7 +2099,7 @@
         "id": "comment-pytorch-header",
         "type": "comment",
         "z": "pytorch-example-tab",
-        "name": "🔥 PyTorch Vibration Anomaly Detection (ONNX Export)",
+        "name": "PyTorch Vibration Anomaly Detection (ONNX Export)",
         "info": "This example uses a PyTorch model exported to ONNX.\n\n**Model: VibrationAnomalyNet**\n- Framework: PyTorch\n- Export Format: ONNX (.onnx)\n- Input: 8 vibration features\n- Output: Anomaly probability\n\n**Detects:**\n- Bearing faults\n- Rotor imbalance\n- Mechanical looseness\n- Shaft misalignment\n\n**Features (normalized 0-1):**\n1. RMS - overall vibration level\n2. Peak - maximum amplitude\n3. Crest Factor - peak/RMS ratio\n4. Kurtosis - peakedness\n5. Skewness - asymmetry\n6. Dominant Frequency\n7. Spectral Centroid\n8. Band Energy Ratio",
         "x": 270,
         "y": 40,
@@ -1971,7 +2120,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.3, 0.4, 0.5, 0.3, 0.5, 0.25, 0.4, 0.5]",
+        "payload": "[0.2, 0.25, 0.3, 0.28, 0.22, 0.35, 0.25, 0.3]",
         "payloadType": "json",
         "x": 140,
         "y": 100,
@@ -1985,7 +2134,7 @@
         "id": "inject-pytorch-bearing",
         "type": "inject",
         "z": "pytorch-example-tab",
-        "name": "⚠️ Bearing Fault",
+        "name": "Bearing Fault",
         "props": [
             {
                 "p": "payload"
@@ -1996,7 +2145,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.5, 0.9, 0.8, 0.9, 0.7, 0.7, 0.8, 0.9]",
+        "payload": "[0.75, 0.82, 0.68, 0.78, 0.72, 0.8, 0.7, 0.85]",
         "payloadType": "json",
         "x": 140,
         "y": 160,
@@ -2010,7 +2159,7 @@
         "id": "inject-pytorch-imbalance",
         "type": "inject",
         "z": "pytorch-example-tab",
-        "name": "⚠️ Rotor Imbalance",
+        "name": "Rotor Imbalance",
         "props": [
             {
                 "p": "payload"
@@ -2021,7 +2170,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.85, 0.95, 0.55, 0.45, 0.52, 0.1, 0.15, 0.3]",
+        "payload": "[0.75, 0.82, 0.68, 0.78, 0.72, 0.8, 0.7, 0.85]",
         "payloadType": "json",
         "x": 150,
         "y": 220,
@@ -2035,7 +2184,7 @@
         "id": "inject-pytorch-looseness",
         "type": "inject",
         "z": "pytorch-example-tab",
-        "name": "⚠️ Mechanical Looseness",
+        "name": "Mechanical Looseness",
         "props": [
             {
                 "p": "payload"
@@ -2046,7 +2195,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.6, 0.85, 0.75, 0.65, 0.55, 0.6, 0.65, 0.8]",
+        "payload": "[0.75, 0.82, 0.68, 0.78, 0.72, 0.8, 0.7, 0.85]",
         "payloadType": "json",
         "x": 160,
         "y": 280,
@@ -2084,7 +2233,7 @@
         "type": "function",
         "z": "pytorch-example-tab",
         "name": "Interpret Vibration Result",
-        "func": "// Interpret PyTorch vibration model output\nvar prediction = msg.prediction;\nvar probability = 0;\n\n// Handle different output formats\nif (Array.isArray(prediction)) {\n    probability = prediction[0];\n    if (Array.isArray(probability)) {\n        probability = probability[0];\n    }\n} else if (typeof prediction === 'number') {\n    probability = prediction;\n}\n\nvar isAnomaly = probability > 0.5;\n\n// Feature names for reference\nvar featureNames = [\n    'RMS', 'Peak', 'Crest Factor', 'Kurtosis',\n    'Skewness', 'Dom. Freq', 'Spectral Centroid', 'Band Energy'\n];\n\n// Build feature map\nvar features = {};\nif (Array.isArray(msg.payload)) {\n    msg.payload.forEach((val, idx) => {\n        features[featureNames[idx]] = val.toFixed(3);\n    });\n}\n\nmsg.payload = {\n    anomalyProbability: (probability * 100).toFixed(1) + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? '⚠️ FAULT DETECTED' : '✅ Normal',\n    diagnosis: isAnomaly ? getDiagnosis(msg.payload) : 'Machine operating normally',\n    features: features,\n    modelType: 'PyTorch → ONNX',\n    timestamp: new Date().toISOString()\n};\n\n// Simple diagnosis based on feature patterns\nfunction getDiagnosis(f) {\n    if (!Array.isArray(f)) return 'Unknown fault';\n    \n    // High kurtosis + crest factor = bearing\n    if (f[3] > 0.7 && f[2] > 0.7) return '🔴 Bearing fault suspected';\n    \n    // High RMS + low freq = imbalance\n    if (f[0] > 0.7 && f[5] < 0.3) return '🟠 Rotor imbalance suspected';\n    \n    // Broadband + high crest = looseness\n    if (f[6] > 0.5 && f[2] > 0.6) return '🟡 Mechanical looseness suspected';\n    \n    return '⚠️ Anomaly detected - check machine';\n}\n\nreturn msg;",
+        "func": "// Interpret PyTorch vibration model output\nvar prediction = msg.prediction;\nvar probability = 0;\n\n// Handle different output formats\nif (Array.isArray(prediction)) {\n    probability = prediction[0];\n    if (Array.isArray(probability)) {\n        probability = probability[0];\n    }\n} else if (typeof prediction === 'number') {\n    probability = prediction;\n}\n\nvar isAnomaly = probability > 0.5;\n\n// Feature names for reference\nvar featureNames = [\n    'RMS', 'Peak', 'Crest Factor', 'Kurtosis',\n    'Skewness', 'Dom. Freq', 'Spectral Centroid', 'Band Energy'\n];\n\n// Build feature map\nvar features = {};\nif (Array.isArray(msg.payload)) {\n    msg.payload.forEach((val, idx) => {\n        features[featureNames[idx]] = val.toFixed(3);\n    });\n}\n\nmsg.payload = {\n    anomalyProbability: (probability * 100).toFixed(1) + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? ' FAULT DETECTED' : ' Normal',\n    diagnosis: isAnomaly ? getDiagnosis(msg.payload) : 'Machine operating normally',\n    features: features,\n    modelType: 'PyTorch \u2192 ONNX',\n    timestamp: new Date().toISOString()\n};\n\n// Simple diagnosis based on feature patterns\nfunction getDiagnosis(f) {\n    if (!Array.isArray(f)) return 'Unknown fault';\n    \n    // High kurtosis + crest factor = bearing\n    if (f[3] > 0.7 && f[2] > 0.7) return '\ud83d\udd34 Bearing fault suspected';\n    \n    // High RMS + low freq = imbalance\n    if (f[0] > 0.7 && f[5] < 0.3) return '\ud83d\udfe0 Rotor imbalance suspected';\n    \n    // Broadband + high crest = looseness\n    if (f[6] > 0.5 && f[2] > 0.6) return '\ud83d\udfe1 Mechanical looseness suspected';\n    \n    return ' Anomaly detected - check machine';\n}\n\nreturn msg;",
         "outputs": 1,
         "x": 710,
         "y": 160,
@@ -2128,7 +2277,7 @@
         "id": "comment-pytorch-workflow",
         "type": "comment",
         "z": "pytorch-example-tab",
-        "name": "🔄 Workflow: PyTorch → train → torch.onnx.export() → ONNX → Node-RED",
+        "name": "\ud83d\udd04 Workflow: PyTorch \u2192 train \u2192 torch.onnx.export() \u2192 ONNX \u2192 Node-RED",
         "info": "**PyTorch to Node-RED Workflow:**\n\n1. **Train in PyTorch:**\n```python\nimport torch\nimport torch.nn as nn\n\nmodel = YourModel()\nmodel.train()\n# ... training loop ...\n```\n\n2. **Export to ONNX:**\n```python\nmodel.eval()\ndummy_input = torch.randn(1, input_size)\n\ntorch.onnx.export(\n    model,\n    dummy_input,\n    'model.onnx',\n    input_names=['input'],\n    output_names=['output'],\n    dynamic_axes={\n        'input': {0: 'batch'},\n        'output': {0: 'batch'}\n    }\n)\n```\n\n3. **Use in Node-RED:**\n   - Model Type: ONNX\n   - Model Path: /data/models/your-model/model.onnx\n\n**Advantages:**\n- PyTorch flexibility for training\n- ONNX Runtime for fast inference\n- Cross-platform deployment",
         "x": 290,
         "y": 360,
@@ -2138,25 +2287,18 @@
         "id": "comment-pytorch-features",
         "type": "comment",
         "z": "pytorch-example-tab",
-        "name": "📊 8 Vibration Features: RMS, Peak, Crest, Kurtosis, Skewness, DomFreq, Centroid, BandEnergy",
+        "name": "8 Vibration Features: RMS, Peak, Crest, Kurtosis, Skewness, DomFreq, Centroid, BandEnergy",
         "info": "**Vibration Feature Extraction:**\n\nThese features are commonly extracted from vibration signals for condition monitoring:\n\n| Feature | Description | Fault Indicator |\n|---------|-------------|----------------|\n| RMS | Overall vibration level | General fault severity |\n| Peak | Maximum amplitude | Impact events |\n| Crest Factor | Peak/RMS ratio | Impulsive faults |\n| Kurtosis | Peakedness | Bearing defects |\n| Skewness | Asymmetry | Asymmetric loading |\n| Dominant Freq | Main frequency | Specific fault type |\n| Spectral Centroid | Frequency center | Broadband changes |\n| Band Energy | High/low ratio | Wear progression |\n\n**Normalize all features to 0-1 range before inference!**",
         "x": 330,
         "y": 420,
         "wires": []
     },
     {
-        "id": "keras-example-tab",
-        "type": "tab",
-        "label": "Example 11: Keras Models",
-        "disabled": false,
-        "info": "Keras models in .keras and .h5 format for anomaly detection"
-    },
-    {
         "id": "comment-keras-header",
         "type": "comment",
         "z": "keras-example-tab",
-        "name": "🧠 Keras Models (.keras, .h5) - TensorFlow Neural Networks",
-        "info": "This example uses native Keras models.\n\n**Supported Formats:**\n- `.keras` - Keras 3 native format (recommended)\n- `.h5` - HDF5 legacy format\n\n**Model:**\n- Input: 6 sensor values\n- Architecture: Dense(32) → Dense(16) → Dense(1)\n- Output: Anomaly probability\n\n**Note:** Keras models require Python with TensorFlow installed in the Docker container.",
+        "name": "Keras Models (.keras, .h5) - TensorFlow Neural Networks",
+        "info": "This example uses native Keras models.\n\n**Supported Formats:**\n- `.keras` - Keras 3 native format (recommended)\n- `.h5` - HDF5 legacy format\n\n**Model:**\n- Input: 5 sensor values\n- Architecture: Dense(32) \u2192 Dense(16) \u2192 Dense(1)\n- Output: Anomaly probability\n\n**Note:** Keras models require Python with TensorFlow installed in the Docker container.",
         "x": 270,
         "y": 40,
         "wires": []
@@ -2166,34 +2308,50 @@
         "type": "inject",
         "z": "keras-example-tab",
         "name": "Normal Data",
-        "props": [{"p": "payload"}],
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
         "repeat": "",
         "crontab": "",
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.45, 0.52, 0.48, 0.55, 0.42, 0.58]",
+        "payload": "[0.48, 0.52, 0.51, 0.49, 0.50]",
         "payloadType": "json",
         "x": 130,
         "y": 100,
-        "wires": [["ml-keras-inference"]]
+        "wires": [
+            [
+                "ml-keras-inference"
+            ]
+        ]
     },
     {
         "id": "inject-keras-anomaly",
         "type": "inject",
         "z": "keras-example-tab",
-        "name": "⚠️ Anomaly Data",
-        "props": [{"p": "payload"}],
+        "name": "Anomaly Data",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
         "repeat": "",
         "crontab": "",
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.92, 0.52, 0.48, 0.05, 0.42, 0.58]",
+        "payload": "[0.92, 0.51, 0.08, 0.50, 0.88]",
         "payloadType": "json",
         "x": 140,
         "y": 160,
-        "wires": [["ml-keras-inference"]]
+        "wires": [
+            [
+                "ml-keras-inference"
+            ]
+        ]
     },
     {
         "id": "ml-keras-inference",
@@ -2203,7 +2361,7 @@
         "modelSource": "local",
         "modelPath": "/data/models/keras-anomaly/model.keras",
         "modelType": "keras",
-        "inputShape": "[1,6]",
+        "inputShape": "[1,5]",
         "inputProperty": "payload",
         "outputProperty": "prediction",
         "preprocessMode": "array",
@@ -2211,18 +2369,27 @@
         "warmup": false,
         "x": 390,
         "y": 120,
-        "wires": [["function-keras-interpret", "debug-keras-raw"]]
+        "wires": [
+            [
+                "function-keras-interpret",
+                "debug-keras-raw"
+            ]
+        ]
     },
     {
         "id": "function-keras-interpret",
         "type": "function",
         "z": "keras-example-tab",
         "name": "Interpret Result",
-        "func": "var prediction = msg.prediction;\nvar prob = 0;\n\nif (Array.isArray(prediction)) {\n    prob = prediction[0];\n    if (Array.isArray(prob)) prob = prob[0];\n}\n\nvar isAnomaly = prob > 0.5;\n\nmsg.payload = {\n    probability: (prob * 100).toFixed(1) + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? '⚠️ ANOMALY' : '✅ Normal',\n    modelType: 'Keras (.keras)',\n    timestamp: new Date().toISOString()\n};\n\nreturn msg;",
+        "func": "var prediction = msg.prediction;\nvar prob = 0;\n\nif (Array.isArray(prediction)) {\n    prob = prediction[0];\n    if (Array.isArray(prob)) prob = prob[0];\n}\n\nvar isAnomaly = prob > 0.5;\n\nmsg.payload = {\n    probability: (prob * 100).toFixed(1) + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? ' ANOMALY' : ' Normal',\n    modelType: 'Keras (.keras)',\n    timestamp: new Date().toISOString()\n};\n\nreturn msg;",
         "outputs": 1,
         "x": 620,
         "y": 100,
-        "wires": [["debug-keras-result"]]
+        "wires": [
+            [
+                "debug-keras-result"
+            ]
+        ]
     },
     {
         "id": "debug-keras-raw",
@@ -2258,24 +2425,17 @@
         "id": "comment-keras-h5",
         "type": "comment",
         "z": "keras-example-tab",
-        "name": "💡 Also supports .h5 format: /data/models/keras-h5-anomaly/model.h5",
+        "name": "Also supports .h5 format: /data/models/keras-h5-anomaly/model.h5",
         "info": "**HDF5 Format (.h5):**\n\nThe legacy Keras format, still widely used:\n\n```python\n# Save\nmodel.save('model.h5')\n\n# Load\nmodel = keras.models.load_model('model.h5')\n```\n\nBoth `.keras` and `.h5` are auto-detected.",
         "x": 260,
         "y": 220,
         "wires": []
     },
     {
-        "id": "sklearn-example-tab",
-        "type": "tab",
-        "label": "Example 12: scikit-learn",
-        "disabled": false,
-        "info": "scikit-learn models - Random Forest, Gradient Boosting, SVM, etc."
-    },
-    {
         "id": "comment-sklearn-header",
         "type": "comment",
         "z": "sklearn-example-tab",
-        "name": "🌲 scikit-learn Models (.pkl, .joblib) - Classic Machine Learning",
+        "name": "scikit-learn Models (.pkl, .joblib) - Classic Machine Learning",
         "info": "This example uses scikit-learn models.\n\n**Supported Formats:**\n- `.pkl` - Python pickle format\n- `.joblib` - Joblib format (recommended for large models)\n\n**Models Included:**\n- Random Forest Classifier (100 trees)\n- Gradient Boosting Classifier\n\n**Output:**\n- Class probabilities: [normal_prob, anomaly_prob]",
         "x": 280,
         "y": 40,
@@ -2286,34 +2446,50 @@
         "type": "inject",
         "z": "sklearn-example-tab",
         "name": "Normal Data",
-        "props": [{"p": "payload"}],
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
         "repeat": "",
         "crontab": "",
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.45, 0.52, 0.48, 0.55, 0.42, 0.58]",
+        "payload": "[0.48, 0.52, 0.51, 0.49, 0.50, 0.47]",
         "payloadType": "json",
         "x": 130,
         "y": 100,
-        "wires": [["ml-sklearn-rf"]]
+        "wires": [
+            [
+                "ml-sklearn-rf"
+            ]
+        ]
     },
     {
         "id": "inject-sklearn-anomaly",
         "type": "inject",
         "z": "sklearn-example-tab",
-        "name": "⚠️ Anomaly Data",
-        "props": [{"p": "payload"}],
+        "name": "Anomaly Data",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
         "repeat": "",
         "crontab": "",
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.95, 0.52, 0.03, 0.55, 0.88, 0.58]",
+        "payload": "[0.92, 0.51, 0.08, 0.50, 0.88, 0.52]",
         "payloadType": "json",
         "x": 140,
         "y": 160,
-        "wires": [["ml-sklearn-rf"]]
+        "wires": [
+            [
+                "ml-sklearn-rf"
+            ]
+        ]
     },
     {
         "id": "ml-sklearn-rf",
@@ -2331,18 +2507,27 @@
         "warmup": false,
         "x": 380,
         "y": 120,
-        "wires": [["function-sklearn-interpret", "debug-sklearn-raw"]]
+        "wires": [
+            [
+                "function-sklearn-interpret",
+                "debug-sklearn-raw"
+            ]
+        ]
     },
     {
         "id": "function-sklearn-interpret",
         "type": "function",
         "z": "sklearn-example-tab",
         "name": "Interpret Probabilities",
-        "func": "var prediction = msg.prediction;\nvar probs = [0, 0];\n\n// sklearn returns [[normal_prob, anomaly_prob]]\nif (Array.isArray(prediction) && prediction.length > 0) {\n    if (Array.isArray(prediction[0])) {\n        probs = prediction[0];\n    } else {\n        probs = prediction;\n    }\n}\n\nvar normalProb = probs[0] || 0;\nvar anomalyProb = probs[1] || 0;\nvar isAnomaly = anomalyProb > 0.5;\n\nmsg.payload = {\n    normalProbability: (normalProb * 100).toFixed(1) + '%',\n    anomalyProbability: (anomalyProb * 100).toFixed(1) + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? '⚠️ ANOMALY' : '✅ Normal',\n    modelType: 'Random Forest (sklearn)',\n    timestamp: new Date().toISOString()\n};\n\nreturn msg;",
+        "func": "var prediction = msg.prediction;\nvar probs = [0, 0];\n\n// sklearn returns [[normal_prob, anomaly_prob]]\nif (Array.isArray(prediction) && prediction.length > 0) {\n    if (Array.isArray(prediction[0])) {\n        probs = prediction[0];\n    } else {\n        probs = prediction;\n    }\n}\n\nvar normalProb = probs[0] || 0;\nvar anomalyProb = probs[1] || 0;\nvar isAnomaly = anomalyProb > 0.5;\n\nmsg.payload = {\n    normalProbability: (normalProb * 100).toFixed(1) + '%',\n    anomalyProbability: (anomalyProb * 100).toFixed(1) + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? ' ANOMALY' : ' Normal',\n    modelType: 'Random Forest (sklearn)',\n    timestamp: new Date().toISOString()\n};\n\nreturn msg;",
         "outputs": 1,
         "x": 620,
         "y": 100,
-        "wires": [["debug-sklearn-result"]]
+        "wires": [
+            [
+                "debug-sklearn-result"
+            ]
+        ]
     },
     {
         "id": "debug-sklearn-raw",
@@ -2379,34 +2564,50 @@
         "type": "inject",
         "z": "sklearn-example-tab",
         "name": "Normal (GB)",
-        "props": [{"p": "payload"}],
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
         "repeat": "",
         "crontab": "",
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.48, 0.50, 0.52, 0.49, 0.51, 0.47]",
+        "payload": "[0.48, 0.52, 0.51, 0.49, 0.50, 0.47]",
         "payloadType": "json",
         "x": 130,
         "y": 260,
-        "wires": [["ml-sklearn-gb"]]
+        "wires": [
+            [
+                "ml-sklearn-gb"
+            ]
+        ]
     },
     {
         "id": "inject-sklearn-gb-anomaly",
         "type": "inject",
         "z": "sklearn-example-tab",
-        "name": "⚠️ Anomaly (GB)",
-        "props": [{"p": "payload"}],
+        "name": "Anomaly (GB)",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
         "repeat": "",
         "crontab": "",
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.05, 0.92, 0.12, 0.88, 0.08, 0.95]",
+        "payload": "[0.92, 0.51, 0.08, 0.50, 0.88, 0.52]",
         "payloadType": "json",
         "x": 150,
         "y": 320,
-        "wires": [["ml-sklearn-gb"]]
+        "wires": [
+            [
+                "ml-sklearn-gb"
+            ]
+        ]
     },
     {
         "id": "ml-sklearn-gb",
@@ -2424,18 +2625,27 @@
         "warmup": false,
         "x": 400,
         "y": 280,
-        "wires": [["function-sklearn-gb-interpret", "debug-sklearn-gb-raw"]]
+        "wires": [
+            [
+                "function-sklearn-gb-interpret",
+                "debug-sklearn-gb-raw"
+            ]
+        ]
     },
     {
         "id": "function-sklearn-gb-interpret",
         "type": "function",
         "z": "sklearn-example-tab",
         "name": "Interpret GB",
-        "func": "var prediction = msg.prediction;\nvar probs = [0, 0];\n\nif (Array.isArray(prediction) && prediction.length > 0) {\n    if (Array.isArray(prediction[0])) {\n        probs = prediction[0];\n    } else {\n        probs = prediction;\n    }\n}\n\nvar anomalyProb = probs[1] || 0;\nvar isAnomaly = anomalyProb > 0.5;\n\nmsg.payload = {\n    anomalyProbability: (anomalyProb * 100).toFixed(1) + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? '⚠️ ANOMALY' : '✅ Normal',\n    modelType: 'Gradient Boosting (sklearn)',\n    timestamp: new Date().toISOString()\n};\n\nreturn msg;",
+        "func": "var prediction = msg.prediction;\nvar probs = [0, 0];\n\nif (Array.isArray(prediction) && prediction.length > 0) {\n    if (Array.isArray(prediction[0])) {\n        probs = prediction[0];\n    } else {\n        probs = prediction;\n    }\n}\n\nvar anomalyProb = probs[1] || 0;\nvar isAnomaly = anomalyProb > 0.5;\n\nmsg.payload = {\n    anomalyProbability: (anomalyProb * 100).toFixed(1) + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? ' ANOMALY' : ' Normal',\n    modelType: 'Gradient Boosting (sklearn)',\n    timestamp: new Date().toISOString()\n};\n\nreturn msg;",
         "outputs": 1,
         "x": 630,
         "y": 260,
-        "wires": [["debug-sklearn-gb-result"]]
+        "wires": [
+            [
+                "debug-sklearn-gb-result"
+            ]
+        ]
     },
     {
         "id": "debug-sklearn-gb-raw",
@@ -2471,10 +2681,397 @@
         "id": "comment-sklearn-models",
         "type": "comment",
         "z": "sklearn-example-tab",
-        "name": "🔧 Supported: RandomForest, GradientBoosting, SVM, LogisticRegression, DecisionTree, KNN, etc.",
+        "name": "Supported: RandomForest, GradientBoosting, SVM, LogisticRegression, DecisionTree, KNN, etc.",
         "info": "**Supported scikit-learn Models:**\n\n- RandomForestClassifier\n- GradientBoostingClassifier\n- SVC (Support Vector Machine)\n- LogisticRegression\n- DecisionTreeClassifier\n- KNeighborsClassifier\n- AdaBoostClassifier\n- ExtraTreesClassifier\n- And any model with `.predict()` or `.predict_proba()`\n\n**Saving Models:**\n```python\nimport pickle\nimport joblib\n\n# Pickle\nwith open('model.pkl', 'wb') as f:\n    pickle.dump(model, f)\n\n# Joblib (better for large models)\njoblib.dump(model, 'model.joblib')\n```",
         "x": 330,
         "y": 400,
+        "wires": []
+    },
+    {
+        "id": "pca-inject-normal",
+        "type": "inject",
+        "z": "pca-example-tab",
+        "name": "Normal Multi-Sensor Data",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "{\"temperature\": 65, \"vibration\": 2.1, \"pressure\": 101, \"current\": 12.5, \"speed\": 1480}",
+        "payloadType": "json",
+        "x": 180,
+        "y": 100,
+        "wires": [
+            [
+                "pca-anomaly-node"
+            ]
+        ]
+    },
+    {
+        "id": "pca-inject-anomaly",
+        "type": "inject",
+        "z": "pca-example-tab",
+        "name": "Anomaly: High Temp + Vibration",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "{\"temperature\": 95, \"vibration\": 8.5, \"pressure\": 98, \"current\": 18.2, \"speed\": 1420}",
+        "payloadType": "json",
+        "x": 190,
+        "y": 160,
+        "wires": [
+            [
+                "pca-anomaly-node"
+            ]
+        ]
+    },
+    {
+        "id": "pca-anomaly-node",
+        "type": "pca-anomaly",
+        "z": "pca-example-tab",
+        "name": "PCA Multi-Sensor",
+        "windowSize": 50,
+        "threshold": 3,
+        "autoComponents": true,
+        "varianceThreshold": 0.95,
+        "x": 450,
+        "y": 130,
+        "wires": [
+            [
+                "pca-debug-normal"
+            ],
+            [
+                "pca-debug-anomaly"
+            ]
+        ]
+    },
+    {
+        "id": "pca-debug-normal",
+        "type": "debug",
+        "z": "pca-example-tab",
+        "name": "Normal",
+        "active": true,
+        "tosidebar": true,
+        "x": 650,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "pca-debug-anomaly",
+        "type": "debug",
+        "z": "pca-example-tab",
+        "name": "Anomaly + Contributions",
+        "active": true,
+        "tosidebar": true,
+        "x": 690,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "weibull-rul-tab",
+        "type": "tab",
+        "label": "Example 15: Weibull RUL Analysis",
+        "disabled": false,
+        "info": "Weibull-based Remaining Useful Life prediction using Trend Predictor"
+    },
+    {
+        "id": "weibull-inject-1",
+        "type": "inject",
+        "z": "weibull-rul-tab",
+        "name": "Operating Hours: 1000h",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "1000",
+        "payloadType": "num",
+        "x": 180,
+        "y": 100,
+        "wires": [
+            [
+                "weibull-trend-node"
+            ]
+        ]
+    },
+    {
+        "id": "weibull-inject-2",
+        "type": "inject",
+        "z": "weibull-rul-tab",
+        "name": "Near End of Life: 1300h",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "1300",
+        "payloadType": "num",
+        "x": 180,
+        "y": 180,
+        "wires": [
+            [
+                "weibull-trend-node"
+            ]
+        ]
+    },
+    {
+        "id": "weibull-trend-node",
+        "type": "trend-predictor",
+        "z": "weibull-rul-tab",
+        "name": "Weibull RUL",
+        "mode": "rul",
+        "rulMethod": "weibull",
+        "weibullBeta": 3.5,
+        "weibullEta": 1350,
+        "warningThreshold": 80,
+        "criticalThreshold": 95,
+        "windowSize": 50,
+        "x": 430,
+        "y": 140,
+        "wires": [
+            [
+                "weibull-debug-ok"
+            ],
+            [
+                "weibull-debug-critical"
+            ]
+        ]
+    },
+    {
+        "id": "weibull-debug-ok",
+        "type": "debug",
+        "z": "weibull-rul-tab",
+        "name": "RUL OK",
+        "active": true,
+        "tosidebar": true,
+        "x": 620,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "weibull-debug-critical",
+        "type": "debug",
+        "z": "weibull-rul-tab",
+        "name": "RUL Critical",
+        "active": true,
+        "tosidebar": true,
+        "x": 630,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "cepstrum-tab",
+        "type": "tab",
+        "label": "Example 17: Cepstrum Gearbox Analysis",
+        "disabled": false,
+        "info": "Cepstrum analysis for gearbox fault detection using Signal Analyzer"
+    },
+    {
+        "id": "cepstrum-inject",
+        "type": "inject",
+        "z": "cepstrum-tab",
+        "name": "Simulate Gearbox Signal",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[]",
+        "payloadType": "json",
+        "x": 170,
+        "y": 100,
+        "wires": [
+            [
+                "cepstrum-gen"
+            ]
+        ]
+    },
+    {
+        "id": "cepstrum-gen",
+        "type": "function",
+        "z": "cepstrum-tab",
+        "name": "Generate Gearbox Signal",
+        "func": "var samples = 2048;\nvar fs = 10000;\nvar shaftFreq = 25;\nvar gearTeeth = 20;\nvar gmf = shaftFreq * gearTeeth;\n\nvar signal = [];\nfor (var i = 0; i < samples; i++) {\n    var t = i / fs;\n    var v = Math.sin(2 * Math.PI * gmf * t);\n    v += 0.4 * Math.sin(2 * Math.PI * (gmf - shaftFreq) * t);\n    v += 0.4 * Math.sin(2 * Math.PI * (gmf + shaftFreq) * t);\n    v += 0.2 * (Math.random() - 0.5);\n    signal.push(v);\n}\nmsg.payload = signal;\nreturn msg;",
+        "outputs": 1,
+        "x": 400,
+        "y": 100,
+        "wires": [
+            [
+                "cepstrum-signal-node"
+            ]
+        ]
+    },
+    {
+        "id": "cepstrum-signal-node",
+        "type": "signal-analyzer",
+        "z": "cepstrum-tab",
+        "name": "Cepstrum Analysis",
+        "mode": "cepstrum",
+        "samplingRate": 10000,
+        "fftSize": 2048,
+        "shaftSpeed": 1500,
+        "gearTeethCount": 20,
+        "quefrencyRangeMin": 0.001,
+        "quefrencyRangeMax": 0.1,
+        "cepstrumPeakThreshold": 0.1,
+        "x": 630,
+        "y": 100,
+        "wires": [
+            [
+                "cepstrum-debug-normal"
+            ],
+            [
+                "cepstrum-debug-fault"
+            ]
+        ]
+    },
+    {
+        "id": "cepstrum-debug-normal",
+        "type": "debug",
+        "z": "cepstrum-tab",
+        "name": "Normal",
+        "active": true,
+        "tosidebar": true,
+        "x": 830,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "cepstrum-debug-fault",
+        "type": "debug",
+        "z": "cepstrum-tab",
+        "name": "Gear Fault",
+        "active": true,
+        "tosidebar": true,
+        "x": 840,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "mahalanobis-tab",
+        "type": "tab",
+        "label": "Example 18: Mahalanobis Anomaly Detection",
+        "disabled": false,
+        "info": "Multivariate anomaly detection with Mahalanobis distance using Multi-Value Processor"
+    },
+    {
+        "id": "mahal-inject-normal",
+        "type": "inject",
+        "z": "mahalanobis-tab",
+        "name": "Normal Sensor Data",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "{\"temperature\": 65, \"vibration\": 2.1, \"pressure\": 101, \"current\": 12.5}",
+        "payloadType": "json",
+        "x": 170,
+        "y": 100,
+        "wires": [
+            [
+                "mahal-node"
+            ]
+        ]
+    },
+    {
+        "id": "mahal-inject-anomaly",
+        "type": "inject",
+        "z": "mahalanobis-tab",
+        "name": "Anomaly Data",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "{\"temperature\": 90, \"vibration\": 8.0, \"pressure\": 85, \"current\": 20.5}",
+        "payloadType": "json",
+        "x": 150,
+        "y": 180,
+        "wires": [
+            [
+                "mahal-node"
+            ]
+        ]
+    },
+    {
+        "id": "mahal-node",
+        "type": "multi-value-processor",
+        "z": "mahalanobis-tab",
+        "name": "Mahalanobis Distance",
+        "mode": "analyze",
+        "anomalyMethod": "mahalanobis",
+        "threshold": 3.0,
+        "warningThreshold": 2.0,
+        "windowSize": 50,
+        "x": 400,
+        "y": 140,
+        "wires": [
+            [
+                "mahal-debug-normal"
+            ],
+            [
+                "mahal-debug-anomaly"
+            ]
+        ]
+    },
+    {
+        "id": "mahal-debug-normal",
+        "type": "debug",
+        "z": "mahalanobis-tab",
+        "name": "Normal",
+        "active": true,
+        "tosidebar": true,
+        "x": 610,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "mahal-debug-anomaly",
+        "type": "debug",
+        "z": "mahalanobis-tab",
+        "name": "Anomaly",
+        "active": true,
+        "tosidebar": true,
+        "x": 620,
+        "y": 180,
         "wires": []
     }
 ]

@@ -7,6 +7,11 @@
             sensorWeights: { value: '{"temp":1.0,"vibration":1.5,"pressure":1.0}' },
             aggregationMethod: { value: "weighted" },
             outputScale: { value: "0-100" },
+            // Threshold configuration
+            healthyThreshold: { value: 80 },
+            warningThreshold: { value: 60 },
+            degradedThreshold: { value: 40 },
+            criticalThreshold: { value: 20 },
             outputTopic: { value: "" },
             debug: { value: false }
         },
@@ -20,7 +25,10 @@
             return this.name ? "node_label_italic" : "";
         },
         outputLabels: ["healthy", "degraded/critical"],
+        paletteLabel: "Health Index",
         oneditprepare: function() {
+            var node = this;
+            
             // Collapsible sections
             $(".cm-section-header").on("click", function() {
                 var $content = $(this).next(".cm-section-content");
@@ -28,6 +36,106 @@
                 $content.slideToggle(200);
                 $icon.toggleClass("fa-chevron-down fa-chevron-up");
             });
+            
+            // Visual Sensor Weight Editor
+            function updateSensorList() {
+                var weightsJson = $("#node-input-sensorWeights").val();
+                var weights = {};
+                try {
+                    weights = JSON.parse(weightsJson);
+                } catch(e) {
+                    weights = {};
+                }
+                
+                var html = '';
+                Object.keys(weights).forEach(function(sensor) {
+                    html += '<div class="sensor-row" style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px; padding: 6px; background: #fff; border-radius: 4px;">';
+                    html += '<input type="text" class="sensor-name" value="' + sensor + '" style="flex: 1; padding: 4px 8px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">';
+                    html += '<input type="range" class="sensor-weight-slider" min="0" max="3" step="0.1" value="' + weights[sensor] + '" style="flex: 2;">';
+                    html += '<input type="number" class="sensor-weight-value" value="' + weights[sensor] + '" min="0" max="5" step="0.1" style="width: 50px; padding: 4px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">';
+                    html += '<button type="button" class="remove-sensor" style="background: #f44336; color: #fff; border: none; border-radius: 3px; padding: 4px 8px; cursor: pointer;"><i class="fa fa-trash"></i></button>';
+                    html += '</div>';
+                });
+                
+                if (Object.keys(weights).length === 0) {
+                    html = '<div style="text-align: center; color: #999; padding: 10px;">No sensors configured. Add a sensor above.</div>';
+                }
+                
+                $("#sensor-list").html(html);
+                
+                // Bind events
+                $(".sensor-weight-slider").on("input", function() {
+                    $(this).siblings(".sensor-weight-value").val($(this).val());
+                    syncWeightsToJson();
+                });
+                
+                $(".sensor-weight-value").on("change", function() {
+                    $(this).siblings(".sensor-weight-slider").val($(this).val());
+                    syncWeightsToJson();
+                });
+                
+                $(".sensor-name").on("change", function() {
+                    syncWeightsToJson();
+                });
+                
+                $(".remove-sensor").on("click", function() {
+                    $(this).closest(".sensor-row").remove();
+                    syncWeightsToJson();
+                });
+            }
+            
+            function syncWeightsToJson() {
+                var weights = {};
+                $(".sensor-row").each(function() {
+                    var name = $(this).find(".sensor-name").val().trim();
+                    var value = parseFloat($(this).find(".sensor-weight-value").val()) || 1.0;
+                    if (name) {
+                        weights[name] = value;
+                    }
+                });
+                $("#node-input-sensorWeights").val(JSON.stringify(weights));
+            }
+            
+            $("#add-sensor-btn").on("click", function() {
+                var weightsJson = $("#node-input-sensorWeights").val();
+                var weights = {};
+                try {
+                    weights = JSON.parse(weightsJson);
+                } catch(e) {
+                    weights = {};
+                }
+                var newName = "sensor" + (Object.keys(weights).length + 1);
+                weights[newName] = 1.0;
+                $("#node-input-sensorWeights").val(JSON.stringify(weights));
+                updateSensorList();
+            });
+            
+            $("#node-input-sensorWeights").on("change", updateSensorList);
+            updateSensorList();
+            
+            // Threshold bar visualization
+            function updateThresholdBar() {
+                var healthy = parseInt($("#node-input-healthyThreshold").val()) || 80;
+                var warning = parseInt($("#node-input-warningThreshold").val()) || 60;
+                var degraded = parseInt($("#node-input-degradedThreshold").val()) || 40;
+                var critical = parseInt($("#node-input-criticalThreshold").val()) || 20;
+                
+                // Calculate widths
+                $("#bar-critical").css("flex", critical);
+                $("#bar-degraded").css("flex", degraded - critical);
+                $("#bar-warning").css("flex", warning - degraded);
+                $("#bar-healthy").css("flex", 100 - healthy);
+                
+                $("#threshold-labels").text(
+                    "0-" + critical + " Critical | " + 
+                    critical + "-" + degraded + " Degraded | " + 
+                    degraded + "-" + warning + " Warning | " +
+                    warning + "-" + healthy + " | " + healthy + "-100 Healthy"
+                );
+            }
+            
+            $("#node-input-healthyThreshold, #node-input-warningThreshold, #node-input-degradedThreshold, #node-input-criticalThreshold").on("input change", updateThresholdBar);
+            updateThresholdBar();
         },
         oneditsave: function() {
         }
@@ -197,10 +305,61 @@
                 <div class="cm-help-text">Higher weights = more impact on overall health</div>
             </div>
             
+            <!-- Visual Sensor Weight Editor -->
+            <div id="sensor-weight-editor" style="margin-top: 12px; padding: 10px; background: #f5f5f5; border-radius: 4px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <strong style="font-size: 12px;"><i class="fa fa-sliders"></i> Visual Editor</strong>
+                    <button type="button" id="add-sensor-btn" style="font-size: 11px; padding: 4px 8px; cursor: pointer;">
+                        <i class="fa fa-plus"></i> Add Sensor
+                    </button>
+                </div>
+                <div id="sensor-list" style="max-height: 200px; overflow-y: auto;"></div>
+            </div>
+            
             <div class="cm-info-box">
-                <strong>💡 Example:</strong>
-                {"temp": 1.0, "vibration": 1.5, "pressure": 0.8}<br>
-                Vibration is 1.5× more important than temperature in health calculation.
+                <strong>Tip:</strong> Use the visual editor above or edit JSON directly. 
+                Weight 1.0 = normal importance, 2.0 = double importance.
+            </div>
+        </div>
+    </div>
+    
+    <!-- Health Thresholds -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-tachometer-alt"></i> Health Thresholds</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div style="margin-bottom: 12px;">
+                <div id="threshold-bar" style="height: 30px; display: flex; border-radius: 4px; overflow: hidden; margin-bottom: 8px;">
+                    <div id="bar-critical" style="background: #f44336; flex: 1;"></div>
+                    <div id="bar-degraded" style="background: #ff9800; flex: 1;"></div>
+                    <div id="bar-warning" style="background: #ffc107; flex: 1;"></div>
+                    <div id="bar-healthy" style="background: #4caf50; flex: 1;"></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 10px; color: #666;">
+                    <span>0</span>
+                    <span id="threshold-labels">Critical | Degraded | Warning | Healthy</span>
+                    <span>100</span>
+                </div>
+            </div>
+            <div class="cm-config-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                <div class="cm-config-item">
+                    <label style="color: #4caf50;"><i class="fa fa-heart"></i> Healthy ≥</label>
+                    <input type="number" id="node-input-healthyThreshold" min="0" max="100" value="80">
+                </div>
+                <div class="cm-config-item">
+                    <label style="color: #ffc107;"><i class="fa fa-exclamation-circle"></i> Warning ≥</label>
+                    <input type="number" id="node-input-warningThreshold" min="0" max="100" value="60">
+                </div>
+                <div class="cm-config-item">
+                    <label style="color: #ff9800;"><i class="fa fa-exclamation-triangle"></i> Degraded ≥</label>
+                    <input type="number" id="node-input-degradedThreshold" min="0" max="100" value="40">
+                </div>
+                <div class="cm-config-item">
+                    <label style="color: #f44336;"><i class="fa fa-times-circle"></i> Critical ≥</label>
+                    <input type="number" id="node-input-criticalThreshold" min="0" max="100" value="20">
+                </div>
             </div>
         </div>
     </div>
@@ -230,36 +389,24 @@
         </div>
     </div>
     
-    <!-- Output Scale -->
+    <!-- Output Settings -->
     <div class="cm-section">
         <div class="cm-section-header">
-            <span><i class="fa fa-arrows-h"></i> Output Scale</span>
+            <span><i class="fa fa-arrows-h"></i> Output Settings</span>
             <i class="fa fa-chevron-down cm-collapse-icon"></i>
         </div>
-        <div class="cm-section-content">
-            <div class="cm-config-item">
-                <label for="node-input-outputScale">
-                    <i class="fa fa-sliders"></i> Scale
-                </label>
-        <select id="node-input-outputScale">
-            <option value="0-100">0-100 (Percentage)</option>
-        </select>
+        <div class="cm-section-content" style="display: none;">
+            <div class="form-row">
+                <label for="node-input-outputScale"><i class="fa fa-sliders"></i> Output Scale</label>
+                <select id="node-input-outputScale">
+                    <option value="0-100">0-100 (Percentage)</option>
+                    <option value="0-1">0-1 (Normalized)</option>
+                </select>
             </div>
-            
-            <div class="cm-status-grid">
-                <div class="cm-status-item cm-status-healthy">
-                    <strong>80-100</strong><br>Healthy
-                </div>
-                <div class="cm-status-item cm-status-degraded">
-                    <strong>60-80</strong><br>Degraded
-                </div>
-                <div class="cm-status-item cm-status-warning">
-                    <strong>40-60</strong><br>Warning
-                </div>
-                <div class="cm-status-item cm-status-critical">
-                    <strong>0-40</strong><br>Critical
-                </div>
-            </div>
+            <p style="font-size: 11px; color: #888; margin-top: 8px;">
+                <b>0-100:</b> Traditional percentage format (e.g., 85.5%)<br>
+                <b>0-1:</b> Normalized format for ML models (e.g., 0.855)
+            </p>
         </div>
     </div>
     
@@ -324,23 +471,34 @@
     <h3>Outputs</h3>
     <dl class="message-properties">
         <dt>Output 1 (top)</dt>
-        <dd>Healthy status (health index ≥ 60)</dd>
+        <dd>Healthy or attention status (health index ≥ warning threshold)</dd>
         <dt>Output 2 (bottom)</dt>
-        <dd>Degraded or critical status (health index < 60)</dd>
+        <dd>Warning, degraded, or critical status (health index < warning threshold)</dd>
     </dl>
     <p><b>Output properties:</b></p>
     <dl class="message-properties">
         <dt>payload <span class="property-type">number</span></dt>
         <dd>Overall health index (0-100)</dd>
         <dt>status <span class="property-type">string</span></dt>
-        <dd>"healthy", "degraded", "warning", or "critical"</dd>
+        <dd>"healthy", "attention", "warning", "degraded", or "critical"</dd>
         <dt>sensorScores <span class="property-type">object</span></dt>
         <dd>Individual health scores per sensor</dd>
         <dt>worstSensor <span class="property-type">object</span></dt>
         <dd>Sensor with lowest health score</dd>
         <dt>contributingFactors <span class="property-type">array</span></dt>
         <dd>List of issues reducing health index</dd>
+        <dt>thresholds <span class="property-type">object</span></dt>
+        <dd>Configured threshold values: {healthy, warning, degraded, critical}</dd>
     </dl>
+    
+    <h3>Configurable Thresholds</h3>
+    <p>Use the visual threshold editor to set custom status boundaries:</p>
+    <ul>
+        <li><b>Healthy ≥</b> - Index above this is healthy (default: 80)</li>
+        <li><b>Warning ≥</b> - Index above this triggers warning (default: 60)</li>
+        <li><b>Degraded ≥</b> - Index above this is degraded (default: 40)</li>
+        <li><b>Critical ≥</b> - Index above this is critical (default: 20)</li>
+    </ul>
     <h3>Details</h3>
     <p>The health index combines multiple sensor signals into a single 0-100 score representing overall equipment condition.</p>
     <p><b>Health Score Calculation:</b></p>

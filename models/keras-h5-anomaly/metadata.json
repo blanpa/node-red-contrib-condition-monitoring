@@ -1,14 +1,26 @@
 {
-  "name": "keras-sensor-anomaly-h5",
+  "name": "keras-sensor-anomaly",
   "version": "2.0.0",
   "type": "keras-h5",
-  "description": "5-sensor anomaly detection (Legacy HDF5 format)",
+  "description": "5-sensor anomaly detection (Keras 3 format)",
   "inputShape": [
     1,
     5
   ],
-  "trainedOn": "Realistic synthetic industrial data",
-  "createdAt": "2026-01-01T00:29:42.951650",
-  "framework": "keras",
-  "accuracy": 0.9881250262260437
+  "trainedOn": "Synthetic industrial data with clear anomaly patterns",
+  "accuracy": 1.0,
+  "normalExample": [
+    0.48,
+    0.52,
+    0.51,
+    0.49,
+    0.5
+  ],
+  "anomalyExample": [
+    0.92,
+    0.51,
+    0.08,
+    0.5,
+    0.88
+  ]
 }

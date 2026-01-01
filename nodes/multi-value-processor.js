@@ -6,14 +6,19 @@ module.exports = function(RED) {
         var node = this;
         
         // Configuration
-        this.mode = config.mode || "split"; // split, analyze, correlate
+        this.mode = config.mode || "split"; // split, analyze, correlate, aggregate
         this.field = config.field || "payload";
+        
+        // Aggregation settings
+        this.aggregateMethod = config.aggregateMethod || "mean"; // mean, median, min, max, sum, range, stddev
+        this.aggregateOutput = config.aggregateOutput || "single"; // single, all
         this.outputMode = config.outputMode || "sequential"; // sequential, parallel
         this.preserveOriginal = config.preserveOriginal !== false;
         
         // Anomaly detection settings
-        this.anomalyMethod = config.anomalyMethod || "zscore";
+        this.anomalyMethod = config.anomalyMethod || "zscore"; // zscore, iqr, threshold, mahalanobis
         this.threshold = parseFloat(config.threshold) || 3.0;
+        this.warningThreshold = parseFloat(config.warningThreshold) || 2.0; // For Mahalanobis warning level
         this.windowSize = parseInt(config.windowSize) || 100;
         this.minThreshold = config.minThreshold !== "" && config.minThreshold !== undefined ? parseFloat(config.minThreshold) : null;
         this.maxThreshold = config.maxThreshold !== "" && config.maxThreshold !== undefined ? parseFloat(config.maxThreshold) : null;
@@ -124,6 +129,316 @@ module.exports = function(RED) {
             var ranksX = getRanks(x);
             var ranksY = getRanks(y);
             return calculatePearsonCorrelation(ranksX, ranksY);
+        }
+        
+        // Cross-Correlation - finds time lag between two signals
+        function calculateCrossCorrelation(x, y, maxLag) {
+            var n = Math.min(x.length, y.length);
+            maxLag = maxLag || Math.floor(n / 4);
+            
+            var meanX = calculateMean(x.slice(0, n));
+            var meanY = calculateMean(y.slice(0, n));
+            
+            var stdX = calculateStdDev(x.slice(0, n), meanX);
+            var stdY = calculateStdDev(y.slice(0, n), meanY);
+            
+            if (stdX === 0 || stdY === 0) {
+                return { lag: 0, correlation: 0, correlations: [] };
+            }
+            
+            var correlations = [];
+            var maxCorr = -2;
+            var bestLag = 0;
+            
+            // Calculate cross-correlation for each lag
+            for (var lag = -maxLag; lag <= maxLag; lag++) {
+                var sum = 0;
+                var count = 0;
+                
+                for (var i = 0; i < n; i++) {
+                    var j = i + lag;
+                    if (j >= 0 && j < n) {
+                        sum += (x[i] - meanX) * (y[j] - meanY);
+                        count++;
+                    }
+                }
+                
+                var corr = count > 0 ? sum / (count * stdX * stdY) : 0;
+                correlations.push({ lag: lag, correlation: corr });
+                
+                if (corr > maxCorr) {
+                    maxCorr = corr;
+                    bestLag = lag;
+                }
+            }
+            
+            return {
+                lag: bestLag,
+                correlation: maxCorr,
+                correlations: correlations,
+                interpretation: bestLag === 0 
+                    ? "Signals are synchronized" 
+                    : (bestLag > 0 
+                        ? "Signal Y leads Signal X by " + bestLag + " samples"
+                        : "Signal X leads Signal Y by " + (-bestLag) + " samples")
+            };
+        }
+        
+        // Mahalanobis distance calculation
+        function calculateMahalanobisDistance(sample, mean, covMatrix) {
+            var n = sample.length;
+            
+            // Calculate difference from mean
+            var diff = [];
+            for (var i = 0; i < n; i++) {
+                diff.push(sample[i] - mean[i]);
+            }
+            
+            // Invert covariance matrix (simple 2x2 or use regularization)
+            var invCov = invertMatrix(covMatrix);
+            if (!invCov) return null;
+            
+            // Calculate (x-μ)' * Σ^-1 * (x-μ)
+            var temp = [];
+            for (var i = 0; i < n; i++) {
+                var sum = 0;
+                for (var j = 0; j < n; j++) {
+                    sum += diff[j] * invCov[j][i];
+                }
+                temp.push(sum);
+            }
+            
+            var d2 = 0;
+            for (var i = 0; i < n; i++) {
+                d2 += temp[i] * diff[i];
+            }
+            
+            return Math.sqrt(Math.max(0, d2));
+        }
+        
+        // Simple matrix inversion using Gauss-Jordan for small matrices
+        function invertMatrix(matrix) {
+            var n = matrix.length;
+            
+            // Create augmented matrix [A|I]
+            var aug = [];
+            for (var i = 0; i < n; i++) {
+                aug.push([]);
+                for (var j = 0; j < n; j++) {
+                    aug[i].push(matrix[i][j]);
+                }
+                for (var j = 0; j < n; j++) {
+                    aug[i].push(i === j ? 1 : 0);
+                }
+            }
+            
+            // Gauss-Jordan elimination
+            for (var col = 0; col < n; col++) {
+                // Find pivot
+                var maxRow = col;
+                for (var row = col + 1; row < n; row++) {
+                    if (Math.abs(aug[row][col]) > Math.abs(aug[maxRow][col])) {
+                        maxRow = row;
+                    }
+                }
+                
+                // Swap rows
+                var temp = aug[col];
+                aug[col] = aug[maxRow];
+                aug[maxRow] = temp;
+                
+                // Check for singular matrix
+                if (Math.abs(aug[col][col]) < 1e-10) {
+                    // Add regularization
+                    aug[col][col] += 1e-6;
+                }
+                
+                // Scale pivot row
+                var scale = aug[col][col];
+                for (var j = 0; j < 2 * n; j++) {
+                    aug[col][j] /= scale;
+                }
+                
+                // Eliminate column
+                for (var row = 0; row < n; row++) {
+                    if (row !== col) {
+                        var factor = aug[row][col];
+                        for (var j = 0; j < 2 * n; j++) {
+                            aug[row][j] -= factor * aug[col][j];
+                        }
+                    }
+                }
+            }
+            
+            // Extract inverse matrix
+            var inv = [];
+            for (var i = 0; i < n; i++) {
+                inv.push([]);
+                for (var j = 0; j < n; j++) {
+                    inv[i].push(aug[i][n + j]);
+                }
+            }
+            
+            return inv;
+        }
+        
+        // Calculate covariance matrix from buffer data
+        function calculateCovarianceMatrix(dataBuffer, valueNames) {
+            var n = valueNames.length;
+            var m = dataBuffer.length;
+            
+            if (m < 2) return null;
+            
+            // Extract data by sensor
+            var sensorData = {};
+            valueNames.forEach(function(name) {
+                sensorData[name] = [];
+            });
+            
+            dataBuffer.forEach(function(sample) {
+                valueNames.forEach(function(name, idx) {
+                    if (sample[name] !== undefined) {
+                        sensorData[name].push(sample[name]);
+                    }
+                });
+            });
+            
+            // Calculate means
+            var means = [];
+            valueNames.forEach(function(name) {
+                if (sensorData[name].length > 0) {
+                    means.push(calculateMean(sensorData[name]));
+                } else {
+                    means.push(0);
+                }
+            });
+            
+            // Calculate covariance matrix
+            var cov = [];
+            for (var i = 0; i < n; i++) {
+                cov.push([]);
+                for (var j = 0; j < n; j++) {
+                    var sum = 0;
+                    var data_i = sensorData[valueNames[i]];
+                    var data_j = sensorData[valueNames[j]];
+                    
+                    for (var k = 0; k < Math.min(data_i.length, data_j.length); k++) {
+                        sum += (data_i[k] - means[i]) * (data_j[k] - means[j]);
+                    }
+                    
+                    cov[i].push(sum / (m - 1));
+                }
+            }
+            
+            return { means: means, covariance: cov };
+        }
+        
+        function calculateMedian(values) {
+            var sorted = values.slice().sort((a, b) => a - b);
+            var mid = Math.floor(sorted.length / 2);
+            return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+        }
+        
+        // Aggregate mode - reduces multiple values to a single value
+        function processAggregate(msg) {
+            var values = [];
+            var valueNames = [];
+            
+            if (Array.isArray(msg.payload)) {
+                values = msg.payload.filter(v => typeof v === 'number' && !isNaN(v));
+                valueNames = msg.valueNames || values.map((v, i) => "value" + i);
+            } else if (typeof msg.payload === 'object' && msg.payload !== null) {
+                Object.keys(msg.payload).forEach(key => {
+                    var val = msg.payload[key];
+                    if (typeof val === 'number' || (typeof val === 'string' && !isNaN(parseFloat(val)))) {
+                        valueNames.push(key);
+                        values.push(parseFloat(val));
+                    }
+                });
+            } else {
+                node.error("Payload must be an array or object for aggregation", msg);
+                return null;
+            }
+            
+            if (values.length === 0) {
+                node.error("No valid values found for aggregation", msg);
+                return null;
+            }
+            
+            var result = {};
+            var primaryValue;
+            
+            // Calculate aggregations
+            var sum = values.reduce((a, b) => a + b, 0);
+            var mean = sum / values.length;
+            var min = Math.min.apply(null, values);
+            var max = Math.max.apply(null, values);
+            var range = max - min;
+            var median = calculateMedian(values);
+            var stdDev = calculateStdDev(values, mean);
+            
+            // Select primary value based on method
+            switch (node.aggregateMethod) {
+                case 'mean':
+                    primaryValue = mean;
+                    break;
+                case 'median':
+                    primaryValue = median;
+                    break;
+                case 'min':
+                    primaryValue = min;
+                    break;
+                case 'max':
+                    primaryValue = max;
+                    break;
+                case 'sum':
+                    primaryValue = sum;
+                    break;
+                case 'range':
+                    primaryValue = range;
+                    break;
+                case 'stddev':
+                    primaryValue = stdDev;
+                    break;
+                default:
+                    primaryValue = mean;
+            }
+            
+            var outputMsg = node.preserveOriginal ? RED.util.cloneMessage(msg) : {};
+            outputMsg.payload = primaryValue;
+            outputMsg.aggregation = {
+                method: node.aggregateMethod,
+                value: primaryValue,
+                count: values.length,
+                all: {
+                    mean: mean,
+                    median: median,
+                    min: min,
+                    max: max,
+                    sum: sum,
+                    range: range,
+                    stdDev: stdDev
+                }
+            };
+            
+            if (node.aggregateOutput === "all") {
+                outputMsg.originalValues = values;
+                outputMsg.valueNames = valueNames;
+            }
+            
+            if (node.outputTopic) {
+                outputMsg.topic = node.outputTopic;
+            }
+            
+            debugLog("Aggregation: " + node.aggregateMethod + " = " + primaryValue.toFixed(4) + " (n=" + values.length + ")");
+            
+            node.status({
+                fill: "green",
+                shape: "dot",
+                text: node.aggregateMethod + ": " + primaryValue.toFixed(2) + " (n=" + values.length + ")"
+            });
+            
+            return { normal: outputMsg, anomaly: null };
         }
         
         // Split mode
@@ -262,10 +577,70 @@ module.exports = function(RED) {
                     }
                 }
                 
+                // Mahalanobis distance is calculated at the sample level (after loop)
+                if (node.anomalyMethod === "mahalanobis") {
+                    analysis.mahalanobisDeferred = true; // Will be calculated below
+                }
+                
                 analysis.isAnomaly = isAnomaly;
                 if (isAnomaly) hasAnomaly = true;
                 results.push(analysis);
             });
+            
+            // Handle Mahalanobis distance (multivariate)
+            if (node.anomalyMethod === "mahalanobis") {
+                // Build historical data buffer for covariance calculation
+                if (!node.mahalanobisBuffer) {
+                    node.mahalanobisBuffer = [];
+                }
+                
+                var sampleObj = {};
+                values.forEach(function(val, idx) {
+                    sampleObj[valueNames[idx]] = val;
+                });
+                node.mahalanobisBuffer.push(sampleObj);
+                
+                if (node.mahalanobisBuffer.length > node.windowSize) {
+                    node.mahalanobisBuffer.shift();
+                }
+                
+                if (node.mahalanobisBuffer.length >= 10) {
+                    // Calculate covariance matrix
+                    var covResult = calculateCovarianceMatrix(node.mahalanobisBuffer, valueNames);
+                    
+                    if (covResult) {
+                        // Calculate Mahalanobis distance for current sample
+                        var distance = calculateMahalanobisDistance(values, covResult.means, covResult.covariance);
+                        
+                        if (distance !== null) {
+                            // Threshold based on chi-squared distribution
+                            // For n dimensions at 95% confidence, threshold ≈ sqrt(n * 2.5)
+                            var chiThreshold = Math.sqrt(values.length * node.threshold);
+                            var chiWarningThreshold = Math.sqrt(values.length * node.warningThreshold);
+                            
+                            var severity = "normal";
+                            if (distance > chiThreshold) {
+                                severity = "critical";
+                                hasAnomaly = true;
+                            } else if (distance > chiWarningThreshold) {
+                                severity = "warning";
+                                hasAnomaly = true;
+                            }
+                            
+                            // Add to all results
+                            results.forEach(function(r) {
+                                r.mahalanobisDistance = distance;
+                                r.mahalanobisThreshold = chiThreshold;
+                                r.mahalanobisWarningThreshold = chiWarningThreshold;
+                                r.severity = severity;
+                                r.isAnomaly = hasAnomaly;
+                            });
+                            
+                            debugLog("Mahalanobis: d=" + distance.toFixed(4) + ", severity=" + severity + ", threshold=" + chiThreshold.toFixed(4) + ", anomaly=" + hasAnomaly);
+                        }
+                    }
+                }
+            }
             
             var outputMsg = RED.util.cloneMessage(msg);
             outputMsg.payload = results;
@@ -305,10 +680,17 @@ module.exports = function(RED) {
             }
             
             var correlation = null;
+            var crossCorr = null;
+            
             if (node.correlationMethod === "pearson") {
                 correlation = calculatePearsonCorrelation(node.correlationBuffer1, node.correlationBuffer2);
-            } else {
+            } else if (node.correlationMethod === "spearman") {
                 correlation = calculateSpearmanCorrelation(node.correlationBuffer1, node.correlationBuffer2);
+            } else if (node.correlationMethod === "cross") {
+                // Cross-correlation with time lag detection
+                var maxLag = Math.floor(node.correlationBuffer1.length / 4);
+                crossCorr = calculateCrossCorrelation(node.correlationBuffer1, node.correlationBuffer2, maxLag);
+                correlation = crossCorr.correlation;
             }
             
             var isAnomalous = Math.abs(correlation) < node.correlationThreshold;
@@ -326,6 +708,16 @@ module.exports = function(RED) {
                     bufferSize: node.correlationBuffer1.length
                 }
             };
+            
+            // Add cross-correlation specific output
+            if (crossCorr) {
+                outputMsg.crossCorrelation = {
+                    bestLag: crossCorr.lag,
+                    maxCorrelation: crossCorr.correlation,
+                    interpretation: crossCorr.interpretation,
+                    allLags: crossCorr.correlations
+                };
+            }
             
             Object.keys(msg).forEach(key => {
                 if (key !== 'payload' && !outputMsg.hasOwnProperty(key)) {
@@ -360,6 +752,9 @@ module.exports = function(RED) {
                         break;
                     case "correlate":
                         result = processCorrelate(msg);
+                        break;
+                    case "aggregate":
+                        result = processAggregate(msg);
                         break;
                     default:
                         result = processSplit(msg);

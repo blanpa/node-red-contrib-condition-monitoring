@@ -1,14 +1,32 @@
 {
-  "name": "sensor-anomaly-10",
-  "version": "2.0.0",
-  "type": "onnx",
-  "description": "10-sensor industrial monitoring with cross-correlation detection",
+  "name": "onnx-multi-sensor",
   "inputShape": [
     1,
     10
   ],
-  "trainedOn": "Realistic synthetic industrial data",
-  "createdAt": "2026-01-01T00:28:54.507796",
-  "framework": "onnx",
-  "accuracy": 0.9986666440963745
+  "accuracy": 1.0,
+  "normalExample": [
+    0.5,
+    0.48,
+    0.52,
+    0.49,
+    0.51,
+    0.5,
+    0.48,
+    0.52,
+    0.49,
+    0.51
+  ],
+  "anomalyExample": [
+    0.95,
+    0.48,
+    0.05,
+    0.49,
+    0.92,
+    0.5,
+    0.03,
+    0.52,
+    0.88,
+    0.51
+  ]
 }

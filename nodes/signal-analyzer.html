@@ -16,6 +16,19 @@
             minPeakDistance: { value: 5 },
             peakType: { value: "both" },
             vibOutputMode: { value: "all" },
+            // Envelope analysis settings
+            envelopeBandLow: { value: 500 },
+            envelopeBandHigh: { value: 5000 },
+            bearingBPFO: { value: "" },
+            bearingBPFI: { value: "" },
+            bearingBSF: { value: "" },
+            bearingFTF: { value: "" },
+            shaftSpeed: { value: "" },
+            // Cepstrum analysis settings
+            quefrencyRangeLow: { value: 0.001 },
+            quefrencyRangeHigh: { value: 0.1 },
+            gearToothCount: { value: "" },
+            cepstrumThreshold: { value: 0.1 },
             outputTopic: { value: "" },
             debug: { value: false }
         },
@@ -80,16 +93,18 @@
             <div class="cm-config-item">
                 <label for="node-input-mode"><i class="fa fa-chart-line"></i> Mode</label>
                 <select id="node-input-mode">
-                    <option value="fft">FFT (Frequency Analysis)</option>
+                    <option value="fft" selected>FFT (Frequency Analysis)</option>
                     <option value="vibration">Vibration Features</option>
                     <option value="peaks">Peak Detection</option>
+                    <option value="envelope">Envelope Analysis (Bearing Faults)</option>
+                    <option value="cepstrum">Cepstrum Analysis (Gearbox Faults)</option>
                 </select>
                 <div class="cm-help-text">Select the signal analysis mode</div>
             </div>
             
             <div class="cm-config-item" style="margin-top: 12px;">
-                <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Window Size</label>
-                <input type="number" id="node-input-windowSize" min="8" placeholder="256">
+                <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Window Size (default: 256)</label>
+                <input type="number" id="node-input-windowSize" min="8" value="256">
                 <div class="cm-help-text">Number of samples to analyze</div>
             </div>
             
@@ -109,8 +124,8 @@
                         </select>
                     </div>
                     <div class="cm-config-item">
-                        <label>Sampling Rate (Hz)</label>
-                        <input type="number" id="node-input-samplingRate" min="1">
+                        <label>Sampling Rate (default: 1000 Hz)</label>
+                        <input type="number" id="node-input-samplingRate" min="1" value="1000">
                     </div>
                     <div class="cm-config-item">
                         <label>Window Function</label>
@@ -128,8 +143,8 @@
                         <div class="cm-help-text">Overlap between consecutive FFT frames (0-90%)</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Peak Threshold (0-1)</label>
-                        <input type="number" id="node-input-peakThreshold" step="0.01" min="0" max="1">
+                        <label>Peak Threshold (default: 0.1)</label>
+                        <input type="number" id="node-input-peakThreshold" step="0.01" min="0" max="1" value="0.1">
                     </div>
                     <div class="cm-config-item">
                         <label>Output Format</label>
@@ -166,8 +181,8 @@
                         <div class="cm-help-text">Leave empty for auto-threshold</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Minimum Peak Distance</label>
-                        <input type="number" id="node-input-minPeakDistance" min="1">
+                        <label>Minimum Peak Distance (default: 5)</label>
+                        <input type="number" id="node-input-minPeakDistance" min="1" value="5">
                         <div class="cm-help-text">Minimum samples between peaks</div>
                     </div>
                     <div class="cm-config-item">
@@ -178,6 +193,101 @@
                             <option value="negative">Negative (Minima)</option>
                         </select>
                     </div>
+                </div>
+            </div>
+            
+            <!-- Envelope Analysis Config -->
+            <div id="config-envelope" class="mode-config">
+                <h4><i class="fa fa-heartbeat"></i> Envelope Analysis (Bearing Fault Detection)</h4>
+                <p style="font-size: 11px; color: #666; margin-bottom: 12px;">
+                    Detects bearing faults (BPFO, BPFI, BSF, FTF) using envelope spectrum analysis.
+                </p>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Band Low (Hz)</label>
+                        <input type="number" id="node-input-envelopeBandLow" min="1" value="500">
+                        <div class="cm-help-text">Lower cutoff frequency for bandpass</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Band High (Hz)</label>
+                        <input type="number" id="node-input-envelopeBandHigh" min="1" value="5000">
+                        <div class="cm-help-text">Upper cutoff frequency for bandpass</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Shaft Speed (RPM)</label>
+                        <input type="number" id="node-input-shaftSpeed" min="0" step="any">
+                        <div class="cm-help-text">Rotation speed for fault frequency calc</div>
+                    </div>
+                </div>
+                <h5 style="margin-top: 16px; color: #666;"><i class="fa fa-cog"></i> Bearing Fault Frequencies (Hz)</h5>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>BPFO (Outer Race)</label>
+                        <input type="number" id="node-input-bearingBPFO" min="0" step="any">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>BPFI (Inner Race)</label>
+                        <input type="number" id="node-input-bearingBPFI" min="0" step="any">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>BSF (Ball Spin)</label>
+                        <input type="number" id="node-input-bearingBSF" min="0" step="any">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>FTF (Cage)</label>
+                        <input type="number" id="node-input-bearingFTF" min="0" step="any">
+                    </div>
+                </div>
+                <div style="margin-top: 12px; padding: 10px; background: #e3f2fd; border-radius: 4px; font-size: 11px;">
+                    <i class="fa fa-info-circle" style="color: #1976d2;"></i>
+                    <strong>Tip:</strong> Calculate bearing frequencies from manufacturer data sheet using:
+                    <br>BPFO = n/2 × (1 - Bd/Pd × cos(θ)) × RPM/60
+                </div>
+            </div>
+            
+            <!-- Cepstrum Analysis Config -->
+            <div id="config-cepstrum" class="mode-config">
+                <h4><i class="fa fa-cogs"></i> Cepstrum Analysis (Gearbox Fault Detection)</h4>
+                <p style="font-size: 11px; color: #666; margin-bottom: 12px;">
+                    Detects periodic patterns in the frequency spectrum, ideal for gear mesh frequency and sidebands.
+                </p>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Quefrency Range Low (sec)</label>
+                        <input type="number" id="node-input-quefrencyRangeLow" min="0.0001" step="0.001" value="0.001">
+                        <div class="cm-help-text">Minimum quefrency to analyze (0.001 = 1ms)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Quefrency Range High (sec)</label>
+                        <input type="number" id="node-input-quefrencyRangeHigh" min="0.001" step="0.01" value="0.1">
+                        <div class="cm-help-text">Maximum quefrency to analyze (0.1 = 100ms)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Peak Threshold (0-1)</label>
+                        <input type="number" id="node-input-cepstrumThreshold" min="0.01" max="1" step="0.01" value="0.1">
+                        <div class="cm-help-text">Minimum normalized peak height (default: 0.1 = 10%)</div>
+                    </div>
+                </div>
+                <h5 style="margin-top: 16px; color: #666;"><i class="fa fa-tachometer"></i> Shaft Configuration</h5>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Shaft Speed (RPM)</label>
+                        <input type="number" id="node-input-shaftSpeed" min="0" step="any" value="1800">
+                        <div class="cm-help-text">Shaft rotation speed for GMF calculation</div>
+                    </div>
+                </div>
+                <h5 style="margin-top: 16px; color: #666;"><i class="fa fa-cog"></i> Gear Configuration</h5>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Gear Tooth Count</label>
+                        <input type="text" id="node-input-gearToothCount" placeholder="e.g., 20,45,18">
+                        <div class="cm-help-text">Comma-separated tooth counts for each gear</div>
+                    </div>
+                </div>
+                <div style="margin-top: 12px; padding: 10px; background: #fff3e0; border-radius: 4px; font-size: 11px;">
+                    <i class="fa fa-lightbulb" style="color: #ff9800;"></i>
+                    <strong>Gear Mesh Frequency:</strong> GMF = Shaft_RPM/60 × Tooth_Count
+                    <br>Sidebands at GMF ± n×Shaft_Freq indicate gear damage.
                 </div>
             </div>
         </div>
@@ -212,7 +322,7 @@
 </script>
 
 <script type="text/html" data-help-name="signal-analyzer">
-    <p>A unified node for advanced signal analysis: FFT frequency analysis, vibration feature extraction, and peak detection.</p>
+    <p>A unified node for advanced signal analysis: FFT frequency analysis, vibration feature extraction, peak detection, and bearing fault diagnosis.</p>
     
     <h3>Analysis Modes</h3>
     <dl>
@@ -232,6 +342,25 @@
         <dd>Identifies local maxima and minima with configurable thresholds.
         <br><b>Outputs:</b> Peak locations, values, and statistics
         <br><b>Use case:</b> Detect spikes, impacts, or cyclic patterns</dd>
+        
+        <dt><b>Envelope Analysis (Bearing Faults)</b></dt>
+        <dd>Specialized bearing fault detection using envelope spectrum analysis.
+        <br><b>Detects:</b> BPFO (outer race), BPFI (inner race), BSF (ball/roller), FTF (cage) faults
+        <br><b>Harmonics:</b> Checks fundamental and up to 3x harmonics
+        <br><b>Outputs:</b> Detected faults with severity, expected vs actual frequencies
+        <br><b>Use case:</b> Predictive maintenance for rolling element bearings</dd>
+        
+        <dt><b>Cepstrum Analysis (Gearbox Faults)</b></dt>
+        <dd>Detects periodic patterns in the frequency spectrum using cepstral analysis.
+        <br><b>Detects:</b> Gear mesh frequencies (GMF), sidebands, gear damage
+        <br><b>Configuration:</b>
+        <ul>
+            <li><b>Quefrency Range:</b> Time range to search for periodic components (0.001-0.1 sec)</li>
+            <li><b>Gear Tooth Count:</b> Comma-separated tooth counts for each gear (e.g., "20,45,18")</li>
+            <li><b>Peak Threshold:</b> Minimum normalized peak height to detect (0.1 = 10%)</li>
+        </ul>
+        <br><b>Outputs:</b> Rahmonics (cepstral peaks), gear faults with severity
+        <br><b>Use case:</b> Gearbox condition monitoring, detecting localized gear damage</dd>
     </dl>
     
     <h3>FFT Configuration</h3>
@@ -315,6 +444,16 @@
         
         <dt>formFactor, impulseFactor <span class="property-type">number</span></dt>
         <dd>Additional shape metrics for advanced analysis</dd>
+        
+        <dt>sampleEntropy <span class="property-type">number</span></dt>
+        <dd>Signal complexity measure. Lower = more regular/periodic, Higher = more random.
+        <br><b>Healthy bearing:</b> Low entropy | <b>Faulty bearing:</b> Higher entropy</dd>
+        
+        <dt>autocorrelation <span class="property-type">array</span></dt>
+        <dd>Autocorrelation function (ACF) for first 10 lags. Detects periodicity in signal.</dd>
+        
+        <dt>periodicity <span class="property-type">object</span></dt>
+        <dd>Detected periodic patterns: <code>{ detected: true/false, period: lag, strength: 0-1 }</code></dd>
         
         <dt>healthScore <span class="property-type">number</span></dt>
         <dd>Simplified 0-100 health indicator based on all metrics</dd>

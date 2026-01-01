@@ -6,7 +6,7 @@ module.exports = function(RED) {
         var node = this;
         
         // Configuration
-        this.mode = config.mode || "fft"; // fft, vibration, peaks
+        this.mode = config.mode || "fft"; // fft, vibration, peaks, envelope, cepstrum
         this.windowSize = parseInt(config.windowSize) || 256;
         
         // FFT settings
@@ -24,6 +24,29 @@ module.exports = function(RED) {
         
         // Vibration settings
         this.vibOutputMode = config.vibOutputMode || "all";
+        
+        // Envelope analysis settings (bearing fault detection)
+        this.envelopeBandLow = parseFloat(config.envelopeBandLow) || 500;  // Hz
+        this.envelopeBandHigh = parseFloat(config.envelopeBandHigh) || 5000; // Hz
+        this.bearingBPFO = parseFloat(config.bearingBPFO) || 0;  // Ball Pass Freq Outer
+        this.bearingBPFI = parseFloat(config.bearingBPFI) || 0;  // Ball Pass Freq Inner
+        this.bearingBSF = parseFloat(config.bearingBSF) || 0;   // Ball Spin Freq
+        this.bearingFTF = parseFloat(config.bearingFTF) || 0;   // Fundamental Train Freq
+        this.shaftSpeed = parseFloat(config.shaftSpeed) || 0;   // RPM
+        
+        // Cepstrum analysis settings
+        this.quefrencyRangeLow = parseFloat(config.quefrencyRangeLow) || 0.001;  // seconds
+        this.quefrencyRangeHigh = parseFloat(config.quefrencyRangeHigh) || 0.1;  // seconds
+        this.cepstrumThreshold = parseFloat(config.cepstrumThreshold) || 0.1;
+        // Parse gear tooth count from comma-separated string
+        this.gearTeeth = [];
+        if (config.gearToothCount && config.gearToothCount.trim() !== "") {
+            this.gearTeeth = config.gearToothCount.split(',').map(function(s) {
+                return parseInt(s.trim());
+            }).filter(function(n) {
+                return !isNaN(n) && n > 0;
+            });
+        }
         
         // Advanced settings
         this.outputTopic = config.outputTopic || "";
@@ -208,6 +231,15 @@ module.exports = function(RED) {
             if (Math.abs(skewness) > 1) healthScore -= 10;
             healthScore = Math.max(0, Math.min(100, healthScore));
             
+            // Calculate Sample Entropy
+            var sampleEntropy = calculateSampleEntropy(data, 2, 0.2 * stdDev);
+            
+            // Calculate Autocorrelation (first 10 lags)
+            var autocorrelation = calculateAutocorrelation(data, 10);
+            
+            // Detect periodicity from autocorrelation peaks
+            var periodicity = detectPeriodicity(autocorrelation);
+            
             return {
                 rms: rms,
                 peakToPeak: peakToPeak,
@@ -219,7 +251,92 @@ module.exports = function(RED) {
                 stdDev: stdDev,
                 formFactor: formFactor,
                 impulseFactor: impulseFactor,
+                sampleEntropy: sampleEntropy,
+                autocorrelation: autocorrelation,
+                periodicity: periodicity,
                 healthScore: healthScore
+            };
+        }
+        
+        // Sample Entropy - measures signal complexity/regularity
+        // Lower values = more regular/predictable, Higher = more complex/random
+        function calculateSampleEntropy(data, m, r) {
+            var n = data.length;
+            if (n < m + 1) return 0;
+            
+            // Count template matches for length m and m+1
+            function countMatches(templateLength) {
+                var count = 0;
+                for (var i = 0; i < n - templateLength; i++) {
+                    for (var j = i + 1; j < n - templateLength; j++) {
+                        var match = true;
+                        for (var k = 0; k < templateLength; k++) {
+                            if (Math.abs(data[i + k] - data[j + k]) > r) {
+                                match = false;
+                                break;
+                            }
+                        }
+                        if (match) count++;
+                    }
+                }
+                return count;
+            }
+            
+            var A = countMatches(m + 1);
+            var B = countMatches(m);
+            
+            if (B === 0 || A === 0) return 0;
+            return -Math.log(A / B);
+        }
+        
+        // Autocorrelation Function (ACF) - detects periodicity
+        function calculateAutocorrelation(data, maxLag) {
+            var n = data.length;
+            var mean = data.reduce(function(a, b) { return a + b; }, 0) / n;
+            var variance = data.reduce(function(sum, val) { 
+                return sum + (val - mean) * (val - mean); 
+            }, 0) / n;
+            
+            if (variance === 0) return [];
+            
+            var acf = [];
+            for (var lag = 0; lag <= Math.min(maxLag, n - 1); lag++) {
+                var sum = 0;
+                for (var i = 0; i < n - lag; i++) {
+                    sum += (data[i] - mean) * (data[i + lag] - mean);
+                }
+                acf.push({
+                    lag: lag,
+                    value: sum / (n * variance)
+                });
+            }
+            return acf;
+        }
+        
+        // Detect periodicity from ACF peaks
+        function detectPeriodicity(acf) {
+            if (acf.length < 3) return { detected: false };
+            
+            // Find first significant peak after lag 0
+            var peaks = [];
+            for (var i = 2; i < acf.length - 1; i++) {
+                if (acf[i].value > acf[i-1].value && 
+                    acf[i].value > acf[i+1].value &&
+                    acf[i].value > 0.3) { // Threshold for significance
+                    peaks.push({ lag: acf[i].lag, strength: acf[i].value });
+                }
+            }
+            
+            if (peaks.length === 0) {
+                return { detected: false, description: "No periodicity detected" };
+            }
+            
+            return {
+                detected: true,
+                period: peaks[0].lag,
+                strength: peaks[0].strength,
+                allPeaks: peaks,
+                description: "Periodic pattern detected at lag " + peaks[0].lag
             };
         }
         
@@ -288,6 +405,358 @@ module.exports = function(RED) {
                 minPeakHeight: Math.min.apply(null, peakValues),
                 peakFrequency: peaks.length / data.length
             };
+        }
+        
+        // Envelope Analysis for Bearing Fault Detection
+        function performEnvelopeAnalysis(signal, samplingRate, bandLow, bandHigh) {
+            var n = signal.length;
+            
+            // Step 1: Bandpass filter (simple FIR implementation)
+            var filtered = bandpassFilter(signal, samplingRate, bandLow, bandHigh);
+            
+            // Step 2: Rectify (absolute value)
+            var rectified = filtered.map(function(v) { return Math.abs(v); });
+            
+            // Step 3: Low-pass filter to get envelope (simple moving average)
+            var envelopeWindowSize = Math.max(3, Math.floor(samplingRate / bandLow / 2));
+            var envelope = [];
+            for (var i = 0; i < rectified.length; i++) {
+                var start = Math.max(0, i - Math.floor(envelopeWindowSize / 2));
+                var end = Math.min(rectified.length, i + Math.floor(envelopeWindowSize / 2) + 1);
+                var sum = 0;
+                for (var j = start; j < end; j++) {
+                    sum += rectified[j];
+                }
+                envelope.push(sum / (end - start));
+            }
+            
+            return envelope;
+        }
+        
+        // Simple bandpass filter using moving average difference
+        function bandpassFilter(signal, samplingRate, lowCut, highCut) {
+            var n = signal.length;
+            
+            // High-pass: subtract low-frequency component
+            var lowWindow = Math.max(3, Math.floor(samplingRate / lowCut));
+            var highFiltered = [];
+            for (var i = 0; i < n; i++) {
+                var start = Math.max(0, i - Math.floor(lowWindow / 2));
+                var end = Math.min(n, i + Math.floor(lowWindow / 2) + 1);
+                var sum = 0;
+                for (var j = start; j < end; j++) {
+                    sum += signal[j];
+                }
+                var lowFreq = sum / (end - start);
+                highFiltered.push(signal[i] - lowFreq);
+            }
+            
+            // Low-pass: smooth high frequencies
+            var highWindow = Math.max(3, Math.floor(samplingRate / highCut));
+            var bandpassed = [];
+            for (var i = 0; i < n; i++) {
+                var start = Math.max(0, i - Math.floor(highWindow / 2));
+                var end = Math.min(n, i + Math.floor(highWindow / 2) + 1);
+                var sum = 0;
+                for (var j = start; j < end; j++) {
+                    sum += highFiltered[j];
+                }
+                bandpassed.push(sum / (end - start));
+            }
+            
+            return bandpassed;
+        }
+        
+        // Detect bearing fault frequencies in envelope spectrum
+        function detectBearingFaults(envelopePeaks, shaftFreq, bpfo, bpfi, bsf, ftf, tolerance) {
+            tolerance = tolerance || 0.05; // 5% frequency tolerance
+            var faults = [];
+            
+            var faultFreqs = [
+                { name: 'BPFO', freq: bpfo, desc: 'Outer Race Fault' },
+                { name: 'BPFI', freq: bpfi, desc: 'Inner Race Fault' },
+                { name: 'BSF', freq: bsf, desc: 'Ball/Roller Fault' },
+                { name: 'FTF', freq: ftf, desc: 'Cage Fault' },
+                { name: '1X', freq: shaftFreq, desc: 'Shaft Imbalance' },
+                { name: '2X', freq: shaftFreq * 2, desc: 'Misalignment' }
+            ];
+            
+            envelopePeaks.forEach(function(peak) {
+                faultFreqs.forEach(function(fault) {
+                    if (fault.freq > 0) {
+                        // Check fundamental and harmonics (up to 3x)
+                        for (var harmonic = 1; harmonic <= 3; harmonic++) {
+                            var targetFreq = fault.freq * harmonic;
+                            var freqDiff = Math.abs(peak.frequency - targetFreq) / targetFreq;
+                            
+                            if (freqDiff <= tolerance) {
+                                faults.push({
+                                    type: fault.name,
+                                    harmonic: harmonic,
+                                    description: fault.desc,
+                                    expectedFreq: targetFreq,
+                                    detectedFreq: peak.frequency,
+                                    magnitude: peak.magnitude,
+                                    severity: peak.magnitude > 0.5 ? 'high' : (peak.magnitude > 0.2 ? 'medium' : 'low')
+                                });
+                            }
+                        }
+                    }
+                });
+            });
+            
+            return faults;
+        }
+        
+        // Cepstrum Analysis for gearbox diagnostics
+        function performCepstrum(signal, fftSize, samplingRate) {
+            // Step 1: FFT of signal
+            var fftResult = performFFT(signal, fftSize, samplingRate, 'hann');
+            
+            // Step 2: Log of magnitude spectrum
+            var logSpectrum = fftResult.magnitudes.map(function(m) {
+                return Math.log(Math.max(m, 1e-10)); // Avoid log(0)
+            });
+            
+            // Step 3: Inverse FFT of log spectrum (approximation using DCT-like approach)
+            var n = logSpectrum.length;
+            var cepstrum = new Array(n);
+            
+            for (var q = 0; q < n; q++) {
+                var sum = 0;
+                for (var k = 0; k < n; k++) {
+                    sum += logSpectrum[k] * Math.cos(2 * Math.PI * q * k / n);
+                }
+                cepstrum[q] = sum / n;
+            }
+            
+            // Quefrencies (time-like domain)
+            var quefrencies = new Array(n);
+            for (var i = 0; i < n; i++) {
+                quefrencies[i] = i / samplingRate; // in seconds
+            }
+            
+            return { quefrencies: quefrencies, cepstrum: cepstrum };
+        }
+        
+        // Find rahmonics (peaks in cepstrum)
+        function findRahmonics(quefrencies, cepstrum, minQuefrency, maxQuefrency, peakThreshold) {
+            var peaks = [];
+            peakThreshold = peakThreshold || 0.1; // Default 10%
+            
+            // Skip the first few samples (aperiodic component)
+            var startIdx = 5;
+            var maxCepstrum = Math.max.apply(null, cepstrum.slice(startIdx).map(Math.abs));
+            
+            for (var i = startIdx + 1; i < cepstrum.length - 1; i++) {
+                if (quefrencies[i] < minQuefrency || quefrencies[i] > maxQuefrency) continue;
+                
+                var current = Math.abs(cepstrum[i]);
+                if (current > Math.abs(cepstrum[i-1]) && current > Math.abs(cepstrum[i+1])) {
+                    var normalized = current / maxCepstrum;
+                    if (normalized > peakThreshold) {
+                        peaks.push({
+                            quefrency: quefrencies[i],
+                            fundamentalFrequency: 1 / quefrencies[i], // Hz
+                            magnitude: cepstrum[i],
+                            normalized: normalized
+                        });
+                    }
+                }
+            }
+            
+            peaks.sort(function(a, b) { return Math.abs(b.magnitude) - Math.abs(a.magnitude); });
+            return peaks;
+        }
+        
+        // Detect gear mesh frequencies and faults
+        function detectGearFaults(rahmonics, shaftSpeed, gearTeeth) {
+            var faults = [];
+            var shaftFreq = shaftSpeed / 60;
+            
+            if (gearTeeth && gearTeeth.length > 0) {
+                gearTeeth.forEach(function(teeth, idx) {
+                    var gmf = shaftFreq * teeth; // Gear Mesh Frequency
+                    var tolerance = 0.1; // 10%
+                    
+                    rahmonics.forEach(function(peak) {
+                        var freqDiff = Math.abs(peak.fundamentalFrequency - gmf) / gmf;
+                        if (freqDiff < tolerance) {
+                            faults.push({
+                                type: 'GMF',
+                                gear: idx + 1,
+                                teeth: teeth,
+                                expectedFreq: gmf,
+                                detectedFreq: peak.fundamentalFrequency,
+                                magnitude: peak.normalized,
+                                severity: peak.normalized > 0.5 ? 'high' : (peak.normalized > 0.25 ? 'medium' : 'low'),
+                                description: 'Gear mesh frequency detected - possible gear wear'
+                            });
+                        }
+                        
+                        // Check sidebands (gear damage indicator)
+                        for (var sb = 1; sb <= 3; sb++) {
+                            var sideband = gmf + sb * shaftFreq;
+                            freqDiff = Math.abs(peak.fundamentalFrequency - sideband) / sideband;
+                            if (freqDiff < tolerance) {
+                                faults.push({
+                                    type: 'Sideband',
+                                    gear: idx + 1,
+                                    order: sb,
+                                    expectedFreq: sideband,
+                                    detectedFreq: peak.fundamentalFrequency,
+                                    magnitude: peak.normalized,
+                                    severity: peak.normalized > 0.3 ? 'high' : 'medium',
+                                    description: 'Sideband detected - indicates gear damage or eccentricity'
+                                });
+                            }
+                        }
+                    });
+                });
+            }
+            
+            return faults;
+        }
+        
+        // Process Cepstrum Analysis
+        function processCepstrum(msg, value) {
+            node.buffer.push(value);
+            
+            if (node.buffer.length < node.fftSize) {
+                node.status({fill: "yellow", shape: "ring", text: "Cepstrum: " + node.buffer.length + "/" + node.fftSize});
+                return null;
+            }
+            
+            if (node.buffer.length > node.fftSize) {
+                node.buffer.shift();
+            }
+            
+            var shaftFreq = (node.shaftSpeed || 1800) / 60;
+            var minQuefrency = node.quefrencyRangeLow || 0.001;
+            var maxQuefrency = node.quefrencyRangeHigh || 0.1;
+            
+            // Perform cepstrum analysis
+            var cepResult = performCepstrum(node.buffer, node.fftSize, node.samplingRate);
+            
+            // Find rahmonics (periodic components)
+            var rahmonics = findRahmonics(cepResult.quefrencies, cepResult.cepstrum, minQuefrency, maxQuefrency, node.cepstrumThreshold);
+            
+            // Detect gear faults if teeth count provided
+            var gearTeeth = msg.gearTeeth || node.gearTeeth || [];
+            var gearFaults = detectGearFaults(rahmonics, node.shaftSpeed || 1800, gearTeeth);
+            
+            var hasAnomaly = gearFaults.length > 0;
+            
+            var outputMsg = {
+                payload: value,
+                cepstrum: {
+                    rahmonics: rahmonics.slice(0, 10),
+                    dominantQuefrency: rahmonics.length > 0 ? rahmonics[0].quefrency : null,
+                    dominantFrequency: rahmonics.length > 0 ? rahmonics[0].fundamentalFrequency : null
+                },
+                gearFaults: gearFaults,
+                shaftFrequency: shaftFreq,
+                hasFault: hasAnomaly,
+                faultCount: gearFaults.length,
+                timestamp: Date.now()
+            };
+            
+            if (node.outputTopic) {
+                outputMsg.topic = node.outputTopic;
+            }
+            
+            Object.keys(msg).forEach(function(key) {
+                if (key !== 'payload' && !outputMsg.hasOwnProperty(key)) {
+                    outputMsg[key] = msg[key];
+                }
+            });
+            
+            var statusText = hasAnomaly 
+                ? "FAULT: " + gearFaults[0].type
+                : (rahmonics.length > 0 ? "Peak: " + rahmonics[0].fundamentalFrequency.toFixed(1) + " Hz" : "No peaks");
+            var statusColor = hasAnomaly ? "red" : "green";
+            node.status({fill: statusColor, shape: hasAnomaly ? "ring" : "dot", text: statusText});
+            
+            return { normal: hasAnomaly ? null : outputMsg, anomaly: hasAnomaly ? outputMsg : null };
+        }
+        
+        // Process Envelope Analysis
+        function processEnvelope(msg, value) {
+            node.buffer.push(value);
+            
+            if (node.buffer.length < node.fftSize) {
+                node.status({fill: "yellow", shape: "ring", text: "Envelope: " + node.buffer.length + "/" + node.fftSize});
+                return null;
+            }
+            
+            if (node.buffer.length > node.fftSize) {
+                node.buffer.shift();
+            }
+            
+            // Calculate shaft frequency from RPM
+            var shaftFreq = node.shaftSpeed / 60;
+            
+            // Perform envelope analysis
+            var envelope = performEnvelopeAnalysis(
+                node.buffer, 
+                node.samplingRate, 
+                node.envelopeBandLow, 
+                node.envelopeBandHigh
+            );
+            
+            // FFT of envelope
+            var envelopeFFT = performFFT(envelope, node.fftSize, node.samplingRate, 'hann');
+            var envelopePeaks = findSpectralPeaks(envelopeFFT.frequencies, envelopeFFT.magnitudes, 0.05);
+            
+            // Detect bearing faults
+            var faults = detectBearingFaults(
+                envelopePeaks,
+                shaftFreq,
+                node.bearingBPFO,
+                node.bearingBPFI,
+                node.bearingBSF,
+                node.bearingFTF
+            );
+            
+            var hasAnomaly = faults.length > 0;
+            
+            var outputMsg = {
+                payload: value,
+                envelope: {
+                    peaks: envelopePeaks.slice(0, 10),
+                    bandLow: node.envelopeBandLow,
+                    bandHigh: node.envelopeBandHigh
+                },
+                bearingFaults: faults,
+                shaftFrequency: shaftFreq,
+                bearingFreqs: {
+                    BPFO: node.bearingBPFO,
+                    BPFI: node.bearingBPFI,
+                    BSF: node.bearingBSF,
+                    FTF: node.bearingFTF
+                },
+                hasFault: hasAnomaly,
+                faultCount: faults.length,
+                timestamp: Date.now()
+            };
+            
+            if (node.outputTopic) {
+                outputMsg.topic = node.outputTopic;
+            }
+            
+            Object.keys(msg).forEach(function(key) {
+                if (key !== 'payload' && !outputMsg.hasOwnProperty(key)) {
+                    outputMsg[key] = msg[key];
+                }
+            });
+            
+            var statusText = hasAnomaly 
+                ? "FAULT: " + faults[0].type + " " + faults[0].harmonic + "X"
+                : "No faults detected";
+            var statusColor = hasAnomaly ? "red" : "green";
+            node.status({fill: statusColor, shape: hasAnomaly ? "ring" : "dot", text: statusText});
+            
+            return { normal: hasAnomaly ? null : outputMsg, anomaly: hasAnomaly ? outputMsg : null };
         }
         
         // Process FFT
@@ -457,6 +926,21 @@ module.exports = function(RED) {
                         return;
                     }
                     result = processPeaks(msg, value, timestamp);
+                    
+                } else if (node.mode === "envelope") {
+                    var value = parseFloat(msg.payload);
+                    if (isNaN(value)) {
+                        node.warn("Invalid payload: not a number");
+                        return;
+                    }
+                    result = processEnvelope(msg, value);
+                } else if (node.mode === "cepstrum") {
+                    var value = parseFloat(msg.payload);
+                    if (isNaN(value)) {
+                        node.warn("Invalid payload: not a number");
+                        return;
+                    }
+                    result = processCepstrum(msg, value);
                 }
                 
                 if (result) {

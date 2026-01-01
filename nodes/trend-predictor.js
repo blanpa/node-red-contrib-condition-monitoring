@@ -6,7 +6,7 @@ module.exports = function(RED) {
         var node = this;
         
         // Configuration
-        this.mode = config.mode || "prediction"; // prediction, rate-of-change
+        this.mode = config.mode || "prediction"; // prediction, rate-of-change, rul
         this.method = config.method || "linear"; // linear, exponential
         this.predictionSteps = parseInt(config.predictionSteps) || 10;
         this.windowSize = parseInt(config.windowSize) || 50;
@@ -16,6 +16,17 @@ module.exports = function(RED) {
         this.rocMethod = config.rocMethod || "absolute"; // absolute, percentage
         this.timeWindow = parseInt(config.timeWindow) || 1;
         this.rocThreshold = config.rocThreshold !== "" && config.rocThreshold !== undefined ? parseFloat(config.rocThreshold) : null;
+        
+        // RUL settings
+        this.failureThreshold = config.failureThreshold !== "" && config.failureThreshold !== undefined ? parseFloat(config.failureThreshold) : null;
+        this.warningThreshold = config.warningThreshold !== "" && config.warningThreshold !== undefined ? parseFloat(config.warningThreshold) : null;
+        this.rulUnit = config.rulUnit || "hours"; // hours, minutes, days, cycles
+        this.degradationModel = config.degradationModel || "linear"; // linear, exponential, weibull
+        this.confidenceLevel = parseFloat(config.confidenceLevel) || 0.95;
+        
+        // Weibull settings
+        this.weibullBeta = parseFloat(config.weibullBeta) || 2.0; // Shape parameter (β)
+        this.weibullEta = parseFloat(config.weibullEta) || 1000; // Scale parameter (η) in hours
         
         // Advanced settings
         this.outputTopic = config.outputTopic || "";
@@ -115,6 +126,340 @@ module.exports = function(RED) {
                 }
             }
             return null;
+        }
+        
+        // Weibull distribution functions
+        function weibullReliability(t, beta, eta) {
+            // R(t) = exp(-(t/eta)^beta)
+            return Math.exp(-Math.pow(t / eta, beta));
+        }
+        
+        function weibullHazard(t, beta, eta) {
+            // h(t) = (beta/eta) * (t/eta)^(beta-1)
+            return (beta / eta) * Math.pow(t / eta, beta - 1);
+        }
+        
+        function weibullMTTF(beta, eta) {
+            // MTTF = eta * Gamma(1 + 1/beta)
+            // Approximation of Gamma function for 1 + 1/beta
+            var x = 1 + 1 / beta;
+            return eta * gammaApprox(x);
+        }
+        
+        // Calculate B-Life (time at which X% of population has failed)
+        function weibullBLife(beta, eta, percentFailed) {
+            // B_x = eta * (-ln(1 - x/100))^(1/beta)
+            return eta * Math.pow(-Math.log(1 - percentFailed / 100), 1 / beta);
+        }
+        
+        // Interpret Weibull beta parameter
+        function interpretBeta(beta) {
+            if (beta < 1) {
+                return { phase: "infant_mortality", trend: "decreasing failure rate", recommendation: "Check manufacturing/installation quality" };
+            } else if (beta === 1) {
+                return { phase: "useful_life", trend: "constant failure rate", recommendation: "Normal maintenance schedule" };
+            } else if (beta < 4) {
+                return { phase: "wear_out", trend: "increasing failure rate", recommendation: "Preventive replacement recommended" };
+            } else {
+                return { phase: "rapid_wear_out", trend: "strongly increasing failure rate", recommendation: "Time-based replacement critical" };
+            }
+        }
+        
+        function gammaApprox(z) {
+            // Stirling approximation for Gamma function
+            if (z < 0.5) {
+                return Math.PI / (Math.sin(Math.PI * z) * gammaApprox(1 - z));
+            }
+            z -= 1;
+            var g = 7;
+            var c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+                     771.32342877765313, -176.61502916214059, 12.507343278686905,
+                     -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+            var x = c[0];
+            for (var i = 1; i < g + 2; i++) {
+                x += c[i] / (z + i);
+            }
+            var t = z + g + 0.5;
+            return Math.sqrt(2 * Math.PI) * Math.pow(t, z + 0.5) * Math.exp(-t) * x;
+        }
+        
+        // Estimate Weibull parameters from failure data using MLE
+        function estimateWeibullParams(data, timestamps) {
+            if (data.length < 3) return null;
+            
+            // Normalize data to represent degradation fraction (0 to 1)
+            var maxVal = Math.max.apply(null, data);
+            var minVal = Math.min.apply(null, data);
+            var range = maxVal - minVal;
+            
+            if (range === 0) return null;
+            
+            // Use simple estimation based on degradation trend
+            var n = data.length;
+            var avgInterval = (timestamps[n-1] - timestamps[0]) / (n - 1);
+            
+            // Calculate degradation rate
+            var result = linearRegression(data, 1);
+            var slope = result.slope;
+            
+            if (slope <= 0) return null;
+            
+            // Estimate eta (characteristic life) from degradation rate
+            var currentDegradation = (data[n-1] - minVal) / range;
+            var timeElapsed = (n - 1) * avgInterval;
+            
+            // Estimate beta from variance of degradation
+            var mean = data.reduce((a, b) => a + b, 0) / n;
+            var variance = data.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / n;
+            var cv = Math.sqrt(variance) / mean; // Coefficient of variation
+            
+            // Beta estimation: higher CV suggests lower beta (more variable)
+            var beta = cv > 0 ? Math.max(0.5, Math.min(5, 1 / cv)) : 2.0;
+            
+            // Eta estimation from current reliability
+            var reliability = 1 - currentDegradation;
+            if (reliability > 0 && reliability < 1) {
+                var eta = timeElapsed / Math.pow(-Math.log(reliability), 1/beta);
+                return { beta: beta, eta: eta };
+            }
+            
+            return null;
+        }
+        
+        // Calculate RUL with confidence intervals
+        function calculateRUL(data, timestamps, failureThreshold, method, confidenceLevel) {
+            if (data.length < 5) return null;
+            
+            var n = data.length;
+            var currentValue = data[n - 1];
+            
+            // Already failed?
+            if (currentValue >= failureThreshold) {
+                return {
+                    rul: 0,
+                    confidence: 1.0,
+                    status: 'failed',
+                    percentDegraded: 100,
+                    model: method
+                };
+            }
+            
+            // Calculate degradation rate using linear regression
+            var result = linearRegression(data, 1000);
+            var slope = result.slope;
+            
+            // No degradation or improving
+            if (slope <= 0) {
+                return {
+                    rul: Infinity,
+                    confidence: 0.5,
+                    status: 'stable',
+                    percentDegraded: (currentValue / failureThreshold) * 100,
+                    trend: 'stable',
+                    model: method
+                };
+            }
+            
+            // Calculate average time between samples
+            var avgInterval = 0;
+            if (timestamps.length >= 2) {
+                var totalTime = timestamps[n - 1] - timestamps[0];
+                avgInterval = totalTime / (n - 1);
+            } else {
+                avgInterval = 1000; // Default 1 second
+            }
+            
+            var timeToFailure, rulLower, rulUpper, confidence, weibullInfo;
+            
+            if (method === 'weibull') {
+                // Weibull-based RUL estimation
+                var weibullParams = estimateWeibullParams(data, timestamps);
+                
+                if (weibullParams) {
+                    var beta = weibullParams.beta;
+                    var eta = weibullParams.eta;
+                    var timeElapsed = (n - 1) * avgInterval;
+                    
+                    // Current reliability
+                    var currentReliability = weibullReliability(timeElapsed, beta, eta);
+                    
+                    // Target reliability at failure (e.g., 10%)
+                    var targetReliability = 0.1;
+                    
+                    // Time to target reliability
+                    var timeAtTarget = eta * Math.pow(-Math.log(targetReliability), 1/beta);
+                    timeToFailure = Math.max(0, timeAtTarget - timeElapsed);
+                    
+                    // Confidence bounds (rough approximation)
+                    var hazardRate = weibullHazard(timeElapsed, beta, eta);
+                    var stdTime = 1 / (hazardRate * Math.sqrt(n));
+                    rulLower = Math.max(0, timeToFailure - 1.96 * stdTime);
+                    rulUpper = timeToFailure + 1.96 * stdTime;
+                    
+                    // Confidence from R-squared of fit
+                    confidence = Math.max(0.3, 1 - Math.abs(currentReliability - (1 - currentValue/failureThreshold)));
+                    
+                    var betaInterpretation = interpretBeta(beta);
+                    weibullInfo = {
+                        beta: beta,
+                        eta: eta,
+                        currentReliability: currentReliability,
+                        hazardRate: hazardRate,
+                        mttf: weibullMTTF(beta, eta),
+                        failureMode: betaInterpretation.phase,
+                        interpretation: betaInterpretation,
+                        bLife: {
+                            B1: weibullBLife(beta, eta, 1),
+                            B5: weibullBLife(beta, eta, 5),
+                            B10: weibullBLife(beta, eta, 10),
+                            B50: weibullBLife(beta, eta, 50)
+                        }
+                    };
+                } else {
+                    // Fall back to linear if Weibull estimation fails
+                    method = 'linear';
+                }
+            }
+            
+            if (method !== 'weibull') {
+                // Linear or exponential method
+                var stepsToFailure = (failureThreshold - currentValue) / slope;
+                timeToFailure = stepsToFailure * avgInterval;
+                
+                // Calculate R-squared for confidence
+                var yMean = data.reduce((a, b) => a + b, 0) / n;
+                var ssTot = data.reduce((sum, y) => sum + Math.pow(y - yMean, 2), 0);
+                var ssRes = 0;
+                for (var i = 0; i < n; i++) {
+                    var predicted = result.intercept + result.slope * i;
+                    ssRes += Math.pow(data[i] - predicted, 2);
+                }
+                confidence = ssTot > 0 ? 1 - (ssRes / ssTot) : 0;
+                
+                // Calculate prediction interval
+                var stdError = Math.sqrt(ssRes / Math.max(1, n - 2));
+                var zScore = 1.96;
+                var margin = zScore * stdError * Math.sqrt(1 + 1/n);
+                
+                rulLower = ((failureThreshold - margin) - currentValue) / slope * avgInterval;
+                rulUpper = ((failureThreshold + margin) - currentValue) / slope * avgInterval;
+            }
+            
+            var status = 'healthy';
+            if (timeToFailure < avgInterval * 10) status = 'critical';
+            else if (timeToFailure < avgInterval * 50) status = 'warning';
+            
+            return {
+                rul: timeToFailure,
+                rulLower: Math.max(0, rulLower),
+                rulUpper: rulUpper,
+                confidence: Math.max(0, Math.min(1, confidence)),
+                status: status,
+                percentDegraded: Math.min(100, (currentValue / failureThreshold) * 100),
+                degradationRate: slope,
+                trend: result.trend,
+                model: method,
+                weibull: weibullInfo
+            };
+        }
+        
+        // Process RUL mode
+        function processRUL(msg, value, timestamp) {
+            node.buffer.push(value);
+            node.timestamps.push(timestamp);
+            
+            if (node.buffer.length > node.windowSize) {
+                node.buffer.shift();
+                node.timestamps.shift();
+            }
+            
+            if (node.buffer.length < 5) {
+                node.status({fill: "yellow", shape: "ring", text: "RUL: collecting " + node.buffer.length + "/5"});
+                return null;
+            }
+            
+            if (node.failureThreshold === null) {
+                node.status({fill: "red", shape: "ring", text: "RUL: no threshold set"});
+                return null;
+            }
+            
+            var rulResult = calculateRUL(
+                node.buffer, 
+                node.timestamps, 
+                node.failureThreshold, 
+                node.degradationModel,
+                node.confidenceLevel
+            );
+            
+            if (!rulResult) return null;
+            
+            // Convert RUL to specified unit
+            var rulValue = rulResult.rul;
+            var unitLabel = '';
+            if (rulResult.rul !== Infinity) {
+                switch (node.rulUnit) {
+                    case 'minutes':
+                        rulValue = rulResult.rul / 60000;
+                        unitLabel = 'min';
+                        break;
+                    case 'hours':
+                        rulValue = rulResult.rul / 3600000;
+                        unitLabel = 'h';
+                        break;
+                    case 'days':
+                        rulValue = rulResult.rul / 86400000;
+                        unitLabel = 'd';
+                        break;
+                    case 'cycles':
+                        rulValue = rulResult.rul; // Already in steps
+                        unitLabel = 'cycles';
+                        break;
+                }
+            }
+            
+            var outputMsg = {
+                payload: value,
+                rul: {
+                    value: rulValue,
+                    unit: node.rulUnit,
+                    lower: rulResult.rulLower ? rulResult.rulLower / (node.rulUnit === 'hours' ? 3600000 : node.rulUnit === 'minutes' ? 60000 : node.rulUnit === 'days' ? 86400000 : 1) : null,
+                    upper: rulResult.rulUpper ? rulResult.rulUpper / (node.rulUnit === 'hours' ? 3600000 : node.rulUnit === 'minutes' ? 60000 : node.rulUnit === 'days' ? 86400000 : 1) : null,
+                    confidence: rulResult.confidence,
+                    status: rulResult.status
+                },
+                degradation: {
+                    percent: rulResult.percentDegraded,
+                    rate: rulResult.degradationRate,
+                    trend: rulResult.trend
+                },
+                thresholds: {
+                    failure: node.failureThreshold,
+                    warning: node.warningThreshold
+                },
+                currentValue: value,
+                timestamp: timestamp
+            };
+            
+            Object.keys(msg).forEach(function(key) {
+                if (key !== 'payload' && !outputMsg.hasOwnProperty(key)) {
+                    outputMsg[key] = msg[key];
+                }
+            });
+            
+            // Status display
+            var statusColor = rulResult.status === 'critical' ? 'red' : 
+                             rulResult.status === 'warning' ? 'yellow' : 
+                             rulResult.status === 'failed' ? 'red' : 'green';
+            var statusText = rulResult.rul === Infinity ? 'RUL: ∞ (stable)' : 
+                            rulResult.rul === 0 ? 'FAILED' :
+                            'RUL: ' + rulValue.toFixed(1) + unitLabel + ' (' + (rulResult.confidence * 100).toFixed(0) + '%)';
+            
+            node.status({fill: statusColor, shape: rulResult.status === 'healthy' ? 'dot' : 'ring', text: statusText});
+            
+            var isAnomaly = rulResult.status === 'critical' || rulResult.status === 'failed' ||
+                           (node.warningThreshold !== null && value >= node.warningThreshold);
+            
+            return { normal: isAnomaly ? null : outputMsg, anomaly: isAnomaly ? outputMsg : null };
         }
         
         // Process Trend Prediction
@@ -290,6 +635,8 @@ module.exports = function(RED) {
                     result = processPrediction(msg, value, timestamp);
                 } else if (node.mode === "rate-of-change") {
                     result = processRateOfChange(msg, value, timestamp);
+                } else if (node.mode === "rul") {
+                    result = processRUL(msg, value, timestamp);
                 }
                 
                 if (result) {

@@ -11,15 +11,14 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## Project Status: v0.2.0 Beta
+## Project Status: v0.3.0 Beta
 
-**Major consolidation release - 18 nodes → 7 nodes**
+**Major release - Streamlined architecture with 8 powerful nodes**
 
-- **Streamlined:** All functionality consolidated into 7 powerful nodes
-- **Easier to Use:** Less confusion, clearer purpose per node
-- **Same Features:** All original features preserved
-- **Modern UI:** Consistent, collapsible configuration sections
-- **Breaking Change:** See migration guide below
+- **8 Unified Nodes** - PCA and enhanced core nodes
+- **Advanced Diagnostics** - Envelope spectrum, motor current analysis, gearbox cepstrum
+- **Reliability Analysis** - Weibull distribution with B-life (B1, B5, B10, B50) integrated in Trend Predictor
+- **Consolidated Design** - All functionality accessible through unified nodes (no redundant standalone nodes)
 
 ---
 
@@ -37,13 +36,15 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ## Features
 
-- **7 Powerful Nodes** - Consolidated from 18 nodes for easier use
-- **10 Anomaly Detection Methods** - Z-Score, IQR, Moving Average, Threshold, Percentile, EMA, CUSUM + Isolation Forest
-- **Signal Analysis** - FFT, Vibration Features, Peak Detection
+- **8 Powerful Nodes** - Complete condition monitoring toolkit
+- **10 Anomaly Detection Methods** - Z-Score, IQR, Moving Average, Threshold, Percentile, EMA, CUSUM, Isolation Forest, PCA, Mahalanobis
+- **Signal Analysis** - FFT, Vibration Features (RMS, Crest Factor, Kurtosis), Peak Detection, Envelope Analysis, Cepstrum, Autocorrelation (ACF), Sample Entropy, Periodicity Detection
+- **Correlation Analysis** - Pearson, Spearman, Cross-Correlation with time lag detection
+- **Gearbox Diagnostics** - Cepstrum analysis for gear mesh faults
+- **Reliability Analysis** - Weibull distribution, B-life, MTTF, RUL
 - **Trend Prediction** - Linear Regression, Exponential Smoothing, Rate of Change
-- **Multi-Value Processing** - Split, Analyze, Correlate multiple sensors
-- **ML Inference** - TensorFlow.js, ONNX, Google Coral support
-- **Model Registry** - Hugging Face Hub, MLflow, Custom Registry integration
+- **Multi-Value Processing** - Split, Analyze, Correlate, Aggregate multiple sensors
+- **ML Inference** - TensorFlow.js, ONNX, Keras, scikit-learn, TFLite, Google Coral
 
 ## Installation
 
@@ -74,9 +75,11 @@ docker-compose up -d
 2. Menu → Import → Examples
 3. Select one of the example flows
 
-## Available Nodes (7 Nodes)
+## Available Nodes (8 Nodes)
 
 All nodes are in the **`condition-monitoring`** category.
+
+### Core Analysis Nodes
 
 ### 1. Anomaly Detector
 
@@ -100,54 +103,75 @@ All nodes are in the **`condition-monitoring`** category.
 
 ### 2. Isolation Forest
 
-**ML-based anomaly detection:**
-- Unsupervised learning
+**ML-based anomaly detection with online learning:**
+- Unsupervised learning - no training labels required
 - Detects complex, multivariate anomalies
-- No training labels required
+- **3 learning modes:**
+  - **Batch** - Retrain when buffer full
+  - **Incremental** - Periodic retraining (configurable interval)
+  - **Adaptive** - Auto-adjust threshold based on feedback
+- Configurable number of trees and samples per tree
 
 ### 3. Multi-Value Processor
 
-**3 modes for multi-sensor data:**
+**4 modes for multi-sensor data:**
 
 | Mode | Function |
 |------|----------|
 | **Split** | Extract individual values from arrays/objects |
-| **Analyze** | Anomaly detection per value (Z-Score, IQR, Threshold) |
-| **Correlate** | Pearson/Spearman correlation between two sensors |
+| **Analyze** | Anomaly detection per value (Z-Score, IQR, Threshold, **Mahalanobis**) |
+| **Correlate** | Pearson, Spearman, or **Cross-Correlation** between two sensors |
+| **Aggregate** | Reduce to single value (Mean, Median, Min, Max, Sum, Range, StdDev) |
+
+**Mahalanobis Distance:** Detects multivariate anomalies considering correlations between sensors.
+
+**Cross-Correlation:** Finds time lag between sensors - detects propagation delays (e.g., temperature wave through pipe).
 
 **Example:**
 ```
 [Sensors] → [Multi-Value (Split)] → [Anomaly Detector] → ...
+[Sensors] → [Multi-Value (Aggregate)] → Mean value for dashboard
 ```
 
 ### 4. Signal Analyzer
 
-**3 modes for signal analysis:**
+**5 modes for signal analysis:**
 
 | Mode | Output |
 |------|--------|
 | **FFT** | Frequency peaks, spectral features |
-| **Vibration** | RMS, Crest Factor, Kurtosis, Skewness, Health Score |
+| **Vibration** | RMS, Crest Factor, Kurtosis, Skewness, Health Score, Autocorrelation, Sample Entropy, Periodicity |
 | **Peaks** | Local maxima/minima detection |
+| **Envelope** | Bearing fault detection (BPFO, BPFI, BSF, FTF) |
+| **Cepstrum** | Gearbox fault detection (GMF, sidebands) |
 
 **Example:**
 ```
 [Vibration Sensor] → [Signal Analyzer (Vibration)] → RMS, Crest Factor
                    → [Signal Analyzer (FFT)] → Frequency Peaks
+                   → [Signal Analyzer (Envelope)] → Bearing faults
 ```
 
 ### 5. Trend Predictor
 
-**2 modes for trend analysis:**
+**3 modes for trend analysis:**
 
 | Mode | Output |
 |------|--------|
-| **Prediction** | Future values, Remaining Useful Life (RUL) |
+| **Prediction** | Future values, trend direction |
+| **RUL** | Remaining Useful Life with confidence intervals |
 | **Rate of Change** | First/second derivative, acceleration |
+
+**RUL Features:**
+- Configurable failure and warning thresholds
+- Multiple time units (hours, minutes, days, cycles)
+- Confidence intervals for predictions
+- Status: healthy/warning/critical/failed
+- **Degradation models:** Linear, Exponential, Weibull (reliability-based)
 
 **Example:**
 ```
-[Temperature] → [Trend Predictor] → "Threshold reached in 48h"
+[Temperature] → [Trend Predictor (RUL)] → "RUL: 48.5h (95% confidence)"
 ```
 
 ### 6. Health Index
@@ -155,17 +179,44 @@ All nodes are in the **`condition-monitoring`** category.
 **Multi-sensor health aggregation:**
 - Weighted combination of sensors
 - 0-100% health score
-- Configurable aggregation methods
+- Configurable aggregation methods (Weighted, Minimum, Average, Geometric)
+- **Visual threshold configuration** with slider-based UI
+- Configurable status levels (healthy, warning, degraded, critical)
+- Automatic worst sensor identification
 
 ### 7. ML Inference
 
-**Machine Learning model inference:**
-- TensorFlow.js models (.json + .bin)
-- ONNX models (.onnx)
-- Google Coral / Edge TPU (.tflite)
-- Model Registry integration (Hugging Face, MLflow, Custom)
+**Machine Learning model inference with multiple runtime options:**
 
-**⚠️ Requires custom Docker container** - See Docker setup below.
+#### JavaScript Runtimes (npm install)
+Work immediately after installation - no additional setup:
+- **ONNX** (.onnx) - PyTorch, TensorFlow, scikit-learn models
+- **TensorFlow.js** (model.json + .bin) - Keras, TensorFlow models
+
+#### Python Runtimes (Docker/Python required)
+Require Python environment with ML libraries:
+- **TFLite** (.tflite) - Edge/mobile optimized models
+- **Keras** (.keras, .h5) - Native Keras models
+- **scikit-learn** (.pkl, .joblib) - Classic ML (Random Forest, SVM, etc.)
+
+#### Hardware Accelerated
+- **Google Coral / Edge TPU** - 10-100x faster inference
+
+**Tip:** Use ONNX format for best compatibility across frameworks. The node automatically detects available runtimes and shows warnings for Python-dependent formats.
+
+### 8. PCA Anomaly Detection
+
+**Principal Component Analysis for multi-sensor anomaly detection:**
+- Reduces high-dimensional data to principal components
+- Detects anomalies using Hotelling's T² and SPE statistics
+- **Auto-selects components** based on explained variance threshold
+- **Contribution analysis** - identifies which sensor caused the anomaly
+
+| Method | Use Case |
+|--------|----------|
+| **T²** | Variations within normal operating space |
+| **SPE** | New patterns not seen during training |
+| **Combined** | Both T² and SPE (recommended) |
 
 ---
 
@@ -178,11 +229,17 @@ What do you want to detect?
 ├─ Simple threshold violations → Anomaly Detector (Threshold)
 ├─ Statistical outliers → Anomaly Detector (Z-Score/IQR)
 ├─ Gradual drift → Anomaly Detector (CUSUM)
-├─ Complex patterns → Isolation Forest
+├─ Complex patterns → Isolation Forest (with Online Learning)
+├─ Multi-sensor anomalies → PCA Anomaly Detection
 ├─ Vibration issues → Signal Analyzer (Vibration/FFT)
+├─ Bearing faults → Signal Analyzer (Envelope Mode)
+├─ Gearbox faults → Signal Analyzer (Cepstrum)
 ├─ Multiple sensors → Multi-Value Processor
-├─ Future prediction → Trend Predictor
-├─ Overall health → Health Index
+├─ Multivariate anomalies → Multi-Value Processor (Mahalanobis)
+├─ Aggregate sensors → Multi-Value Processor (Aggregate Mode)
+├─ Remaining Useful Life → Trend Predictor (RUL + Weibull)
+├─ Future prediction → Trend Predictor (Prediction)
+├─ Overall health → Health Index (Visual Thresholds)
 └─ Custom ML model → ML Inference
 ```
 
@@ -307,21 +364,33 @@ msg.payload = 0.45;
 }
 ```
 
-### Trend Predictor (RUL)
+### Trend Predictor (RUL Mode)
 
 ```javascript
 // Input
 msg.payload = 75.2;
 msg.timestamp = Date.now();
 
-// Output
+// Output (RUL Mode)
 {
   "payload": 75.2,
-  "trend": "increasing",
-  "slope": 0.5,
-  "predictedValues": [76.2, 76.7, 77.2, ...],
-  "timeToThreshold": 172800000,
-  "stepsToThreshold": 96
+  "rul": {
+    "value": 48.5,
+    "unit": "hours",
+    "lower": 42.1,          // Lower confidence bound
+    "upper": 55.2,          // Upper confidence bound
+    "confidence": 0.87,     // R-squared
+    "status": "warning"     // healthy/warning/critical/failed
+  },
+  "degradation": {
+    "percent": 75.2,        // % toward failure threshold
+    "rate": 0.5,            // Degradation rate per sample
+    "trend": "increasing"
+  },
+  "thresholds": {
+    "failure": 100,
+    "warning": 80
+  }
 }
 ```
 
@@ -365,9 +434,18 @@ docker-compose -f docker-compose.dev.yml up
 - `ml-isolation-forest` - For Isolation Forest node
 - `simple-statistics` - For statistical functions
 
-### Optional (ML Inference)
+### Optional - JavaScript ML Runtimes
 - `@tensorflow/tfjs-node` - TensorFlow.js support
 - `onnxruntime-node` - ONNX Runtime support
+
+### Optional - Python ML Runtimes (Docker or manual)
+For TFLite, Keras, and scikit-learn models:
+```bash
+pip install numpy tensorflow scikit-learn joblib tflite-runtime
+# Use numpy<2 for tflite-runtime compatibility
+pip install "numpy<2"
+```
+Or use the provided Docker image which includes all dependencies.
 
 ---
 
@@ -398,12 +476,19 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Roadmap
 
-- [x] Consolidate 18 nodes → 7 nodes
+- [x] Consolidate nodes into unified components
 - [x] ML Inference with Model Registry
 - [x] Google Coral / Edge TPU support
+- [x] PCA Anomaly Detection
+- [x] Bearing fault detection via Signal Analyzer (Envelope Mode)
+- [x] Motor current analysis via Signal Analyzer (FFT Mode)
+- [x] Weibull reliability analysis
+- [x] Cepstrum analysis for gearbox diagnostics
+- [x] Mahalanobis distance for multivariate anomalies
 - [ ] Dashboard UI components
 - [ ] Pre-trained models for common use cases
 - [ ] Real-time charting integration
+- [ ] OPC-UA integration
 
 ---
 

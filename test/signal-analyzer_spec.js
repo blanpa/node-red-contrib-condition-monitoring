@@ -76,6 +76,81 @@ describe('signal-analyzer Node', function () {
         });
     });
 
+    it('should calculate sample entropy in vibration mode', function (done) {
+        const flow = [
+            { id: "n1", type: "signal-analyzer", name: "test", mode: "vibration", windowSize: 30, wires: [["n2"], ["n3"]] },
+            { id: "n2", type: "helper" },
+            { id: "n3", type: "helper" }
+        ];
+        helper.load(signalAnalyzerNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+            
+            n2.on("input", function (msg) {
+                expect(msg.payload).toHaveProperty('sampleEntropy');
+                expect(typeof msg.payload.sampleEntropy).toBe('number');
+                done();
+            });
+            
+            // Send periodic signal (should have low entropy)
+            for (let i = 0; i < 30; i++) {
+                n1.receive({ payload: Math.sin(i * 0.5) });
+            }
+        });
+    });
+
+    it('should calculate autocorrelation in vibration mode', function (done) {
+        const flow = [
+            { id: "n1", type: "signal-analyzer", name: "test", mode: "vibration", windowSize: 30, wires: [["n2"], ["n3"]] },
+            { id: "n2", type: "helper" },
+            { id: "n3", type: "helper" }
+        ];
+        helper.load(signalAnalyzerNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+            
+            n2.on("input", function (msg) {
+                expect(msg.payload).toHaveProperty('autocorrelation');
+                expect(Array.isArray(msg.payload.autocorrelation)).toBe(true);
+                expect(msg.payload.autocorrelation.length).toBeGreaterThan(0);
+                expect(msg.payload.autocorrelation[0]).toHaveProperty('lag');
+                expect(msg.payload.autocorrelation[0]).toHaveProperty('value');
+                // First lag (0) should have correlation = 1
+                expect(msg.payload.autocorrelation[0].value).toBeCloseTo(1, 1);
+                done();
+            });
+            
+            // Send periodic signal
+            for (let i = 0; i < 30; i++) {
+                n1.receive({ payload: Math.sin(i * 0.3) });
+            }
+        });
+    });
+
+    it('should detect periodicity in vibration mode', function (done) {
+        const flow = [
+            { id: "n1", type: "signal-analyzer", name: "test", mode: "vibration", windowSize: 50, wires: [["n2"], ["n3"]] },
+            { id: "n2", type: "helper" },
+            { id: "n3", type: "helper" }
+        ];
+        helper.load(signalAnalyzerNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+            
+            n2.on("input", function (msg) {
+                expect(msg.payload).toHaveProperty('periodicity');
+                expect(msg.payload.periodicity).toHaveProperty('detected');
+                expect(typeof msg.payload.periodicity.detected).toBe('boolean');
+                done();
+            });
+            
+            // Send periodic signal with period ~6
+            for (let i = 0; i < 50; i++) {
+                n1.receive({ payload: Math.sin(i * Math.PI / 3) }); // Period of 6
+            }
+        });
+    });
+
     it('should detect peaks', function (done) {
         const flow = [
             { id: "n1", type: "signal-analyzer", name: "test", mode: "peaks", windowSize: 20, minPeakDistance: 3, wires: [["n2"], ["n3"]] },

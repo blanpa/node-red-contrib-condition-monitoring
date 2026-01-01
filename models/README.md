@@ -8,6 +8,12 @@ All models are trained on **realistic synthetic industrial data** simulating:
 - Vibration sensors (1-3 mm/s ISO 10816 compliant)
 - Flow sensors (90-110 L/min)
 - Motor current sensors (15-20A)
+- Humidity sensors (40-60% RH)
+
+**Anomaly patterns include:**
+- High temperature + low pressure + high humidity (overheating)
+- Bearing fault vibration signatures (BPFO, BPFI, BSF)
+- Gradual degradation with trend patterns
 
 ## Available Models
 
@@ -93,12 +99,26 @@ All models expect normalized input values in the range 0-1:
 // 5-sensor model (temp, pressure, vibration, flow, current)
 msg.payload = [0.52, 0.41, 0.58, 0.44, 0.56];
 
+// 8-sensor model (temp, vibration, pressure, power, speed, flow, current, humidity)
+msg.payload = [0.50, 0.48, 0.52, 0.49, 0.51, 0.50, 0.48, 0.52];
+
 // 8-feature vibration model (RMS, Peak, Crest, Kurtosis, Skewness, DomFreq, Centroid, BandEnergy)
 msg.payload = [0.3, 0.4, 0.35, 0.32, 0.1, 0.25, 0.4, 0.45];
 
 // 10-sensor model  
 msg.payload = [0.52, 0.41, 0.58, 0.44, 0.56, 0.49, 0.47, 0.53, 0.46, 0.54];
 ```
+
+### Typical Industrial Value Ranges (Before Normalization)
+
+| Sensor | Normal Range | Unit | Anomaly Indicator |
+|--------|--------------|------|-------------------|
+| Temperature | 40-70°C | °C | >80°C or rapid increase |
+| Pressure | 4-6 bar | bar | <3 or >7 bar |
+| Vibration | 1.5-2.8 mm/s | mm/s | >4.5 (ISO 10816) |
+| Flow | 90-110 | L/min | <80 (leak/blockage) |
+| Current | 12-18A | A | >25A (overload) |
+| Humidity | 40-60% | RH | >80% (condensation risk) |
 
 ## Output Interpretation
 

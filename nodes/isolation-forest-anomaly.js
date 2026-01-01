@@ -19,11 +19,20 @@ module.exports = function(RED) {
         this.maxSamples = parseInt(config.maxSamples) || 256;
         this.outputTopic = config.outputTopic || "";
         this.debug = config.debug === true;
+        
+        // Online/Incremental Learning settings
+        this.learningMode = config.learningMode || "batch"; // batch, incremental, adaptive
+        this.retrainInterval = parseInt(config.retrainInterval) || 50; // Retrain every N samples
+        this.adaptRate = parseFloat(config.adaptRate) || 0.1; // Adaptation rate for adaptive mode
+        this.persistModel = config.persistModel === true;
+        
         this.dataBuffer = [];
         this.scoreBuffer = []; // Store prediction scores for threshold calculation
         this.model = null;
         this.isTrained = false;
         this.anomalyThreshold = 0.5; // Default threshold, will be updated dynamically
+        this.sampleCount = 0; // Total samples processed
+        this.lastRetrainCount = 0; // Samples at last retrain
         
         // Debug logging helper
         var debugLog = function(message) {
@@ -32,7 +41,7 @@ module.exports = function(RED) {
             }
         };
         
-        function trainModel() {
+        function trainModel(isIncremental) {
             if (!IsolationForest || node.dataBuffer.length < 10) {
                 return;
             }
@@ -53,7 +62,8 @@ module.exports = function(RED) {
                 
                 // Train Isolation Forest
                 var actualMaxSamples = Math.min(node.maxSamples, node.dataBuffer.length);
-                debugLog("Training Isolation Forest: trees=" + node.numEstimators + ", samples=" + actualMaxSamples);
+                var modeLabel = isIncremental ? "incremental" : "full";
+                debugLog("Training Isolation Forest (" + modeLabel + "): trees=" + node.numEstimators + ", samples=" + actualMaxSamples);
                 
                 node.model = new IsolationForest({
                     contamination: node.contamination,
@@ -63,6 +73,7 @@ module.exports = function(RED) {
                 
                 node.model.train(trainingData);
                 node.isTrained = true;
+                node.lastRetrainCount = node.sampleCount;
                 
                 // Calculate threshold based on training data scores
                 var trainingScores = trainingData.map(function(features) {
@@ -72,10 +83,40 @@ module.exports = function(RED) {
                 var thresholdIndex = Math.floor(trainingScores.length * node.contamination);
                 node.anomalyThreshold = thresholdIndex > 0 ? trainingScores[thresholdIndex] : trainingScores[0] || 0.5;
                 
+                // Update status
+                node.status({
+                    fill: "green",
+                    shape: "dot",
+                    text: "Trained (" + modeLabel + ") | n=" + node.dataBuffer.length
+                });
+                
             } catch (err) {
                 node.error("Error training Isolation Forest: " + err.message);
                 node.isTrained = false;
             }
+        }
+        
+        // Check if incremental retrain is needed
+        function shouldRetrain() {
+            if (node.learningMode === "batch") {
+                return false; // Only retrain when buffer wraps
+            }
+            
+            var samplesSinceRetrain = node.sampleCount - node.lastRetrainCount;
+            return samplesSinceRetrain >= node.retrainInterval;
+        }
+        
+        // Adaptive threshold update
+        function updateAdaptiveThreshold(newScore, wasAnomaly) {
+            if (node.learningMode !== "adaptive") return;
+            
+            // If detected as normal but marked anomaly, increase threshold slightly
+            // If detected as anomaly but was normal, decrease threshold
+            if (wasAnomaly && newScore < node.anomalyThreshold) {
+                // False negative - decrease threshold
+                node.anomalyThreshold = node.anomalyThreshold * (1 - node.adaptRate * 0.5);
+            }
+            // Can add feedback mechanism here for user corrections
         }
         
         node.on('input', function(msg) {
@@ -94,16 +135,22 @@ module.exports = function(RED) {
                     value: value
                 });
                 
+                // Increment sample count
+                node.sampleCount++;
+                
                 // Limit buffer to maximum size
                 if (node.dataBuffer.length > node.windowSize) {
                     node.dataBuffer.shift();
-                    // Retrain model when buffer is full
-                    trainModel();
                 }
                 
                 // Train model when enough data is available
                 if (!node.isTrained && node.dataBuffer.length >= 10) {
-                    trainModel();
+                    trainModel(false);
+                }
+                
+                // Incremental/Adaptive retraining
+                if (node.isTrained && shouldRetrain()) {
+                    trainModel(true);
                 }
                 
                 // If Isolation Forest is not available or not trained, use simple fallback method
@@ -168,9 +215,14 @@ module.exports = function(RED) {
                     payload: value,
                     isAnomaly: isAnomaly,
                     anomalyScore: score,
+                    threshold: node.anomalyThreshold,
                     method: "isolation-forest",
+                    learningMode: node.learningMode,
                     contamination: node.contamination,
                     numEstimators: node.numEstimators,
+                    sampleCount: node.sampleCount,
+                    bufferSize: node.dataBuffer.length,
+                    lastRetrain: node.lastRetrainCount,
                     timestamp: Date.now()
                 };
                 
@@ -212,5 +264,17 @@ module.exports = function(RED) {
     }
     
     RED.nodes.registerType("isolation-forest-anomaly", IsolationForestAnomalyNode);
+    
+    // API endpoint to check ml-isolation-forest availability
+    RED.httpAdmin.get('/isolation-forest-anomaly/status', function(req, res) {
+        var available = false;
+        try {
+            require('ml-isolation-forest');
+            available = true;
+        } catch (err) {
+            available = false;
+        }
+        res.json({ available: available });
+    });
 };
 

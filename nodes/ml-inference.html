@@ -43,6 +43,22 @@
         oneditprepare: function() {
             var node = this;
             
+            // Python runtime types that require Docker/Python environment
+            var pythonRuntimes = ['tflite', 'keras', 'sklearn', 'savedmodel', 'coral'];
+            
+            // Show/hide Python warning based on selected model type
+            function updatePythonWarning() {
+                var selectedType = $("#node-input-modelType").val();
+                if (pythonRuntimes.indexOf(selectedType) !== -1) {
+                    $("#python-warning").show();
+                } else {
+                    $("#python-warning").hide();
+                }
+            }
+            
+            $("#node-input-modelType").on("change", updatePythonWarning);
+            setTimeout(updatePythonWarning, 100);
+            
             // Check available runtimes
             $.getJSON("ml-inference/runtimes", function(data) {
                 var tfjsStatus = data.tfjs 
@@ -52,15 +68,33 @@
                     ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-check-circle"></i> ONNX Runtime</span>'
                     : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-times-circle"></i> ONNX Runtime</span>';
                 
-                // Check Coral status
-                $.getJSON("ml-inference/coral-status", function(coralData) {
-                    var coralStatus = coralData.available
-                        ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-microchip"></i> Coral Edge TPU</span>'
-                        : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral Edge TPU</span>';
-                    $("#runtime-status").html(tfjsStatus + onnxStatus + coralStatus);
+                // Check Python/Coral status
+                $.getJSON("ml-inference/python-status", function(pythonData) {
+                    var pythonStatus = pythonData.available
+                        ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-code"></i> Python</span>'
+                        : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-code"></i> Python</span>';
+                    
+                    $.getJSON("ml-inference/coral-status", function(coralData) {
+                        var coralStatus = coralData.available
+                            ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-microchip"></i> Coral TPU</span>'
+                            : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
+                        $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + coralStatus);
+                    }).fail(function() {
+                        var coralStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
+                        $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + coralStatus);
+                    });
                 }).fail(function() {
-                    var coralStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral Edge TPU</span>';
-                    $("#runtime-status").html(tfjsStatus + onnxStatus + coralStatus);
+                    $.getJSON("ml-inference/coral-status", function(coralData) {
+                        var coralStatus = coralData.available
+                            ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-microchip"></i> Coral TPU</span>'
+                            : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
+                        var pythonStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-code"></i> Python</span>';
+                        $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + coralStatus);
+                    }).fail(function() {
+                        var coralStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
+                        var pythonStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-code"></i> Python</span>';
+                        $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + coralStatus);
+                    });
                 });
             }).fail(function() {
                 $("#runtime-status").html('<span class="ml-runtime-badge" style="background: #fff3e0; color: #e65100;"><i class="fa fa-exclamation-triangle"></i> Could not check runtimes</span>');
@@ -174,29 +208,69 @@
             
             // File input handlers
             $("#model-file-onnx").on("change", function(e) {
-                if (e.target.files.length > 0) {
-                    handleFileUpload(e.target.files);
-                }
+                if (e.target.files.length > 0) handleFileUpload(e.target.files);
             });
             
             $("#model-file-tfjs").on("change", function(e) {
-                if (e.target.files.length > 0) {
-                    handleFileUpload(e.target.files);
-                }
+                if (e.target.files.length > 0) handleFileUpload(e.target.files);
+            });
+            
+            $("#model-file-tflite").on("change", function(e) {
+                if (e.target.files.length > 0) handleFileUpload(e.target.files);
+            });
+            
+            $("#model-file-keras").on("change", function(e) {
+                if (e.target.files.length > 0) handleFileUpload(e.target.files);
+            });
+            
+            $("#model-file-sklearn").on("change", function(e) {
+                if (e.target.files.length > 0) handleFileUpload(e.target.files);
             });
             
             function handleFileUpload(files) {
                 var fileList = Array.from(files);
-                var hasOnnx = fileList.some(f => f.name.endsWith('.onnx'));
-                var hasJson = fileList.some(f => f.name === 'model.json');
+                var file = fileList[0];
+                var ext = file.name.split('.').pop().toLowerCase();
                 
-                if (hasOnnx) {
-                    uploadOnnxFile(fileList.find(f => f.name.endsWith('.onnx')));
-                } else if (hasJson) {
+                // Handle by file extension
+                if (ext === 'onnx') {
+                    uploadGenericFile(file, 'onnx');
+                } else if (ext === 'tflite') {
+                    uploadGenericFile(file, 'tflite');
+                } else if (ext === 'keras' || ext === 'h5') {
+                    uploadGenericFile(file, 'keras');
+                } else if (ext === 'pkl' || ext === 'joblib') {
+                    uploadGenericFile(file, 'sklearn');
+                } else if (file.name === 'model.json') {
                     uploadTfjsFiles(fileList);
                 } else {
-                    showUploadStatus('error', 'Please upload .onnx or model.json + .bin files');
+                    showUploadStatus('error', 'Unsupported file type: .' + ext);
                 }
+            }
+            
+            function uploadGenericFile(file, type) {
+                showUploadStatus('loading', 'Uploading ' + file.name + '...');
+                var formData = new FormData();
+                formData.append('file', file);
+                formData.append('type', type);
+                
+                $.ajax({
+                    url: "ml-inference/upload",
+                    type: "POST",
+                    data: formData,
+                    processData: false,
+                    contentType: false,
+                    success: function(response) {
+                        showUploadStatus('success', 'Uploaded: ' + response.name);
+                        loadModelList();
+                        if (response.path) {
+                            $("#node-input-modelPath").val(response.path);
+                        }
+                    },
+                    error: function(xhr) {
+                        showUploadStatus('error', 'Upload failed: ' + (xhr.responseJSON?.error || 'Unknown error'));
+                    }
+                });
             }
             
             function showUploadStatus(type, message) {
@@ -313,16 +387,18 @@
             $("#node-input-modelSource").on("change", function() {
                 var source = $(this).val();
                 // Hide all sections
-                $("#url-auth-section, #huggingface-section, #mlflow-section, #custom-section").slideUp(200);
+                $("#local-model-section, #url-auth-section, #huggingface-section, #mlflow-section, #custom-section").hide();
                 // Show relevant section
-                if (source === "url") {
-                    $("#url-auth-section").slideDown(200);
+                if (source === "local") {
+                    $("#local-model-section").show();
+                } else if (source === "url") {
+                    $("#url-auth-section").show();
                 } else if (source === "huggingface") {
-                    $("#huggingface-section").slideDown(200);
+                    $("#huggingface-section").show();
                 } else if (source === "mlflow") {
-                    $("#mlflow-section").slideDown(200);
+                    $("#mlflow-section").show();
                 } else if (source === "custom") {
-                    $("#custom-section").slideDown(200);
+                    $("#custom-section").show();
                 }
             });
             $("#node-input-modelSource").trigger("change");
@@ -704,264 +780,206 @@
         <input type="text" id="node-input-name" placeholder="Name">
     </div>
     
-    <!-- Disclaimer -->
-    <div style="background: #fff3e0; border: 2px solid #ff9800; border-radius: 6px; padding: 12px; margin-bottom: 12px;">
-        <div style="display: flex; align-items: start; gap: 10px;">
-            <i class="fa fa-exclamation-triangle" style="color: #e65100; font-size: 20px; margin-top: 2px;"></i>
-            <div>
-                <strong style="color: #e65100; display: block; margin-bottom: 4px;">⚠️ Docker Container Required</strong>
-                <div style="font-size: 12px; color: #666; line-height: 1.5;">
-                    This node requires TensorFlow.js and ONNX Runtime with native bindings. 
-                    These dependencies only work properly in a <strong>custom Docker container</strong> with Debian-based Node-RED image.
-                    Standard Node-RED installations may not work due to missing native libraries.
-                    <br><br>
-                    <strong>For Docker:</strong> Use the provided <code>Dockerfile</code> or <code>docker-compose.dev.yml</code> which includes the required dependencies.
-                </div>
-            </div>
-        </div>
-    </div>
+    <!-- Runtime Status -->
+    <div id="runtime-status" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px;"></div>
     
-    <!-- Model Upload Section -->
+    <!-- 1. MODEL SELECTION - Primary section combining source and selection -->
     <div class="ml-section">
         <div class="ml-section-header">
-            <span><i class="fa fa-cloud-upload"></i> Upload Model</span>
+            <span><i class="fa fa-cube"></i> Model Selection</span>
             <i class="fa fa-chevron-down ml-collapse-icon"></i>
         </div>
         <div class="ml-section-content">
-            <div id="ml-drop-zone" class="ml-drop-zone">
-                <div class="ml-drop-icon"><i class="fa fa-cloud-upload"></i></div>
-                <div class="ml-drop-text">Drag & drop model files here</div>
-                <div class="ml-upload-buttons">
-                    <label for="model-file-onnx" class="ml-upload-btn ml-upload-btn-onnx">
-                        <i class="fa fa-cube"></i> ONNX Model
-                    </label>
-                    <input type="file" id="model-file-onnx" accept=".onnx" style="display: none;">
-                    
-                    <label for="model-file-tfjs" class="ml-upload-btn ml-upload-btn-tfjs">
-                        <i class="fa fa-sitemap"></i> TensorFlow.js
-                    </label>
-                    <input type="file" id="model-file-tfjs" accept=".json,.bin" multiple style="display: none;">
-                </div>
-            </div>
-            <div id="upload-status"></div>
-        </div>
-    </div>
-    
-    <!-- Model Library Section -->
-    <div class="ml-section">
-        <div class="ml-section-header">
-            <span><i class="fa fa-folder-open"></i> Model Library</span>
-            <i class="fa fa-chevron-down ml-collapse-icon"></i>
-        </div>
-        <div class="ml-section-content">
-            <div id="model-list-container">
-                <div class="ml-empty-state">
-                    <i class="fa fa-spinner fa-spin"></i>
-                    <p>Loading models...</p>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Model Source Configuration -->
-    <div class="ml-section">
-        <div class="ml-section-header">
-            <span><i class="fa fa-database"></i> Model Source</span>
-            <i class="fa fa-chevron-down ml-collapse-icon"></i>
-        </div>
-        <div class="ml-section-content">
-            <div class="ml-config-item">
-                <label for="node-input-modelSource">
-                    <i class="fa fa-cloud"></i> Source Type
-                </label>
+            <!-- Source Type -->
+            <div class="ml-config-item" style="margin-bottom: 12px;">
+                <label for="node-input-modelSource"><i class="fa fa-cloud"></i> Source</label>
                 <select id="node-input-modelSource">
-                    <option value="local">Local File</option>
-                    <option value="url">URL (with Authentication)</option>
+                    <option value="local">Local / Uploaded Model</option>
+                    <option value="url">URL (Direct Download)</option>
                     <option value="huggingface">Hugging Face Hub</option>
                     <option value="mlflow">MLflow Registry</option>
                     <option value="custom">Custom Registry</option>
                 </select>
-                <div class="ml-help-text">Select where to load the model from</div>
             </div>
             
-            <!-- URL Authentication Section -->
-            <div id="url-auth-section" style="display: none; margin-top: 12px;">
+            <!-- Local: Model Library -->
+            <div id="local-model-section">
+                <div style="font-size: 12px; color: #666; margin-bottom: 8px;">
+                    <i class="fa fa-folder-open"></i> Select from uploaded models or enter path:
+                </div>
+                <div id="model-list-container" style="max-height: 200px; overflow-y: auto; margin-bottom: 10px;">
+                    <div class="ml-empty-state">
+                        <i class="fa fa-spinner fa-spin"></i>
+                        <p>Loading models...</p>
+                    </div>
+                </div>
+                <div class="form-row" style="margin: 0;">
+                    <input type="text" id="node-input-modelPath" placeholder="/data/models/my-model/model.onnx" style="width: 100%;">
+                </div>
+                <div class="ml-help-text">Path to model file (auto-filled when selecting from library)</div>
+            </div>
+            
+            <!-- URL Source -->
+            <div id="url-auth-section" style="display: none;">
+                <div class="form-row" style="margin-bottom: 8px;">
+                    <input type="text" id="node-input-modelPath-url" placeholder="https://example.com/models/model.onnx" style="width: 100%;">
+                </div>
                 <div class="ml-config-grid">
                     <div class="ml-config-item">
-                        <label for="node-input-urlAuthType">
-                            <i class="fa fa-key"></i> Auth Type
-                        </label>
+                        <label for="node-input-urlAuthType"><i class="fa fa-key"></i> Auth</label>
                         <select id="node-input-urlAuthType">
                             <option value="">None</option>
                             <option value="bearer">Bearer Token</option>
                             <option value="basic">Basic Auth</option>
                         </select>
                     </div>
-                    
                     <div class="ml-config-item">
-                        <label for="node-input-urlAuthToken">
-                            <i class="fa fa-lock"></i> Auth Token/Credentials
-                        </label>
+                        <label for="node-input-urlAuthToken"><i class="fa fa-lock"></i> Token</label>
                         <input type="password" id="node-input-urlAuthToken" placeholder="Token or user:pass">
-                        <div class="ml-help-text">Bearer: token | Basic: user:password</div>
                     </div>
                 </div>
             </div>
             
-            <!-- Hugging Face Hub Section -->
-            <div id="huggingface-section" style="display: none; margin-top: 12px;">
+            <!-- Hugging Face Hub -->
+            <div id="huggingface-section" style="display: none;">
                 <div class="ml-config-grid">
                     <div class="ml-config-item">
-                        <label for="node-input-hfModelId">
-                            <i class="fa fa-github"></i> Model ID
-                        </label>
-                        <input type="text" id="node-input-hfModelId" placeholder="e.g., microsoft/DialoGPT-medium">
-                        <div class="ml-help-text">Hugging Face model identifier</div>
+                        <label><i class="fa fa-github"></i> Model ID</label>
+                        <input type="text" id="node-input-hfModelId" placeholder="microsoft/DialoGPT-medium">
                     </div>
-                    
                     <div class="ml-config-item">
-                        <label for="node-input-hfRevision">
-                            <i class="fa fa-code-branch"></i> Revision
-                        </label>
+                        <label><i class="fa fa-code-branch"></i> Revision</label>
                         <input type="text" id="node-input-hfRevision" placeholder="main">
-                        <div class="ml-help-text">Branch, tag, or commit hash (default: main)</div>
                     </div>
-                    
-                    <div class="ml-config-item">
-                        <label for="node-input-hfToken">
-                            <i class="fa fa-key"></i> HF Token (optional)
-                        </label>
+                    <div class="ml-config-item ml-config-full">
+                        <label><i class="fa fa-key"></i> HF Token (optional)</label>
                         <input type="password" id="node-input-hfToken" placeholder="hf_...">
-                        <div class="ml-help-text">Optional Hugging Face API token</div>
                     </div>
                 </div>
             </div>
             
-            <!-- MLflow Registry Section -->
-            <div id="mlflow-section" style="display: none; margin-top: 12px;">
+            <!-- MLflow Registry -->
+            <div id="mlflow-section" style="display: none;">
                 <div class="ml-config-grid">
-                    <div class="ml-config-item">
-                        <label for="node-input-mlflowRegistryUri">
-                            <i class="fa fa-server"></i> Registry URI
-                        </label>
+                    <div class="ml-config-item ml-config-full">
+                        <label><i class="fa fa-server"></i> Registry URI</label>
                         <input type="text" id="node-input-mlflowRegistryUri" placeholder="http://mlflow-server:5000">
-                        <div class="ml-help-text">MLflow tracking server URL</div>
                     </div>
-                    
                     <div class="ml-config-item">
-                        <label for="node-input-mlflowModelName">
-                            <i class="fa fa-cube"></i> Model Name
-                        </label>
+                        <label><i class="fa fa-cube"></i> Model Name</label>
                         <input type="text" id="node-input-mlflowModelName" placeholder="anomaly-detector">
-                        <div class="ml-help-text">Registered model name in MLflow</div>
                     </div>
-                    
                     <div class="ml-config-item">
-                        <label for="node-input-mlflowVersion">
-                            <i class="fa fa-tag"></i> Version
-                        </label>
+                        <label><i class="fa fa-tag"></i> Version</label>
                         <input type="text" id="node-input-mlflowVersion" placeholder="latest">
-                        <div class="ml-help-text">Version number or 'latest'</div>
                     </div>
-                    
                     <div class="ml-config-item">
-                        <label for="node-input-mlflowStage">
-                            <i class="fa fa-layer-group"></i> Stage
-                        </label>
+                        <label><i class="fa fa-layer-group"></i> Stage</label>
                         <select id="node-input-mlflowStage">
                             <option value="production">Production</option>
                             <option value="staging">Staging</option>
                             <option value="archived">Archived</option>
                         </select>
-                        <div class="ml-help-text">Model stage in registry</div>
                     </div>
-                    
                     <div class="ml-config-item">
-                        <label for="node-input-mlflowAuthToken">
-                            <i class="fa fa-key"></i> Auth Token (optional)
-                        </label>
+                        <label><i class="fa fa-key"></i> Auth Token</label>
                         <input type="password" id="node-input-mlflowAuthToken" placeholder="Token">
-                        <div class="ml-help-text">Optional MLflow authentication token</div>
                     </div>
                 </div>
             </div>
             
-            <!-- Custom Registry Section -->
-            <div id="custom-section" style="display: none; margin-top: 12px;">
+            <!-- Custom Registry -->
+            <div id="custom-section" style="display: none;">
                 <div class="ml-config-grid">
-                    <div class="ml-config-item">
-                        <label for="node-input-customRegistryUrl">
-                            <i class="fa fa-cloud"></i> Registry URL
-                        </label>
+                    <div class="ml-config-item ml-config-full">
+                        <label><i class="fa fa-cloud"></i> Registry URL</label>
                         <input type="text" id="node-input-customRegistryUrl" placeholder="https://api.company.com/models">
-                        <div class="ml-help-text">Base URL of custom model registry</div>
                     </div>
-                    
                     <div class="ml-config-item">
-                        <label for="node-input-customModelId">
-                            <i class="fa fa-cube"></i> Model ID
-                        </label>
+                        <label><i class="fa fa-cube"></i> Model ID</label>
                         <input type="text" id="node-input-customModelId" placeholder="sensor-anomaly-v2">
-                        <div class="ml-help-text">Model identifier in registry</div>
                     </div>
-                    
                     <div class="ml-config-item">
-                        <label for="node-input-customApiKey">
-                            <i class="fa fa-key"></i> API Key (optional)
-                        </label>
+                        <label><i class="fa fa-key"></i> API Key</label>
                         <input type="password" id="node-input-customApiKey" placeholder="API Key">
-                        <div class="ml-help-text">Optional API key for authentication</div>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Auto-Update & Lifecycle Section -->
-            <div class="ml-section" style="margin-top: 12px;">
-                <div class="ml-section-header">
-                    <span><i class="fa fa-sync"></i> Auto-Update & Lifecycle</span>
-                    <i class="fa fa-chevron-down ml-collapse-icon"></i>
-                </div>
-                <div class="ml-section-content">
-                    <div class="ml-config-grid">
-                        <div class="ml-config-item">
-                            <label for="node-input-autoUpdate">
-                                <i class="fa fa-sync-alt"></i> Auto-Update
-                            </label>
-                            <input type="checkbox" id="node-input-autoUpdate">
-                            <div class="ml-help-text">Automatically check for model updates</div>
-                        </div>
-                        
-                        <div class="ml-config-item">
-                            <label for="node-input-updateCheckInterval">
-                                <i class="fa fa-clock"></i> Update Interval (seconds)
-                            </label>
-                            <input type="number" id="node-input-updateCheckInterval" placeholder="3600" min="60">
-                            <div class="ml-help-text">How often to check for updates (default: 3600s)</div>
-                        </div>
-                        
-                        <div class="ml-config-item">
-                            <label for="node-input-modelStage">
-                                <i class="fa fa-layer-group"></i> Model Stage
-                            </label>
-                            <select id="node-input-modelStage">
-                                <option value="production">Production</option>
-                                <option value="staging">Staging</option>
-                                <option value="development">Development</option>
-                                <option value="deprecated">Deprecated</option>
-                                <option value="archived">Archived</option>
-                            </select>
-                            <div class="ml-help-text">Lifecycle stage of this model</div>
-                        </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
     
-    <!-- Model Path (manual) -->
-    <div class="form-row">
-        <label for="node-input-modelPath"><i class="fa fa-link"></i> Model Path / URL</label>
-        <input type="text" id="node-input-modelPath" placeholder="Select from library, enter path, or URL">
+    <!-- 2. UPLOAD NEW MODEL - Collapsed by default -->
+    <div class="ml-section">
+        <div class="ml-section-header">
+            <span><i class="fa fa-cloud-upload"></i> Upload New Model</span>
+            <i class="fa fa-chevron-down ml-collapse-icon"></i>
+        </div>
+        <div class="ml-section-content" style="display: none;">
+            <div id="ml-drop-zone" class="ml-drop-zone">
+                <div class="ml-drop-icon"><i class="fa fa-cloud-upload"></i></div>
+                <div class="ml-drop-text">Drag & drop model files here</div>
+                <div class="ml-upload-buttons">
+                    <label for="model-file-onnx" class="ml-upload-btn ml-upload-btn-onnx">
+                        <i class="fa fa-cube"></i> ONNX
+                    </label>
+                    <input type="file" id="model-file-onnx" accept=".onnx" style="display: none;">
+                    
+                    <label for="model-file-tfjs" class="ml-upload-btn ml-upload-btn-tfjs">
+                        <i class="fa fa-sitemap"></i> TF.js
+                    </label>
+                    <input type="file" id="model-file-tfjs" accept=".json,.bin" multiple style="display: none;">
+                    
+                    <label for="model-file-tflite" class="ml-upload-btn" style="background: #4CAF50;">
+                        <i class="fa fa-mobile"></i> TFLite
+                    </label>
+                    <input type="file" id="model-file-tflite" accept=".tflite" style="display: none;">
+                    
+                    <label for="model-file-keras" class="ml-upload-btn" style="background: #E91E63;">
+                        <i class="fa fa-brain"></i> Keras
+                    </label>
+                    <input type="file" id="model-file-keras" accept=".keras,.h5" style="display: none;">
+                    
+                    <label for="model-file-sklearn" class="ml-upload-btn" style="background: #FF5722;">
+                        <i class="fa fa-cogs"></i> sklearn
+                    </label>
+                    <input type="file" id="model-file-sklearn" accept=".pkl,.joblib" style="display: none;">
+                </div>
+            </div>
+            <div id="upload-status"></div>
+            <div class="ml-help-text" style="margin-top: 8px;">
+                <i class="fa fa-info-circle"></i> Uploaded models are saved to <code>~/.node-red/ml-models/</code>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 3. ADVANCED OPTIONS - Auto-Update & Lifecycle (collapsed) -->
+    <div class="ml-section">
+        <div class="ml-section-header">
+            <span><i class="fa fa-sync"></i> Auto-Update & Lifecycle</span>
+            <i class="fa fa-chevron-down ml-collapse-icon"></i>
+        </div>
+        <div class="ml-section-content" style="display: none;">
+            <div class="ml-config-grid">
+                <div class="ml-config-item">
+                    <label><i class="fa fa-sync-alt"></i> Auto-Update</label>
+                    <input type="checkbox" id="node-input-autoUpdate">
+                    <div class="ml-help-text">Check for model updates periodically</div>
+                </div>
+                <div class="ml-config-item">
+                    <label><i class="fa fa-clock"></i> Interval (default: 3600 sec)</label>
+                    <input type="number" id="node-input-updateCheckInterval" value="3600" min="60">
+                </div>
+                <div class="ml-config-item">
+                    <label><i class="fa fa-layer-group"></i> Stage</label>
+                    <select id="node-input-modelStage">
+                        <option value="production">Production</option>
+                        <option value="staging">Staging</option>
+                        <option value="development">Development</option>
+                        <option value="deprecated">Deprecated</option>
+                    </select>
+                </div>
+            </div>
+        </div>
     </div>
     
     <!-- Model Configuration Section -->
@@ -976,14 +994,23 @@
                     <label for="node-input-modelType">Model Type</label>
                     <select id="node-input-modelType">
                         <option value="auto">Auto-detect</option>
-                        <option value="tfjs">TensorFlow.js (model.json)</option>
-                        <option value="onnx">ONNX (.onnx)</option>
-                        <option value="tflite">TFLite (.tflite)</option>
-                        <option value="keras">Keras (.keras, .h5)</option>
-                        <option value="sklearn">scikit-learn (.pkl, .joblib)</option>
-                        <option value="savedmodel">TensorFlow SavedModel</option>
-                        <option value="coral">Coral Edge TPU (accelerated)</option>
+                        <optgroup label="JavaScript Runtimes (npm install)">
+                            <option value="onnx">ONNX (.onnx)</option>
+                            <option value="tfjs">TensorFlow.js (model.json)</option>
+                        </optgroup>
+                        <optgroup label="Python Runtimes (Docker/Python required)">
+                            <option value="tflite">TFLite (.tflite)</option>
+                            <option value="keras">Keras (.keras, .h5)</option>
+                            <option value="sklearn">scikit-learn (.pkl, .joblib)</option>
+                            <option value="savedmodel">TensorFlow SavedModel</option>
+                        </optgroup>
+                        <optgroup label="Hardware Accelerated">
+                            <option value="coral">Coral Edge TPU</option>
+                        </optgroup>
                     </select>
+                    <div id="python-warning" class="ml-help-text" style="display: none; color: #e65100;">
+                        <i class="fa fa-exclamation-triangle"></i> Requires Python environment (use Docker image)
+                    </div>
                 </div>
                 
                 <div class="ml-config-item">
@@ -1018,13 +1045,6 @@
         </div>
     </div>
     
-    <!-- Runtime Status -->
-    <div class="ml-section" style="background: transparent; border: none;">
-        <div style="font-size: 12px; color: #666; margin-bottom: 6px;"><i class="fa fa-microchip"></i> Available Runtimes:</div>
-        <div id="runtime-status" class="ml-runtime-badges">
-            <span class="ml-runtime-badge" style="background: #f5f5f5;"><i class="fa fa-spinner fa-spin"></i> Checking...</span>
-        </div>
-    </div>
 </script>
 
 <script type="text/html" data-help-name="ml-inference">
@@ -1048,15 +1068,29 @@
     
     <h3>Supported Model Formats</h3>
     <p>This node supports multiple ML frameworks via different runtimes:</p>
+    
+    <h4>JavaScript Runtimes (npm install)</h4>
+    <p>These work immediately after <code>npm install</code> - no additional setup required:</p>
     <table>
         <tr><th>Format</th><th>Extension</th><th>Runtime</th><th>Created With</th></tr>
-        <tr><td>ONNX</td><td>.onnx</td><td>ONNX Runtime (Node.js)</td><td>PyTorch, TensorFlow, scikit-learn</td></tr>
-        <tr><td>TensorFlow.js</td><td>model.json + .bin</td><td>TensorFlow.js (Node.js)</td><td>tensorflowjs_converter, Keras</td></tr>
-        <tr><td>TensorFlow SavedModel</td><td>saved_model.pb</td><td>TensorFlow.js (Node.js)</td><td>tf.saved_model.save()</td></tr>
-        <tr><td>TFLite</td><td>.tflite</td><td>Python Bridge</td><td>TensorFlow Lite Converter</td></tr>
-        <tr><td>Keras</td><td>.keras, .h5</td><td>Python Bridge</td><td>model.save(), Keras 3</td></tr>
-        <tr><td>scikit-learn</td><td>.pkl, .joblib</td><td>Python Bridge</td><td>joblib.dump(), pickle</td></tr>
-        <tr><td>Coral Edge TPU</td><td>.tflite</td><td>Python Bridge + Coral</td><td>TFLite (INT8 quantized)</td></tr>
+        <tr><td>ONNX</td><td>.onnx</td><td>onnxruntime-node</td><td>PyTorch, TensorFlow, scikit-learn, ONNX</td></tr>
+        <tr><td>TensorFlow.js</td><td>model.json + .bin</td><td>@tensorflow/tfjs-node</td><td>tensorflowjs_converter, Keras</td></tr>
+    </table>
+    
+    <h4>Python Runtimes (Docker/Python required)</h4>
+    <p>These require Python with ML libraries. Use the provided Docker image or install manually:</p>
+    <table>
+        <tr><th>Format</th><th>Extension</th><th>Python Package</th><th>Created With</th></tr>
+        <tr><td>TFLite</td><td>.tflite</td><td>tflite-runtime</td><td>TensorFlow Lite Converter</td></tr>
+        <tr><td>Keras</td><td>.keras, .h5</td><td>tensorflow, keras</td><td>model.save(), Keras 3</td></tr>
+        <tr><td>scikit-learn</td><td>.pkl, .joblib</td><td>scikit-learn, joblib</td><td>joblib.dump(), pickle</td></tr>
+        <tr><td>TensorFlow SavedModel</td><td>saved_model/</td><td>tensorflow</td><td>tf.saved_model.save()</td></tr>
+    </table>
+    
+    <h4>Hardware Accelerated</h4>
+    <table>
+        <tr><th>Format</th><th>Extension</th><th>Requirements</th><th>Speed</th></tr>
+        <tr><td>Coral Edge TPU</td><td>.tflite (INT8)</td><td>pycoral + Coral USB/Dev Board</td><td>10-100x faster</td></tr>
     </table>
     
     <h3>Uploading Models</h3>
@@ -1091,10 +1125,21 @@
         <li><b>Warmup:</b> Run dummy inference on load for faster first prediction</li>
     </ul>
     
-    <h3>Python Bridge (TFLite, Keras, scikit-learn)</h3>
-    <p>Some model formats require Python. Ensure these are installed in the Node-RED environment:</p>
-    <pre>pip install numpy tensorflow keras scikit-learn joblib tflite-runtime</pre>
-    <p>The Docker image includes all required Python dependencies.</p>
+    <h3>Python Bridge Setup</h3>
+    <p>For TFLite, Keras, and scikit-learn models, Python with ML libraries is required:</p>
+    
+    <h4>Option 1: Use Docker (Recommended)</h4>
+    <pre>docker-compose up -d</pre>
+    <p>The provided Docker image includes all Python dependencies pre-installed.</p>
+    
+    <h4>Option 2: Manual Installation</h4>
+    <pre># Install Python packages
+pip install numpy tensorflow scikit-learn joblib tflite-runtime
+
+# For NumPy 1.x compatibility with tflite-runtime:
+pip install "numpy&lt;2"</pre>
+    
+    <p><b>Note:</b> The runtime status indicator shows which runtimes are available in your environment.</p>
     
     <h3>Example: Autoencoder Anomaly Detection</h3>
     <pre>

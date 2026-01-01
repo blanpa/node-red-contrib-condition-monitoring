@@ -201,8 +201,8 @@
                 <label for="node-input-windowSize">
                     <i class="fa fa-window-maximize"></i> Window Size
                 </label>
-                <input type="number" id="node-input-windowSize" min="2" placeholder="100">
-                <div class="cm-help-text">Number of values to keep in buffer for analysis</div>
+                <input type="number" id="node-input-windowSize" min="2" value="100">
+                <div class="cm-help-text">Number of values to keep in buffer for analysis (default: 100)</div>
             </div>
             
             <!-- Z-Score Config -->
@@ -210,14 +210,14 @@
                 <h4><i class="fa fa-chart-bar"></i> Z-Score Settings <span class="method-badge statistical">Statistical</span></h4>
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
-                        <label>Critical Threshold (σ)</label>
-                        <input type="number" id="node-input-zscoreThreshold" step="0.1" min="0">
-                        <div class="cm-help-text">Z-Score above this = critical (default: 3.0σ)</div>
+                        <label>Critical Threshold (default: 3.0σ)</label>
+                        <input type="number" id="node-input-zscoreThreshold" step="0.1" min="0" value="3.0">
+                        <div class="cm-help-text">Z-Score above this = critical anomaly</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Warning Threshold (σ)</label>
-                        <input type="number" id="node-input-zscoreWarning" step="0.1" min="0">
-                        <div class="cm-help-text">Z-Score above this = warning (default: 2.0σ)</div>
+                        <label>Warning Threshold (default: 2.0σ)</label>
+                        <input type="number" id="node-input-zscoreWarning" step="0.1" min="0" value="2.0">
+                        <div class="cm-help-text">Z-Score above this = warning</div>
                     </div>
                 </div>
             </div>
@@ -227,14 +227,14 @@
                 <h4><i class="fa fa-chart-area"></i> IQR Settings <span class="method-badge statistical">Statistical</span></h4>
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
-                        <label>Critical Multiplier</label>
-                        <input type="number" id="node-input-iqrMultiplier" step="0.1" min="0">
-                        <div class="cm-help-text">Q1 - multiplier*IQR to Q3 + multiplier*IQR (default: 1.5)</div>
+                        <label>Critical Multiplier (default: 1.5)</label>
+                        <input type="number" id="node-input-iqrMultiplier" step="0.1" min="0" value="1.5">
+                        <div class="cm-help-text">Q1 - multiplier*IQR to Q3 + multiplier*IQR</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Warning Multiplier</label>
-                        <input type="number" id="node-input-iqrWarningMultiplier" step="0.1" min="0">
-                        <div class="cm-help-text">Warning zone multiplier (default: 1.2)</div>
+                        <label>Warning Multiplier (default: 1.2)</label>
+                        <input type="number" id="node-input-iqrWarningMultiplier" step="0.1" min="0" value="1.2">
+                        <div class="cm-help-text">Warning zone multiplier</div>
                     </div>
                 </div>
             </div>
@@ -254,9 +254,9 @@
                         <div class="cm-help-text">Values above this are anomalies (leave empty to disable)</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Warning Margin (%)</label>
-                        <input type="number" id="node-input-warningMargin" step="1" min="0" max="100">
-                        <div class="cm-help-text">Percentage margin for warning zone (default: 10%)</div>
+                        <label>Warning Margin (default: 10%)</label>
+                        <input type="number" id="node-input-warningMargin" step="1" min="0" max="100" value="10">
+                        <div class="cm-help-text">Percentage margin for warning zone</div>
                     </div>
                 </div>
             </div>
@@ -266,14 +266,14 @@
                 <h4><i class="fa fa-percentage"></i> Percentile Settings <span class="method-badge statistical">Statistical</span></h4>
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
-                        <label>Lower Percentile</label>
-                        <input type="number" id="node-input-lowerPercentile" step="0.1" min="0" max="100">
-                        <div class="cm-help-text">Values below this percentile are anomalies (default: 5)</div>
+                        <label>Lower Percentile (default: 5)</label>
+                        <input type="number" id="node-input-lowerPercentile" step="0.1" min="0" max="100" value="5">
+                        <div class="cm-help-text">Values below this percentile are anomalies</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Upper Percentile</label>
-                        <input type="number" id="node-input-upperPercentile" step="0.1" min="0" max="100">
-                        <div class="cm-help-text">Values above this percentile are anomalies (default: 95)</div>
+                        <label>Upper Percentile (default: 95)</label>
+                        <input type="number" id="node-input-upperPercentile" step="0.1" min="0" max="100" value="95">
+                        <div class="cm-help-text">Values above this percentile are anomalies</div>
                     </div>
                 </div>
             </div>
@@ -283,9 +283,9 @@
                 <h4><i class="fa fa-wave-square"></i> EMA Settings <span class="method-badge adaptive">Adaptive</span></h4>
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
-                        <label>Alpha (Smoothing Factor)</label>
-                        <input type="number" id="node-input-emaAlpha" step="0.01" min="0" max="1">
-                        <div class="cm-help-text">0-1, higher = more responsive (default: 0.3)</div>
+                        <label>Alpha (default: 0.3)</label>
+                        <input type="number" id="node-input-emaAlpha" step="0.01" min="0" max="1" value="0.3">
+                        <div class="cm-help-text">0-1, higher = more responsive</div>
                     </div>
                     <div class="cm-config-item">
                         <label>Detection Method</label>
@@ -295,14 +295,14 @@
                         </select>
                     </div>
                     <div class="cm-config-item">
-                        <label>Critical Threshold</label>
-                        <input type="number" id="node-input-emaThreshold" step="0.1" min="0">
-                        <div class="cm-help-text">Deviation threshold for critical (default: 2.0)</div>
+                        <label>Critical Threshold (default: 2.0)</label>
+                        <input type="number" id="node-input-emaThreshold" step="0.1" min="0" value="2.0">
+                        <div class="cm-help-text">Deviation threshold for critical anomaly</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Warning Threshold</label>
-                        <input type="number" id="node-input-emaWarning" step="0.1" min="0">
-                        <div class="cm-help-text">Deviation threshold for warning (default: 1.5)</div>
+                        <label>Warning Threshold (default: 1.5)</label>
+                        <input type="number" id="node-input-emaWarning" step="0.1" min="0" value="1.5">
+                        <div class="cm-help-text">Deviation threshold for warning</div>
                     </div>
                 </div>
             </div>
@@ -317,19 +317,19 @@
                         <div class="cm-help-text">Expected value (leave empty for auto-mean)</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Drift</label>
-                        <input type="number" id="node-input-cusumDrift" step="0.1" min="0">
-                        <div class="cm-help-text">Allowable drift before detection (default: 0.5)</div>
+                        <label>Drift (default: 0.5)</label>
+                        <input type="number" id="node-input-cusumDrift" step="0.1" min="0" value="0.5">
+                        <div class="cm-help-text">Allowable drift before detection</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Critical Threshold</label>
-                        <input type="number" id="node-input-cusumThreshold" step="0.1" min="0">
-                        <div class="cm-help-text">CUSUM threshold for critical (default: 5.0)</div>
+                        <label>Critical Threshold (default: 5.0)</label>
+                        <input type="number" id="node-input-cusumThreshold" step="0.1" min="0" value="5.0">
+                        <div class="cm-help-text">CUSUM threshold for critical anomaly</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Warning Threshold</label>
-                        <input type="number" id="node-input-cusumWarning" step="0.1" min="0">
-                        <div class="cm-help-text">CUSUM threshold for warning (default: 3.5)</div>
+                        <label>Warning Threshold (default: 3.5)</label>
+                        <input type="number" id="node-input-cusumWarning" step="0.1" min="0" value="3.5">
+                        <div class="cm-help-text">CUSUM threshold for warning</div>
                     </div>
                 </div>
             </div>
@@ -346,14 +346,14 @@
                         </select>
                     </div>
                     <div class="cm-config-item">
-                        <label>Critical Threshold</label>
-                        <input type="number" id="node-input-maThreshold" step="0.1" min="0">
-                        <div class="cm-help-text">Deviation threshold for critical (default: 2.0)</div>
+                        <label>Critical Threshold (default: 2.0)</label>
+                        <input type="number" id="node-input-maThreshold" step="0.1" min="0" value="2.0">
+                        <div class="cm-help-text">Deviation threshold for critical</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Warning Threshold</label>
-                        <input type="number" id="node-input-maWarning" step="0.1" min="0">
-                        <div class="cm-help-text">Deviation threshold for warning (default: 1.5)</div>
+                        <label>Warning Threshold (default: 1.5)</label>
+                        <input type="number" id="node-input-maWarning" step="0.1" min="0" value="1.5">
+                        <div class="cm-help-text">Deviation threshold for warning</div>
                     </div>
                 </div>
             </div>

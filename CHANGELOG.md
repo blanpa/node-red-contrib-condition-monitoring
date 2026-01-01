@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-01-01 - Advanced Diagnostics Release
+
+### 🚀 New Nodes
+
+#### PCA Anomaly Detection
+- **Principal Component Analysis** for multi-sensor anomaly detection
+- Automatic component selection based on variance threshold
+- Contribution analysis identifies which sensors cause anomalies
+- SPE (Squared Prediction Error) and T² (Hotelling's) statistics
+- Ideal for correlated multi-sensor data (5+ sensors)
+
+### ✨ Enhanced Existing Nodes
+
+#### Signal Analyzer
+- **Cepstrum Mode** - Gearbox fault detection using cepstrum (quefrency domain)
+  - Detects gear mesh frequencies and sidebands
+  - Rahmonic (cepstrum peak) detection
+- **Vibration Mode Enhancements:**
+  - **Autocorrelation (ACF)** - Detects periodicity in signals
+  - **Sample Entropy** - Measures signal complexity/regularity
+  - **Periodicity Detection** - Identifies periodic patterns with strength metric
+
+#### Trend Predictor - Weibull Model
+- **Weibull reliability analysis** for RUL prediction
+- New degradation model option: Linear, Exponential, Weibull
+- Automatic Weibull parameter estimation (β, η)
+- **B-Life calculation** (B1, B5, B10, B50) - time when X% have failed
+- Failure mode classification with interpretation (infant_mortality, useful_life, wear_out, rapid_wear_out)
+- MTTF calculation
+
+#### Multi-Value Processor
+- **Mahalanobis Distance** - Multivariate anomaly detection accounting for sensor correlations
+  - New method in Analyze mode
+  - **Severity levels** (normal, warning, critical) with dual thresholds
+  - Covariance-aware anomaly threshold
+- **Cross-Correlation** - Time lag detection between two sensors
+  - Finds optimal lag and correlation strength
+  - Detects propagation delays (e.g., temperature waves through pipes)
+  - Interpretation of lag direction (which sensor leads/lags)
+
+### 📝 Summary
+- **1 new specialized node** (PCA Anomaly Detection)
+- **5 major enhancements** to existing nodes:
+  - Signal Analyzer: Autocorrelation, Sample Entropy, Periodicity, Cepstrum
+  - Trend Predictor: Weibull B-Life
+  - Multi-Value Processor: Mahalanobis with severity, Cross-Correlation
+- **Consolidated architecture** - All functionality integrated into core nodes
+- Total nodes in package: **8**
+- **83 unit tests** - Comprehensive test coverage
+- Comprehensive help documentation for all features
+
+---
+
+## [0.2.1] - 2026-01-01 - Feature Enhancement Release
+
+### ✨ New Features
+
+#### Signal Analyzer
+- **Envelope Analysis Mode** - Bearing fault detection using envelope spectrum
+  - Bandpass filtering with configurable frequency range
+  - Automatic detection of BPFO, BPFI, BSF, FTF fault frequencies
+  - Harmonic analysis (up to 3x fundamental)
+  - Configurable shaft speed and bearing parameters
+
+#### Trend Predictor  
+- **Dedicated RUL Mode** - Remaining Useful Life calculation with confidence intervals
+  - Configurable failure and warning thresholds
+  - Multiple time units (hours, minutes, days, cycles)
+  - Confidence intervals based on R-squared
+  - Status output: healthy/warning/critical/failed
+  - Degradation rate and percentage tracking
+
+#### Health Index
+- **Visual Threshold Configuration** - Slider-based sensor weight editor
+  - Interactive add/remove sensor controls
+  - Visual threshold bar showing status zones
+  - Configurable healthy/warning/degraded/critical thresholds
+  - All thresholds now output in msg.thresholds
+
+#### Multi-Value Processor
+- **Aggregate Mode** - Reduce multiple values to single statistic
+  - Methods: Mean, Median, Min, Max, Sum, Range, StdDev
+  - Optional output of all statistics
+  - Preserves original values when needed
+
+#### Isolation Forest
+- **Online Learning Modes** - Adaptive anomaly detection
+  - Batch mode (original behavior)
+  - Incremental mode with configurable retrain interval
+  - Adaptive mode with threshold auto-adjustment
+  - Extended output with sample count and retrain info
+
+### 🐛 Bug Fixes
+- Fixed Health Index not routing "degraded" status to anomaly output
+- Fixed test case for anomaly detection with high zScore
+
+### 🧪 Testing
+- All 59 unit tests passing
+- Plausibility check of industrial test data values
+
+---
+
 ## [0.2.0] - 2026-01-01 - Major Consolidation Release
 
 ### 🚀 Breaking Changes

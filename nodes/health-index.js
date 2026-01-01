@@ -17,6 +17,27 @@ module.exports = function(RED) {
         const outputTopic = config.outputTopic || "";
         const debug = config.debug === true;
         
+        // Scale conversion helper
+        const scaleOutput = function(value) {
+            if (outputScale === "0-1") {
+                return value / 100;
+            }
+            return value; // Default 0-100
+        };
+        
+        const scaleThreshold = function(value) {
+            if (outputScale === "0-1") {
+                return value / 100;
+            }
+            return value;
+        };
+        
+        // Threshold configuration
+        const healthyThreshold = parseFloat(config.healthyThreshold) || 80;
+        const warningThreshold = parseFloat(config.warningThreshold) || 60;
+        const degradedThreshold = parseFloat(config.degradedThreshold) || 40;
+        const criticalThreshold = parseFloat(config.criticalThreshold) || 20;
+        
         // Debug logging helper
         const debugLog = function(message) {
             if (debug) {
@@ -53,30 +74,50 @@ module.exports = function(RED) {
             
             debugLog("Health Index: " + healthResult.index.toFixed(1) + "%, Worst: " + (healthResult.worstSensor ? healthResult.worstSensor.name : "N/A"));
             
-            // Determine health status
+            // Determine health status using configurable thresholds
             let status = "healthy";
             let statusColor = "green";
             
-            if (healthResult.index < 40) {
+            if (healthResult.index < criticalThreshold) {
                 status = "critical";
                 statusColor = "red";
-            } else if (healthResult.index < 60) {
+            } else if (healthResult.index < degradedThreshold) {
+                status = "degraded";
+                statusColor = "red";
+            } else if (healthResult.index < warningThreshold) {
                 status = "warning";
                 statusColor = "yellow";
-            } else if (healthResult.index < 80) {
-                status = "degraded";
+            } else if (healthResult.index < healthyThreshold) {
+                status = "attention";
                 statusColor = "yellow";
+            }
+            
+            // Scale the output values
+            const scaledIndex = scaleOutput(healthResult.index);
+            const scaledSensorScores = {};
+            for (const [name, score] of Object.entries(healthResult.sensorScores)) {
+                scaledSensorScores[name] = scaleOutput(score);
             }
             
             // Prepare output
             const outputMsg = {
-                payload: healthResult.index,
-                healthIndex: healthResult.index,
+                payload: scaledIndex,
+                healthIndex: scaledIndex,
                 status: status,
-                sensorScores: healthResult.sensorScores,
-                worstSensor: healthResult.worstSensor,
+                scale: outputScale,
+                sensorScores: scaledSensorScores,
+                worstSensor: healthResult.worstSensor ? {
+                    name: healthResult.worstSensor.name,
+                    score: scaleOutput(healthResult.worstSensor.score)
+                } : null,
                 contributingFactors: healthResult.contributingFactors,
-                method: aggregationMethod
+                method: aggregationMethod,
+                thresholds: {
+                    healthy: scaleThreshold(healthyThreshold),
+                    warning: scaleThreshold(warningThreshold),
+                    degraded: scaleThreshold(degradedThreshold),
+                    critical: scaleThreshold(criticalThreshold)
+                }
             };
             
             // Set topic if configured
@@ -96,17 +137,20 @@ module.exports = function(RED) {
             });
             
             // Set status
+            const statusText = outputScale === "0-1" 
+                ? `Health: ${scaledIndex.toFixed(2)} (${status})`
+                : `Health: ${scaledIndex.toFixed(1)}% (${status})`;
             node.status({
                 fill: statusColor, 
                 shape: "dot", 
-                text: `Health: ${healthResult.index.toFixed(1)}% (${status})`
+                text: statusText
             });
             
             // Send to different outputs based on status
-            if (status === "critical" || status === "warning") {
-                node.send([null, outputMsg]); // Output 2: Degraded health
+            if (status === "critical" || status === "degraded" || status === "warning") {
+                node.send([null, outputMsg]); // Output 2: Degraded/Warning/Critical health
             } else {
-                node.send([outputMsg, null]); // Output 1: Healthy
+                node.send([outputMsg, null]); // Output 1: Healthy/Attention
             }
         });
         

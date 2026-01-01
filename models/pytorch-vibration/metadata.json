@@ -1,14 +1,28 @@
 {
-  "name": "vibration-bearing-analysis",
-  "version": "2.0.0",
-  "type": "onnx",
-  "description": "Bearing fault detection from vibration features (RMS, Peak, Crest, Kurtosis, etc.)",
+  "name": "pytorch-vibration",
   "inputShape": [
     1,
     8
   ],
-  "trainedOn": "Realistic synthetic industrial data",
-  "createdAt": "2026-01-01T00:29:17.744623",
-  "framework": "onnx",
-  "accuracy": 1.0
+  "accuracy": 1.0,
+  "normalExample": [
+    0.2,
+    0.25,
+    0.3,
+    0.28,
+    0.22,
+    0.35,
+    0.25,
+    0.3
+  ],
+  "anomalyExample": [
+    0.75,
+    0.82,
+    0.68,
+    0.78,
+    0.72,
+    0.8,
+    0.7,
+    0.85
+  ]
 }

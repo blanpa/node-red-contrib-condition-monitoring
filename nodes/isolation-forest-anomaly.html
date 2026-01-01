@@ -8,6 +8,11 @@
             windowSize: { value: 100, validate: RED.validators.number() },
             numEstimators: { value: 100, validate: RED.validators.number() },
             maxSamples: { value: 256, validate: RED.validators.number() },
+            // Online Learning settings
+            learningMode: { value: "batch" },
+            retrainInterval: { value: 50, validate: RED.validators.number() },
+            adaptRate: { value: 0.1, validate: RED.validators.number() },
+            persistModel: { value: false },
             outputTopic: { value: "" },
             debug: { value: false }
         },
@@ -20,12 +25,36 @@
         labelStyle: function() {
             return this.name ? "node_label_italic" : "";
         },
+        outputLabels: ["normal", "anomaly"],
+        paletteLabel: "Isolation Forest",
         oneditprepare: function() {
             $(".cm-section-header").on("click", function() {
                 var $content = $(this).next(".cm-section-content");
                 var $icon = $(this).find(".cm-collapse-icon");
                 $content.slideToggle(200);
                 $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
+            
+            // Check if ml-isolation-forest is available
+            $.ajax({
+                url: "isolation-forest-anomaly/status",
+                method: "GET",
+                success: function(data) {
+                    if (data.available) {
+                        $("#isolation-forest-status")
+                            .removeClass("cm-badge-warning")
+                            .addClass("cm-badge-success")
+                            .html('<i class="fa fa-check-circle"></i> ml-isolation-forest installed');
+                    } else {
+                        $("#isolation-forest-status")
+                            .removeClass("cm-badge-success")
+                            .addClass("cm-badge-warning")
+                            .html('<i class="fa fa-exclamation-triangle"></i> ml-isolation-forest not installed (using fallback)');
+                    }
+                },
+                error: function() {
+                    // Keep default warning state
+                }
             });
         }
     });
@@ -186,9 +215,40 @@
             </div>
             
             <div class="cm-info-box">
-                <strong>🤖 Machine Learning:</strong>
+                <strong>ML:</strong>
                 Isolation Forest detects anomalies by isolating how easily a data point can be separated from others.
                 Learns patterns automatically - no manual threshold tuning needed.
+            </div>
+            
+            <h4 style="margin-top: 16px;"><i class="fa fa-sync"></i> Online Learning</h4>
+            <div class="cm-config-grid">
+                <div class="cm-config-item">
+                    <label for="node-input-learningMode">
+                        <i class="fa fa-brain"></i> Learning Mode
+                    </label>
+                    <select id="node-input-learningMode">
+                        <option value="batch">Batch (retrain when buffer full)</option>
+                        <option value="incremental">Incremental (retrain periodically)</option>
+                        <option value="adaptive">Adaptive (auto-adjust threshold)</option>
+                    </select>
+                    <div class="cm-help-text">How the model adapts to new data</div>
+                </div>
+                
+                <div class="cm-config-item" id="retrain-interval-config">
+                    <label for="node-input-retrainInterval">
+                        <i class="fa fa-clock"></i> Retrain Interval
+                    </label>
+                    <input type="number" id="node-input-retrainInterval" min="10" value="50">
+                    <div class="cm-help-text">Retrain every N samples (incremental mode)</div>
+                </div>
+                
+                <div class="cm-config-item" id="adapt-rate-config">
+                    <label for="node-input-adaptRate">
+                        <i class="fa fa-sliders-h"></i> Adaptation Rate
+                    </label>
+                    <input type="number" id="node-input-adaptRate" min="0.01" max="1" step="0.01" value="0.1">
+                    <div class="cm-help-text">How fast threshold adapts (0.01-1.0)</div>
+                </div>
             </div>
             
             <h4 style="margin-top: 16px;"><i class="fa fa-cog"></i> Advanced Settings</h4>
@@ -213,8 +273,8 @@
     </div>
     
     <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
-        <span class="cm-badge cm-badge-warning">
-            <i class="fa fa-exclamation-triangle"></i> Requires ml-isolation-forest
+        <span id="isolation-forest-status" class="cm-badge cm-badge-warning">
+            <i class="fa fa-spinner fa-spin"></i> Checking ml-isolation-forest...
         </span>
         <span class="cm-badge cm-badge-success">
             <i class="fa fa-check-circle"></i> 2 outputs: Normal | Anomaly
@@ -247,8 +307,16 @@
         <dd>Whether the value is classified as an anomaly</dd>
         <dt>anomalyScore <span class="property-type">number</span></dt>
         <dd>Isolation score (higher = more anomalous, typically > 0.6 is anomaly)</dd>
+        <dt>threshold <span class="property-type">number</span></dt>
+        <dd>Current dynamic anomaly threshold</dd>
+        <dt>learningMode <span class="property-type">string</span></dt>
+        <dd>"batch", "incremental", or "adaptive"</dd>
+        <dt>sampleCount <span class="property-type">number</span></dt>
+        <dd>Total samples processed since node started</dd>
+        <dt>lastRetrain <span class="property-type">number</span></dt>
+        <dd>Sample count at last model retrain</dd>
         <dt>method <span class="property-type">string</span></dt>
-        <dd>"isolation-forest" or "zscore-fallback" if library unavailable</dd>
+        <dd>"isolation-forest" or "fallback-zscore" if library unavailable</dd>
         <dt>timestamp <span class="property-type">number</span></dt>
         <dd>Unix timestamp in milliseconds</dd>
     </dl>
@@ -261,13 +329,22 @@
         <li><b>Max Samples:</b> Samples per tree (default: 256, "auto" uses min(256, windowSize))</li>
     </ul>
     
+    <h3>Online Learning Modes</h3>
+    <ul>
+        <li><b>Batch:</b> (Default) Retrain only when buffer wraps around. Best for stable data patterns.</li>
+        <li><b>Incremental:</b> Retrain every N samples (configurable). Better for evolving patterns.</li>
+        <li><b>Adaptive:</b> Automatically adjust anomaly threshold based on detection patterns. Best for unknown data distributions.</li>
+    </ul>
+    <p><b>Retrain Interval:</b> For incremental mode, specifies how often to retrain (default: every 50 samples).</p>
+    <p><b>Adaptation Rate:</b> For adaptive mode, how quickly threshold adjusts (0.01-1.0, default: 0.1).</p>
+    
     <h3>How It Works</h3>
     <p>Isolation Forest isolates anomalies by randomly partitioning data. Anomalies are isolated quickly (few partitions), normal points require many partitions.</p>
     <ol>
         <li>Collects values until window size is reached</li>
         <li>Trains forest of random isolation trees</li>
         <li>Scores each new value based on average path length</li>
-        <li>Retrains periodically as new data arrives</li>
+        <li>Retrains based on learning mode (batch, incremental, or adaptive)</li>
     </ol>
     
     <h3>Use Cases</h3>

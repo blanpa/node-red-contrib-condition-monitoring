@@ -10,6 +10,7 @@
             preserveOriginal: { value: true },
             anomalyMethod: { value: "zscore" },
             threshold: { value: 3.0 },
+            warningThreshold: { value: 2.0 },
             windowSize: { value: 100 },
             minThreshold: { value: "" },
             maxThreshold: { value: "" },
@@ -17,6 +18,9 @@
             sensor2: { value: "sensor2" },
             correlationThreshold: { value: 0.7 },
             correlationMethod: { value: "pearson" },
+            // Aggregation settings
+            aggregateMethod: { value: "mean" },
+            aggregateOutput: { value: "single" },
             outputTopic: { value: "" },
             debug: { value: false }
         },
@@ -37,11 +41,24 @@
                 $("#config-" + mode).show();
             }
             
+            function showMahalanobisInfo() {
+                if ($("#node-input-anomalyMethod").val() === "mahalanobis") {
+                    $("#mahalanobis-info").show();
+                    $(".mahalanobis-only").show();
+                } else {
+                    $("#mahalanobis-info").hide();
+                    $(".mahalanobis-only").hide();
+                }
+            }
+            
             $("#node-input-mode").on("change", function() {
                 showModeConfig($(this).val());
             });
             
+            $("#node-input-anomalyMethod").on("change", showMahalanobisInfo);
+            
             showModeConfig(this.mode || "split");
+            showMahalanobisInfo();
             
             $(".cm-section-header").on("click", function() {
                 var $content = $(this).next(".cm-section-content");
@@ -84,6 +101,7 @@
                     <option value="split">Split (Extract individual values)</option>
                     <option value="analyze">Analyze (Anomaly detection per value)</option>
                     <option value="correlate">Correlate (Correlation between sensors)</option>
+                    <option value="aggregate">Aggregate (Reduce to single value)</option>
                 </select>
                 <div class="cm-help-text">Select the processing mode</div>
             </div>
@@ -120,15 +138,18 @@
                             <option value="zscore">Z-Score</option>
                             <option value="iqr">IQR</option>
                             <option value="threshold">Fixed Threshold</option>
+                            <option value="mahalanobis">Mahalanobis Distance</option>
                         </select>
+                        <div class="cm-help-text">Mahalanobis considers correlations between sensors</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Threshold</label>
-                        <input type="number" id="node-input-threshold" step="0.1">
+                        <label>Threshold (default: 3.0)</label>
+                        <input type="number" id="node-input-threshold" step="0.1" value="3.0">
+                        <div class="cm-help-text">Z-Score σ / Mahalanobis χ² multiplier</div>
                     </div>
                     <div class="cm-config-item">
-                        <label>Window Size</label>
-                        <input type="number" id="node-input-windowSize" min="2">
+                        <label>Window Size (default: 100)</label>
+                        <input type="number" id="node-input-windowSize" min="2" value="100">
                     </div>
                     <div class="cm-config-item">
                         <label>Min Threshold (for fixed)</label>
@@ -138,6 +159,16 @@
                         <label>Max Threshold (for fixed)</label>
                         <input type="number" id="node-input-maxThreshold" step="any">
                     </div>
+                    <div class="cm-config-item mahalanobis-only" style="display: none;">
+                        <label>Warning Threshold (default: 2.0)</label>
+                        <input type="number" id="node-input-warningThreshold" step="0.1" min="0.5" value="2.0">
+                        <div class="cm-help-text">Distance for warning severity</div>
+                    </div>
+                </div>
+                <div id="mahalanobis-info" style="margin-top: 12px; padding: 10px; background: #e8f5e9; border-radius: 4px; font-size: 11px; display: none;">
+                    <i class="fa fa-info-circle" style="color: #4caf50;"></i>
+                    <strong>Mahalanobis Distance:</strong> Detects multivariate anomalies by considering correlations between sensors. 
+                    Requires at least 10 samples for training. Outputs severity: normal, warning, or critical.
                 </div>
             </div>
             
@@ -154,17 +185,53 @@
                         <input type="text" id="node-input-sensor2" placeholder="sensor2">
                     </div>
                     <div class="cm-config-item">
-                        <label>Correlation Threshold</label>
-                        <input type="number" id="node-input-correlationThreshold" step="0.01" min="0" max="1">
-                        <div class="cm-help-text">Correlation below this = anomaly (default: 0.7)</div>
+                        <label>Correlation Threshold (default: 0.7)</label>
+                        <input type="number" id="node-input-correlationThreshold" step="0.01" min="0" max="1" value="0.7">
+                        <div class="cm-help-text">Correlation below this = anomaly</div>
                     </div>
                     <div class="cm-config-item">
                         <label>Method</label>
                         <select id="node-input-correlationMethod">
-                            <option value="pearson">Pearson</option>
-                            <option value="spearman">Spearman</option>
+                            <option value="pearson">Pearson (linear)</option>
+                            <option value="spearman">Spearman (rank-based)</option>
+                            <option value="cross">Cross-Correlation (time lag)</option>
                         </select>
                     </div>
+                </div>
+            </div>
+            
+            <!-- Aggregate Config -->
+            <div id="config-aggregate" class="mode-config">
+                <h4><i class="fa fa-compress"></i> Aggregation Settings</h4>
+                <p style="font-size: 11px; color: #666; margin-bottom: 12px;">
+                    Reduces multiple values to a single aggregated value.
+                </p>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Aggregation Method</label>
+                        <select id="node-input-aggregateMethod">
+                            <option value="mean">Mean (Average)</option>
+                            <option value="median">Median</option>
+                            <option value="min">Minimum</option>
+                            <option value="max">Maximum</option>
+                            <option value="sum">Sum</option>
+                            <option value="range">Range (Max - Min)</option>
+                            <option value="stddev">Standard Deviation</option>
+                        </select>
+                        <div class="cm-help-text">Primary value to output in msg.payload</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Output Detail</label>
+                        <select id="node-input-aggregateOutput">
+                            <option value="single">Single Value Only</option>
+                            <option value="all">All Statistics</option>
+                        </select>
+                        <div class="cm-help-text">Include all aggregation stats in output</div>
+                    </div>
+                </div>
+                <div style="margin-top: 12px; padding: 10px; background: #e8f5e9; border-radius: 4px; font-size: 11px;">
+                    <i class="fa fa-info-circle" style="color: #4caf50;"></i>
+                    <strong>Output:</strong> msg.aggregation contains method, value, count, and all statistics.
                 </div>
             </div>
         </div>
@@ -199,7 +266,7 @@
 </script>
 
 <script type="text/html" data-help-name="multi-value-processor">
-    <p>A unified node for processing multiple sensor values: splitting, parallel anomaly detection, or correlation analysis.</p>
+    <p>A unified node for processing multiple sensor values: splitting, anomaly detection, correlation analysis, or aggregation.</p>
     
     <h3>Processing Modes</h3>
     <dl>
@@ -209,13 +276,20 @@
         
         <dt><b>Analyze</b></dt>
         <dd>Performs independent anomaly detection on each value in the payload.
-        <br><b>Methods:</b> Z-Score, IQR, or Fixed Threshold
+        <br><b>Methods:</b> Z-Score, IQR, Fixed Threshold, or Mahalanobis Distance
+        <br><b>Mahalanobis:</b> Detects multivariate anomalies considering correlations between sensors
         <br><b>Use case:</b> Monitor multiple sensors simultaneously for anomalies.</dd>
         
         <dt><b>Correlate</b></dt>
         <dd>Calculates correlation coefficient between two specified sensor values.
-        <br><b>Methods:</b> Pearson (linear) or Spearman (rank-based)
+        <br><b>Methods:</b> Pearson (linear), Spearman (rank-based), or Cross-Correlation (time lag detection)
         <br><b>Use case:</b> Detect when sensors that should move together become uncorrelated.</dd>
+        
+        <dt><b>Aggregate</b></dt>
+        <dd>Reduces multiple values to a single statistic.
+        <br><b>Methods:</b> Mean, Median, Min, Max, Sum, Range, Standard Deviation
+        <br><b>Output:</b> Primary statistic in payload, all statistics in msg.aggregation
+        <br><b>Use case:</b> Calculate average of multiple sensors, find extreme values.</dd>
     </dl>
     
     <h3>Inputs</h3>
@@ -283,6 +357,16 @@
         
         <dt>msg.sensor1, msg.sensor2 <span class="property-type">string</span></dt>
         <dd>Names of the correlated sensors</dd>
+        
+        <dt>msg.method <span class="property-type">string</span></dt>
+        <dd>Correlation method used: pearson, spearman, or cross</dd>
+        
+        <dt>msg.crossCorrelation <span class="property-type">object</span></dt>
+        <dd>(Cross-Correlation only) Time lag analysis:
+        <br>• <code>bestLag</code>: Optimal lag (positive = sensor2 leads)
+        <br>• <code>maxCorrelation</code>: Correlation at best lag
+        <br>• <code>interpretation</code>: Human-readable lag description
+        <br><b>Use case:</b> Detect propagation delays between sensors (e.g., temperature wave through pipe)</dd>
         
         <dt>msg.stats <span class="property-type">object</span></dt>
         <dd>Statistics including sensor means and buffer size</dd>

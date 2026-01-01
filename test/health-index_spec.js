@@ -62,7 +62,12 @@ describe('health-index Node', function() {
     
     it('should detect anomalies and reduce health score', function(done) {
         const flow = [
-            { id: "n1", type: "health-index", name: "test", wires: [["n2"], ["n3"]] },
+            { 
+                id: "n1", 
+                type: "health-index", 
+                name: "test",
+                wires: [["n2"], ["n3"]] 
+            },
             { id: "n2", type: "helper" },
             { id: "n3", type: "helper" }
         ];
@@ -71,11 +76,15 @@ describe('health-index Node', function() {
             const n1 = helper.getNode("n1");
             const n3 = helper.getNode("n3");
             
+            // With anomaly + high zScore: 100 - 30 (anomaly) - 40 (zScore>3) = 30
+            // 30 < 40 (degraded threshold), so goes to anomaly output
             n3.on("input", function(msg) {
                 try {
-                    // Should be on anomaly output due to anomaly flag
+                    // Score should be reduced due to anomaly flag + high zScore
                     expect(msg.payload).toBeLessThan(100);
-                    expect(msg.contributingFactors.length).toBeGreaterThan(0);
+                    expect(msg.payload).toBe(30); // 100 - 30 - 40 = 30
+                    expect(msg.contributingFactors.length).toBe(2); // anomaly + high zScore
+                    expect(msg.status).toBe("degraded"); // 30 < 40 (degraded) but > 20 (critical)
                     done();
                 } catch(err) {
                     done(err);
