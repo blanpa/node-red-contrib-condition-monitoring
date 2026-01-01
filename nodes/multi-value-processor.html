@@ -1,0 +1,298 @@
+<script type="text/javascript">
+    RED.nodes.registerType('multi-value-processor', {
+        category: 'condition-monitoring',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            mode: { value: "split" },
+            field: { value: "payload" },
+            outputMode: { value: "sequential" },
+            preserveOriginal: { value: true },
+            anomalyMethod: { value: "zscore" },
+            threshold: { value: 3.0 },
+            windowSize: { value: 100 },
+            minThreshold: { value: "" },
+            maxThreshold: { value: "" },
+            sensor1: { value: "sensor1" },
+            sensor2: { value: "sensor2" },
+            correlationThreshold: { value: 0.7 },
+            correlationMethod: { value: "pearson" },
+            outputTopic: { value: "" },
+            debug: { value: false }
+        },
+        inputs: 1,
+        outputs: 2,
+        outputLabels: ["normal", "anomaly"],
+        icon: "icon.png",
+        label: function() {
+            return this.name || "Multi-Value Processor";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        paletteLabel: "Multi-Value",
+        oneditprepare: function() {
+            function showModeConfig(mode) {
+                $(".mode-config").hide();
+                $("#config-" + mode).show();
+            }
+            
+            $("#node-input-mode").on("change", function() {
+                showModeConfig($(this).val());
+            });
+            
+            showModeConfig(this.mode || "split");
+            
+            $(".cm-section-header").on("click", function() {
+                var $content = $(this).next(".cm-section-content");
+                var $icon = $(this).find(".cm-collapse-icon");
+                $content.slideToggle(200);
+                $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
+        }
+    });
+</script>
+
+<style>
+    .cm-section { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
+    .cm-section-header { background: linear-gradient(135deg, #9482f1 0%, #7d6bd3 100%); color: #fff; padding: 10px 14px; font-weight: 500; cursor: pointer; display: flex; align-items: center; justify-content: space-between; }
+    .cm-section-header:hover { background: linear-gradient(135deg, #a896f5 0%, #9482f1 100%); }
+    .cm-section-content { padding: 14px; }
+    .cm-config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .cm-config-item { display: flex; flex-direction: column; }
+    .cm-config-item label { font-size: 11px; color: #666; margin-bottom: 6px; font-weight: 500; }
+    .cm-config-item input, .cm-config-item select { padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+    .cm-help-text { font-size: 10px; color: #888; margin-top: 4px; }
+    .mode-config { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed #ddd; }
+</style>
+
+<script type="text/html" data-template-name="multi-value-processor">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cogs"></i> Processing Mode</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-mode"><i class="fa fa-random"></i> Mode</label>
+                <select id="node-input-mode">
+                    <option value="split">Split (Extract individual values)</option>
+                    <option value="analyze">Analyze (Anomaly detection per value)</option>
+                    <option value="correlate">Correlate (Correlation between sensors)</option>
+                </select>
+                <div class="cm-help-text">Select the processing mode</div>
+            </div>
+            
+            <!-- Split Config -->
+            <div id="config-split" class="mode-config">
+                <h4><i class="fa fa-code-branch"></i> Split Settings</h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Source Field</label>
+                        <input type="text" id="node-input-field" placeholder="payload">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Output Mode</label>
+                        <select id="node-input-outputMode">
+                            <option value="sequential">Sequential (one message per value)</option>
+                            <option value="parallel">Parallel (all values in one message)</option>
+                        </select>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Preserve Original</label>
+                        <input type="checkbox" id="node-input-preserveOriginal">
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Analyze Config -->
+            <div id="config-analyze" class="mode-config">
+                <h4><i class="fa fa-chart-bar"></i> Analyze Settings</h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Detection Method</label>
+                        <select id="node-input-anomalyMethod">
+                            <option value="zscore">Z-Score</option>
+                            <option value="iqr">IQR</option>
+                            <option value="threshold">Fixed Threshold</option>
+                        </select>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Threshold</label>
+                        <input type="number" id="node-input-threshold" step="0.1">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Window Size</label>
+                        <input type="number" id="node-input-windowSize" min="2">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Min Threshold (for fixed)</label>
+                        <input type="number" id="node-input-minThreshold" step="any">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Max Threshold (for fixed)</label>
+                        <input type="number" id="node-input-maxThreshold" step="any">
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Correlate Config -->
+            <div id="config-correlate" class="mode-config">
+                <h4><i class="fa fa-link"></i> Correlation Settings</h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Sensor 1 Field</label>
+                        <input type="text" id="node-input-sensor1" placeholder="sensor1">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Sensor 2 Field</label>
+                        <input type="text" id="node-input-sensor2" placeholder="sensor2">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Correlation Threshold</label>
+                        <input type="number" id="node-input-correlationThreshold" step="0.01" min="0" max="1">
+                        <div class="cm-help-text">Correlation below this = anomaly (default: 0.7)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Method</label>
+                        <select id="node-input-correlationMethod">
+                            <option value="pearson">Pearson</option>
+                            <option value="spearman">Spearman</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Advanced Settings -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cog"></i> Advanced Settings</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-grid">
+                <div class="cm-config-item">
+                    <label for="node-input-outputTopic">
+                        <i class="fa fa-tag"></i> Output Topic
+                    </label>
+                    <input type="text" id="node-input-outputTopic" placeholder="Leave empty to preserve original">
+                    <div class="cm-help-text">Set msg.topic on output (empty = keep original)</div>
+                </div>
+                
+                <div class="cm-config-item">
+                    <label for="node-input-debug">
+                        <i class="fa fa-bug"></i> Debug Mode
+                    </label>
+                    <input type="checkbox" id="node-input-debug" style="width: auto; margin-top: 8px;">
+                    <div class="cm-help-text">Log detailed info to Node-RED debug</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="multi-value-processor">
+    <p>A unified node for processing multiple sensor values: splitting, parallel anomaly detection, or correlation analysis.</p>
+    
+    <h3>Processing Modes</h3>
+    <dl>
+        <dt><b>Split</b></dt>
+        <dd>Extracts individual values from arrays or objects and sends them as separate messages (sequential) or combined (parallel).
+        <br><b>Use case:</b> Parse JSON payloads with multiple sensor readings.</dd>
+        
+        <dt><b>Analyze</b></dt>
+        <dd>Performs independent anomaly detection on each value in the payload.
+        <br><b>Methods:</b> Z-Score, IQR, or Fixed Threshold
+        <br><b>Use case:</b> Monitor multiple sensors simultaneously for anomalies.</dd>
+        
+        <dt><b>Correlate</b></dt>
+        <dd>Calculates correlation coefficient between two specified sensor values.
+        <br><b>Methods:</b> Pearson (linear) or Spearman (rank-based)
+        <br><b>Use case:</b> Detect when sensors that should move together become uncorrelated.</dd>
+    </dl>
+    
+    <h3>Inputs</h3>
+    <dl>
+        <dt>msg.payload <span class="property-type">array | object</span></dt>
+        <dd>Array of numeric values: <code>[23.5, 45.2, 12.8]</code>
+        <br>Or object with named sensors: <code>{"temp": 23.5, "pressure": 1013, "humidity": 65}</code></dd>
+        
+        <dt>msg.reset <span class="property-type">boolean</span></dt>
+        <dd>Set to <code>true</code> to clear all internal buffers</dd>
+    </dl>
+    
+    <h3>Outputs</h3>
+    <ol>
+        <li><b>Output 1 (Normal)</b> - Normal results or no anomalies detected</li>
+        <li><b>Output 2 (Anomaly)</b> - Anomalous values or low correlation detected</li>
+    </ol>
+    
+    <h3>Split Mode Output</h3>
+    <dl>
+        <dt>Sequential Mode</dt>
+        <dd>Sends one message per value with:
+        <br><code>msg.payload</code>: Individual value
+        <br><code>msg.valueName</code>: Name/index of the value
+        <br><code>msg.valueIndex</code>: Position in array
+        <br><code>msg.totalValues</code>: Total count</dd>
+        
+        <dt>Parallel Mode</dt>
+        <dd>Sends one message with all values:
+        <br><code>msg.payload</code>: Array of values
+        <br><code>msg.valueNames</code>: Array of names
+        <br><code>msg.valueCount</code>: Total count</dd>
+    </dl>
+    
+    <h3>Analyze Mode Output</h3>
+    <dl>
+        <dt>msg.payload <span class="property-type">array</span></dt>
+        <dd>Array of analysis results per sensor:
+        <pre>[{
+  "valueName": "temp",
+  "value": 85.5,
+  "isAnomaly": true,
+  "zScore": 3.2,
+  "mean": 72.1,
+  "stdDev": 4.2
+}, ...]</pre></dd>
+        
+        <dt>msg.hasAnomaly <span class="property-type">boolean</span></dt>
+        <dd>True if any sensor has an anomaly</dd>
+        
+        <dt>msg.anomalyCount <span class="property-type">number</span></dt>
+        <dd>Number of sensors with anomalies</dd>
+    </dl>
+    
+    <h3>Correlate Mode Output</h3>
+    <dl>
+        <dt>msg.correlation <span class="property-type">number</span></dt>
+        <dd>Correlation coefficient (-1 to +1)
+        <br>+1: Perfect positive correlation
+        <br>0: No correlation
+        <br>-1: Perfect negative correlation</dd>
+        
+        <dt>msg.isAnomalous <span class="property-type">boolean</span></dt>
+        <dd>True if |correlation| < threshold (default: 0.7)</dd>
+        
+        <dt>msg.sensor1, msg.sensor2 <span class="property-type">string</span></dt>
+        <dd>Names of the correlated sensors</dd>
+        
+        <dt>msg.stats <span class="property-type">object</span></dt>
+        <dd>Statistics including sensor means and buffer size</dd>
+    </dl>
+    
+    <h3>Use Cases</h3>
+    <ul>
+        <li><b>MQTT/OPC-UA Parsing:</b> Split mode to extract values from complex payloads</li>
+        <li><b>Multi-Sensor Monitoring:</b> Analyze mode to check all sensors at once</li>
+        <li><b>Bearing Failure Detection:</b> Correlate vibration sensors that should move together</li>
+        <li><b>Flow vs Pressure:</b> Correlate sensors to detect pump issues</li>
+    </ul>
+</script>

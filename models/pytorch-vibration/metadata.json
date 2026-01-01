@@ -1,0 +1,14 @@
+{
+  "name": "vibration-bearing-analysis",
+  "version": "2.0.0",
+  "type": "onnx",
+  "description": "Bearing fault detection from vibration features (RMS, Peak, Crest, Kurtosis, etc.)",
+  "inputShape": [
+    1,
+    8
+  ],
+  "trainedOn": "Realistic synthetic industrial data",
+  "createdAt": "2026-01-01T00:29:17.744623",
+  "framework": "onnx",
+  "accuracy": 1.0
+}

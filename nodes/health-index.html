@@ -1,16 +1,18 @@
 <script type="text/javascript">
     RED.nodes.registerType('health-index', {
-        category: 'predictive maintenance',
-        color: '#FDD835',
+        category: 'condition-monitoring',
+        color: '#9482f1',
         defaults: {
             name: { value: "" },
             sensorWeights: { value: '{"temp":1.0,"vibration":1.5,"pressure":1.0}' },
             aggregationMethod: { value: "weighted" },
-            outputScale: { value: "0-100" }
+            outputScale: { value: "0-100" },
+            outputTopic: { value: "" },
+            debug: { value: false }
         },
         inputs: 1,
         outputs: 2,
-        icon: "icon-predictive-maintanance.png",
+        icon: "icon.png",
         label: function() {
             return this.name || "Health Index";
         },
@@ -19,35 +21,283 @@
         },
         outputLabels: ["healthy", "degraded/critical"],
         oneditprepare: function() {
+            // Collapsible sections
+            $(".cm-section-header").on("click", function() {
+                var $content = $(this).next(".cm-section-content");
+                var $icon = $(this).find(".cm-collapse-icon");
+                $content.slideToggle(200);
+                $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
         },
         oneditsave: function() {
         }
     });
 </script>
 
+<style>
+    .cm-section {
+        background: #fafafa;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        overflow: hidden;
+    }
+    
+    .cm-section-header {
+        background: linear-gradient(135deg, #9482f1 0%, #7d6bd3 100%);
+        color: #fff;
+        padding: 10px 14px;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        user-select: none;
+    }
+    
+    .cm-section-header:hover {
+        background: linear-gradient(135deg, #a896f5 0%, #9482f1 100%);
+    }
+    
+    .cm-section-content {
+        padding: 14px;
+    }
+    
+    .cm-config-item {
+        display: flex;
+        flex-direction: column;
+        margin-bottom: 12px;
+    }
+    
+    .cm-config-item label {
+        font-size: 11px;
+        color: #666;
+        margin-bottom: 6px;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    
+    .cm-config-item input,
+    .cm-config-item select {
+        padding: 8px 12px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 13px;
+        transition: all 0.2s ease;
+    }
+    
+    .cm-config-item input:focus,
+    .cm-config-item select:focus {
+        border-color: #9482f1;
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(148, 130, 241, 0.1);
+    }
+    
+    .cm-help-text {
+        font-size: 11px;
+        color: #888;
+        margin-top: 4px;
+        font-style: italic;
+    }
+    
+    .cm-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-radius: 12px;
+        font-size: 10px;
+        font-weight: 500;
+    }
+    
+    .cm-badge-info {
+        background: #e3f2fd;
+        color: #1565c0;
+    }
+    
+    .cm-badge-success {
+        background: #e8f5e9;
+        color: #2e7d32;
+    }
+    
+    .cm-badge-warning {
+        background: #fff3e0;
+        color: #e65100;
+    }
+    
+    .cm-badge-danger {
+        background: #ffebee;
+        color: #c62828;
+    }
+    
+    .cm-info-box {
+        background: #f5f5f5;
+        border-left: 3px solid #9482f1;
+        padding: 10px 12px;
+        border-radius: 4px;
+        margin-top: 10px;
+        font-size: 12px;
+    }
+    
+    .cm-status-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+        margin-top: 10px;
+    }
+    
+    .cm-status-item {
+        padding: 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        text-align: center;
+    }
+    
+    .cm-status-healthy {
+        background: #e8f5e9;
+        color: #2e7d32;
+    }
+    
+    .cm-status-degraded {
+        background: #fff3e0;
+        color: #e65100;
+    }
+    
+    .cm-status-warning {
+        background: #fff9c4;
+        color: #f57f17;
+    }
+    
+    .cm-status-critical {
+        background: #ffebee;
+        color: #c62828;
+    }
+</style>
+
 <script type="text/html" data-template-name="health-index">
     <div class="form-row">
         <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
         <input type="text" id="node-input-name" placeholder="Name">
     </div>
-    <div class="form-row">
-        <label for="node-input-sensorWeights"><i class="fa fa-balance-scale"></i> Sensor Weights (JSON)</label>
-        <input type="text" id="node-input-sensorWeights" placeholder='{"temp":1.0,"vibration":1.5}'>
+    
+    <!-- Sensor Weights -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-balance-scale"></i> Sensor Weights</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-sensorWeights">
+                    <i class="fa fa-code"></i> Sensor Weights (JSON)
+                </label>
+                <input type="text" id="node-input-sensorWeights" placeholder='{"temp":1.0,"vibration":1.5,"pressure":1.0}' value='{"temp":1.0,"vibration":1.5,"pressure":1.0}'>
+                <div class="cm-help-text">Higher weights = more impact on overall health</div>
+            </div>
+            
+            <div class="cm-info-box">
+                <strong>💡 Example:</strong>
+                {"temp": 1.0, "vibration": 1.5, "pressure": 0.8}<br>
+                Vibration is 1.5× more important than temperature in health calculation.
+            </div>
+        </div>
     </div>
-    <div class="form-row">
-        <label for="node-input-aggregationMethod"><i class="fa fa-cog"></i> Aggregation Method</label>
+    
+    <!-- Aggregation Method -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cog"></i> Aggregation Method</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-aggregationMethod">
+                    <i class="fa fa-calculator"></i> Method
+                </label>
         <select id="node-input-aggregationMethod">
             <option value="weighted">Weighted Average</option>
             <option value="minimum">Minimum (Worst Case)</option>
             <option value="average">Simple Average</option>
             <option value="geometric">Geometric Mean</option>
         </select>
+                <div class="cm-help-text">
+                    Weighted: Uses sensor weights | Minimum: Conservative (worst sensor) | 
+                    Average: Equal importance | Geometric: Emphasizes poor sensors
+                </div>
+            </div>
+        </div>
     </div>
-    <div class="form-row">
-        <label for="node-input-outputScale"><i class="fa fa-arrows-h"></i> Output Scale</label>
+    
+    <!-- Output Scale -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-arrows-h"></i> Output Scale</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-outputScale">
+                    <i class="fa fa-sliders"></i> Scale
+                </label>
         <select id="node-input-outputScale">
             <option value="0-100">0-100 (Percentage)</option>
         </select>
+            </div>
+            
+            <div class="cm-status-grid">
+                <div class="cm-status-item cm-status-healthy">
+                    <strong>80-100</strong><br>Healthy
+                </div>
+                <div class="cm-status-item cm-status-degraded">
+                    <strong>60-80</strong><br>Degraded
+                </div>
+                <div class="cm-status-item cm-status-warning">
+                    <strong>40-60</strong><br>Warning
+                </div>
+                <div class="cm-status-item cm-status-critical">
+                    <strong>0-40</strong><br>Critical
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Advanced Settings -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cog"></i> Advanced Settings</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-grid">
+                <div class="cm-config-item">
+                    <label for="node-input-outputTopic">
+                        <i class="fa fa-tag"></i> Output Topic
+                    </label>
+                    <input type="text" id="node-input-outputTopic" placeholder="Leave empty to preserve original">
+                    <div class="cm-help-text">Set msg.topic on output (empty = keep original)</div>
+                </div>
+                
+                <div class="cm-config-item">
+                    <label for="node-input-debug">
+                        <i class="fa fa-bug"></i> Debug Mode
+                    </label>
+                    <input type="checkbox" id="node-input-debug" style="width: auto; margin-top: 8px;">
+                    <div class="cm-help-text">Log detailed info to Node-RED debug</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Quick Info -->
+    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
+        <span class="cm-badge cm-badge-info">
+            <i class="fa fa-heartbeat"></i> 0-100 health score
+        </span>
+        <span class="cm-badge cm-badge-success">
+            <i class="fa fa-check-circle"></i> 2 outputs: Healthy | Degraded
+        </span>
     </div>
 </script>
 
@@ -126,4 +376,3 @@
         <li>Predictive maintenance scheduling</li>
     </ul>
 </script>
-

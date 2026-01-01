@@ -1,0 +1,14 @@
+{
+  "name": "sensor-anomaly-10",
+  "version": "2.0.0",
+  "type": "onnx",
+  "description": "10-sensor industrial monitoring with cross-correlation detection",
+  "inputShape": [
+    1,
+    10
+  ],
+  "trainedOn": "Realistic synthetic industrial data",
+  "createdAt": "2026-01-01T00:28:54.507796",
+  "framework": "onnx",
+  "accuracy": 0.9986666440963745
+}

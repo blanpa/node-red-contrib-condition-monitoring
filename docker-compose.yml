@@ -13,6 +13,13 @@ services:
       # Dein Modul direkt in node_modules mounten
       - ./nodes:/data/node_modules/node-red-contrib-condition-monitoring/nodes
       - ./package.json:/data/node_modules/node-red-contrib-condition-monitoring/package.json
+      # ML Runtime Dependencies (TensorFlow.js, ONNX)
+      - ./node_modules/@tensorflow:/data/node_modules/@tensorflow
+      - ./node_modules/onnxruntime-node:/data/node_modules/onnxruntime-node
+      - ./node_modules/onnxruntime-common:/data/node_modules/onnxruntime-common
+      # Isolation Forest und Statistics
+      - ./node_modules/ml-isolation-forest:/data/node_modules/ml-isolation-forest
+      - ./node_modules/simple-statistics:/data/node_modules/simple-statistics
     environment:
       - NODE_OPTIONS=--max_old_space_size=4096
       - TZ=Europe/Berlin

@@ -1,8 +1,9 @@
-version: '3.8'
-
 services:
   node-red:
-    image: nodered/node-red:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: node-red-condition-monitoring:dev
     container_name: node-red-condition-monitoring-dev
     user: "1000:1000"
     ports:
@@ -10,8 +11,11 @@ services:
     volumes:
       # Node-RED Daten (Flows, Settings)
       - ./node-red-data:/data
-      # Gesamtes Projekt für Live-Entwicklung mounten
-      - .:/data/node_modules/node-red-contrib-condition-monitoring
+      # Modul-Nodes für Live-Entwicklung mounten (überschreibt das COPY im Dockerfile)
+      - ./nodes:/data/node_modules/node-red-contrib-condition-monitoring/nodes:ro
+      - ./package.json:/data/node_modules/node-red-contrib-condition-monitoring/package.json:ro
+      # ML Models Verzeichnis
+      - ./models:/data/models:ro
     environment:
       - NODE_OPTIONS=--max_old_space_size=4096
       - NODE_ENV=development

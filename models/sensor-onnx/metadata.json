@@ -1,0 +1,14 @@
+{
+  "name": "sensor-anomaly-5",
+  "version": "2.0.0",
+  "type": "onnx",
+  "description": "5-sensor industrial anomaly detection (temp, pressure, vibration, flow, current)",
+  "inputShape": [
+    1,
+    5
+  ],
+  "trainedOn": "Realistic synthetic industrial data",
+  "createdAt": "2026-01-01T00:28:04.684257",
+  "framework": "onnx",
+  "accuracy": 0.9919999837875366
+}

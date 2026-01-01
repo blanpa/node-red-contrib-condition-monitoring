@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-01-01 - Major Consolidation Release
+
+### 🚀 Breaking Changes
+
+**18 nodes consolidated into 7 powerful nodes:**
+
+| Old Nodes | New Node | Selection |
+|-----------|----------|-----------|
+| zscore-anomaly, iqr-anomaly, threshold-anomaly, percentile-anomaly, ema-anomaly, cusum-anomaly, moving-average-anomaly | **anomaly-detector** | `method` dropdown |
+| multi-value-splitter, multi-value-anomaly, correlation-anomaly | **multi-value-processor** | `mode` dropdown |
+| fft-analysis, vibration-features, peak-detection | **signal-analyzer** | `mode` dropdown |
+| trend-prediction, rate-of-change | **trend-predictor** | `method` dropdown |
+| isolation-forest-anomaly | **isolation-forest** | (unchanged) |
+| health-index | **health-index** | (unchanged) |
+| ml-inference | **ml-inference** | (unchanged) |
+
+### ✨ New Features
+
+#### ML Inference Node
+- **6 Model Formats Supported:**
+  - ONNX (.onnx) - PyTorch, TensorFlow exports
+  - Keras (.keras, .h5) - Native Keras models
+  - scikit-learn (.pkl, .joblib) - Classical ML
+  - TFLite (.tflite) - Edge/IoT devices
+  - TensorFlow SavedModel - Full TF format
+  - Google Coral Edge TPU - Hardware acceleration
+- **Model Registry Integration:**
+  - Hugging Face Hub
+  - MLflow Registry
+  - Custom Registry API
+  - URL-based loading with Bearer/Basic auth
+- **Python Bridge** for Keras, sklearn, TFLite inference
+
+#### All Nodes
+- **`outputTopic`** - Set custom msg.topic on output
+- **`debug` mode** - Detailed logging to Node-RED debug
+
+#### Isolation Forest
+- **`numEstimators`** - Number of isolation trees (default: 100)
+- **`maxSamples`** - Samples per tree (default: 256)
+
+#### Signal Analyzer (FFT)
+- **`windowFunction`** - Hann, Hamming, Blackman, Rectangular
+- **`overlapPercent`** - 0-90% overlap for continuous analysis
+
+### 📦 Pre-trained Models
+
+All models trained on realistic synthetic industrial data:
+
+| Model | Format | Accuracy | Description |
+|-------|--------|----------|-------------|
+| sensor-onnx | ONNX | 99.2% | 5-sensor anomaly detection |
+| onnx-anomaly | ONNX | 99.9% | 10-sensor correlation |
+| pytorch-vibration | ONNX | 100% | Bearing fault detection |
+| keras-anomaly | Keras | 98.8% | 5-sensor (.keras) |
+| sklearn-rf | sklearn | 99.4% | Random Forest |
+| sklearn-gb | sklearn | 99.5% | Gradient Boosting |
+| sensor-tflite | TFLite | 98.5% | Edge-optimized |
+
+### 🎨 UI Improvements
+
+- **Modern Design** - Collapsible sections, consistent styling
+- **Unified Category** - All nodes in "condition-monitoring"
+- **Single Icon** - Consistent icon.png across all nodes
+- **Z-Score Clarification** - Thresholds now clearly labeled as σ (standard deviations)
+
+### 🧪 Testing
+
+- **7 Test Suites** - One per consolidated node
+- **59 Tests** - All passing
+- **Jest Framework** with node-red-node-test-helper
+
+### 📝 Documentation
+
+- Updated README for 7-node architecture
+- Comprehensive models/README.md
+- Example flows in flows.json with 12 tabs
+
+### 🔧 Technical
+
+- Python bridge (python_bridge.py) for TFLite/Keras/sklearn
+- Custom Dockerfile with Python ML dependencies
+- Fixed duplicate ml-inference registration bug
+- Improved ONNX input shape parsing
+
+---
+
 ## [0.1.2] - 2024-12-17 - Quality & Testing Release
 
 ### ✨ New Features

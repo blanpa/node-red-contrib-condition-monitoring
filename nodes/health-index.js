@@ -14,6 +14,15 @@ module.exports = function(RED) {
         
         const aggregationMethod = config.aggregationMethod || "weighted";
         const outputScale = config.outputScale || "0-100";
+        const outputTopic = config.outputTopic || "";
+        const debug = config.debug === true;
+        
+        // Debug logging helper
+        const debugLog = function(message) {
+            if (debug) {
+                node.warn("[DEBUG] " + message);
+            }
+        };
         
         node.on('input', function(msg) {
             const payload = msg.payload;
@@ -42,6 +51,8 @@ module.exports = function(RED) {
             // Calculate health index
             const healthResult = calculateHealthIndex(sensorData, sensorWeights, aggregationMethod);
             
+            debugLog("Health Index: " + healthResult.index.toFixed(1) + "%, Worst: " + (healthResult.worstSensor ? healthResult.worstSensor.name : "N/A"));
+            
             // Determine health status
             let status = "healthy";
             let statusColor = "green";
@@ -68,10 +79,19 @@ module.exports = function(RED) {
                 method: aggregationMethod
             };
             
+            // Set topic if configured
+            if (outputTopic) {
+                outputMsg.topic = outputTopic;
+            }
+            
             // Copy original message properties
             Object.keys(msg).forEach(key => {
                 if (key !== 'payload' && !outputMsg.hasOwnProperty(key)) {
                     outputMsg[key] = msg[key];
+                }
+                // Preserve original topic if no output topic configured
+                if (key === 'topic' && !outputTopic) {
+                    outputMsg.topic = msg.topic;
                 }
             });
             

@@ -1,0 +1,1151 @@
+<script type="text/javascript">
+    RED.nodes.registerType('ml-inference', {
+        category: 'condition-monitoring',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            modelSource: { value: "local" },
+            modelPath: { value: "" },
+            modelType: { value: "auto" },
+            urlAuthType: { value: "" },
+            urlAuthToken: { value: "" },
+            hfModelId: { value: "" },
+            hfRevision: { value: "main" },
+            hfToken: { value: "" },
+            mlflowRegistryUri: { value: "" },
+            mlflowModelName: { value: "" },
+            mlflowVersion: { value: "latest" },
+            mlflowStage: { value: "production" },
+            mlflowAuthToken: { value: "" },
+            customRegistryUrl: { value: "" },
+            customModelId: { value: "" },
+            customApiKey: { value: "" },
+            autoUpdate: { value: false },
+            updateCheckInterval: { value: 3600 },
+            modelStage: { value: "production" },
+            inputShape: { value: "" },
+            inputProperty: { value: "payload" },
+            outputProperty: { value: "prediction" },
+            preprocessMode: { value: "array" },
+            batchSize: { value: 1 },
+            warmup: { value: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "icon.png",
+        label: function() {
+            return this.name || "ML Inference";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        paletteLabel: "ML Inference",
+        oneditprepare: function() {
+            var node = this;
+            
+            // Check available runtimes
+            $.getJSON("ml-inference/runtimes", function(data) {
+                var tfjsStatus = data.tfjs 
+                    ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-check-circle"></i> TensorFlow.js</span>'
+                    : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-times-circle"></i> TensorFlow.js</span>';
+                var onnxStatus = data.onnx
+                    ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-check-circle"></i> ONNX Runtime</span>'
+                    : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-times-circle"></i> ONNX Runtime</span>';
+                
+                // Check Coral status
+                $.getJSON("ml-inference/coral-status", function(coralData) {
+                    var coralStatus = coralData.available
+                        ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-microchip"></i> Coral Edge TPU</span>'
+                        : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral Edge TPU</span>';
+                    $("#runtime-status").html(tfjsStatus + onnxStatus + coralStatus);
+                }).fail(function() {
+                    var coralStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral Edge TPU</span>';
+                    $("#runtime-status").html(tfjsStatus + onnxStatus + coralStatus);
+                });
+            }).fail(function() {
+                $("#runtime-status").html('<span class="ml-runtime-badge" style="background: #fff3e0; color: #e65100;"><i class="fa fa-exclamation-triangle"></i> Could not check runtimes</span>');
+            });
+            
+            // Load existing models
+            function loadModelList() {
+                $.getJSON("ml-inference/models", function(data) {
+                    var listHtml = '';
+                    if (data.models && data.models.length > 0) {
+                        listHtml = '<div class="ml-model-list">';
+                        data.models.forEach(function(model, index) {
+                            var sizeStr = (model.size / 1024).toFixed(1) + ' KB';
+                            if (model.size > 1024 * 1024) {
+                                sizeStr = (model.size / 1024 / 1024).toFixed(1) + ' MB';
+                            }
+                            var typeIcon = model.type === 'onnx' ? 'cube' : 'sitemap';
+                            var typeColor = model.type === 'onnx' ? '#FF6F00' : '#1976D2';
+                            var isSelected = $("#node-input-modelPath").val() === model.path;
+                            
+                            listHtml += '<div class="ml-model-item' + (isSelected ? ' ml-model-selected' : '') + '" data-path="' + model.path + '" data-name="' + model.name + '">';
+                            listHtml += '<div class="ml-model-icon" style="background: ' + typeColor + ';">';
+                            listHtml += '<i class="fa fa-' + typeIcon + '"></i>';
+                            listHtml += '</div>';
+                            listHtml += '<div class="ml-model-info">';
+                            listHtml += '<div class="ml-model-name">' + model.name + '</div>';
+                            listHtml += '<div class="ml-model-meta">';
+                            listHtml += '<span class="ml-model-type">' + model.type.toUpperCase() + '</span>';
+                            listHtml += '<span class="ml-model-size">' + sizeStr + '</span>';
+                            listHtml += '</div>';
+                            listHtml += '</div>';
+                            listHtml += '<button class="ml-model-delete" data-name="' + model.name + '" title="Delete model">';
+                            listHtml += '<i class="fa fa-trash-o"></i>';
+                            listHtml += '</button>';
+                            listHtml += '</div>';
+                        });
+                        listHtml += '</div>';
+                    } else {
+                        listHtml = '<div class="ml-empty-state">';
+                        listHtml += '<i class="fa fa-cloud-upload"></i>';
+                        listHtml += '<p>No models uploaded yet</p>';
+                        listHtml += '<small>Upload an ONNX or TensorFlow.js model above</small>';
+                        listHtml += '</div>';
+                    }
+                    $("#model-list-container").html(listHtml);
+                    
+                    // Click to select model
+                    $(".ml-model-item").on("click", function(e) {
+                        if ($(e.target).closest('.ml-model-delete').length) return;
+                        var modelPath = $(this).data("path");
+                        $("#node-input-modelPath").val(modelPath);
+                        $(".ml-model-item").removeClass("ml-model-selected");
+                        $(this).addClass("ml-model-selected");
+                    });
+                    
+                    // Delete model
+                    $(".ml-model-delete").on("click", function(e) {
+                        e.stopPropagation();
+                        var modelName = $(this).data("name");
+                        var $item = $(this).closest('.ml-model-item');
+                        
+                        if (confirm("Delete model '" + modelName + "'?")) {
+                            $item.css('opacity', '0.5');
+                            $.ajax({
+                                url: "ml-inference/models/" + encodeURIComponent(modelName),
+                                type: "DELETE",
+                                success: function() {
+                                    $item.slideUp(200, function() {
+                                        loadModelList();
+                                    });
+                                },
+                                error: function(xhr) {
+                                    $item.css('opacity', '1');
+                                    alert("Error deleting model: " + (xhr.responseJSON?.error || "Unknown error"));
+                                }
+                            });
+                        }
+                    });
+                }).fail(function() {
+                    $("#model-list-container").html('<div class="ml-error-state"><i class="fa fa-exclamation-triangle"></i> Could not load models</div>');
+                });
+            }
+            
+            loadModelList();
+            
+            // Drag and drop zone
+            var $dropZone = $("#ml-drop-zone");
+            
+            $dropZone.on("dragover", function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                $(this).addClass("ml-drop-active");
+            });
+            
+            $dropZone.on("dragleave", function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                $(this).removeClass("ml-drop-active");
+            });
+            
+            $dropZone.on("drop", function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                $(this).removeClass("ml-drop-active");
+                
+                var files = e.originalEvent.dataTransfer.files;
+                if (files.length > 0) {
+                    handleFileUpload(files);
+                }
+            });
+            
+            // File input handlers
+            $("#model-file-onnx").on("change", function(e) {
+                if (e.target.files.length > 0) {
+                    handleFileUpload(e.target.files);
+                }
+            });
+            
+            $("#model-file-tfjs").on("change", function(e) {
+                if (e.target.files.length > 0) {
+                    handleFileUpload(e.target.files);
+                }
+            });
+            
+            function handleFileUpload(files) {
+                var fileList = Array.from(files);
+                var hasOnnx = fileList.some(f => f.name.endsWith('.onnx'));
+                var hasJson = fileList.some(f => f.name === 'model.json');
+                
+                if (hasOnnx) {
+                    uploadOnnxFile(fileList.find(f => f.name.endsWith('.onnx')));
+                } else if (hasJson) {
+                    uploadTfjsFiles(fileList);
+                } else {
+                    showUploadStatus('error', 'Please upload .onnx or model.json + .bin files');
+                }
+            }
+            
+            function showUploadStatus(type, message) {
+                var icon = type === 'loading' ? 'fa-spinner fa-spin' : (type === 'success' ? 'fa-check-circle' : 'fa-times-circle');
+                var className = 'ml-upload-' + type;
+                $("#upload-status").html('<div class="' + className + '"><i class="fa ' + icon + '"></i> ' + message + '</div>');
+                
+                if (type !== 'loading') {
+                    setTimeout(function() { 
+                        $("#upload-status").html(''); 
+                    }, 4000);
+                }
+            }
+            
+            function uploadOnnxFile(file) {
+                showUploadStatus('loading', 'Uploading ' + file.name + '...');
+                
+                var reader = new FileReader();
+                reader.onload = function(event) {
+                    $.ajax({
+                        url: "ml-inference/upload",
+                        type: "POST",
+                        data: event.target.result,
+                        processData: false,
+                        contentType: "application/octet-stream",
+                        headers: { "X-Filename": file.name },
+                        success: function(data) {
+                            showUploadStatus('success', 'Uploaded: ' + data.name);
+                            $("#node-input-modelPath").val(data.path);
+                            loadModelList();
+                        },
+                        error: function(xhr) {
+                            showUploadStatus('error', xhr.responseJSON?.error || "Upload failed");
+                        }
+                    });
+                };
+                reader.readAsArrayBuffer(file);
+            }
+            
+            function uploadTfjsFiles(files) {
+                showUploadStatus('loading', 'Processing ' + files.length + ' files...');
+                
+                var modelJson = null;
+                var weights = [];
+                var modelName = "tfjs_model";
+                var processed = 0;
+                
+                files.forEach(function(file) {
+                    var reader = new FileReader();
+                    
+                    if (file.name === 'model.json') {
+                        reader.onload = function(event) {
+                            modelJson = event.target.result;
+                            processed++;
+                            checkComplete();
+                        };
+                        reader.readAsText(file);
+                    } else if (file.name.endsWith('.bin')) {
+                        reader.onload = function(event) {
+                            var bytes = new Uint8Array(event.target.result);
+                            var binary = '';
+                            for (var i = 0; i < bytes.length; i++) {
+                                binary += String.fromCharCode(bytes[i]);
+                            }
+                            weights.push({ name: file.name, data: btoa(binary) });
+                            processed++;
+                            checkComplete();
+                        };
+                        reader.readAsArrayBuffer(file);
+                    } else {
+                        processed++;
+                        checkComplete();
+                    }
+                });
+                
+                function checkComplete() {
+                    if (processed < files.length) return;
+                    
+                    if (!modelJson) {
+                        showUploadStatus('error', 'No model.json found');
+                        return;
+                    }
+                    
+                    $.ajax({
+                        url: "ml-inference/upload-tfjs",
+                        type: "POST",
+                        data: JSON.stringify({
+                            name: modelName + '_' + Date.now(),
+                            modelJson: modelJson,
+                            weights: weights
+                        }),
+                        contentType: "application/json",
+                        success: function(data) {
+                            showUploadStatus('success', 'Uploaded: ' + data.name);
+                            $("#node-input-modelPath").val(data.path);
+                            loadModelList();
+                        },
+                        error: function(xhr) {
+                            showUploadStatus('error', xhr.responseJSON?.error || "Upload failed");
+                        }
+                    });
+                }
+            }
+            
+            // Collapsible sections
+            $(".ml-section-header").on("click", function() {
+                var $content = $(this).next(".ml-section-content");
+                var $icon = $(this).find(".ml-collapse-icon");
+                $content.slideToggle(200);
+                $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
+            
+            // Model source change handler
+            $("#node-input-modelSource").on("change", function() {
+                var source = $(this).val();
+                // Hide all sections
+                $("#url-auth-section, #huggingface-section, #mlflow-section, #custom-section").slideUp(200);
+                // Show relevant section
+                if (source === "url") {
+                    $("#url-auth-section").slideDown(200);
+                } else if (source === "huggingface") {
+                    $("#huggingface-section").slideDown(200);
+                } else if (source === "mlflow") {
+                    $("#mlflow-section").slideDown(200);
+                } else if (source === "custom") {
+                    $("#custom-section").slideDown(200);
+                }
+            });
+            $("#node-input-modelSource").trigger("change");
+            
+            // Model type change handler
+            $("#node-input-modelType").on("change", function() {
+                var type = $(this).val();
+                var helpText = "Format: batch,features (e.g., 1,10 for 10 features)";
+                if (type === "tfjs") {
+                    helpText = "Format: batch,features (e.g., 1,10 or -1,100 for dynamic batch)";
+                } else if (type === "onnx") {
+                    helpText = "Format: batch,features (e.g., 1,10)";
+                } else if (type === "coral") {
+                    helpText = "Format: batch,features (e.g., 1,10). Model must be quantized TFLite (.tflite)";
+                }
+                $("#shape-help").text(helpText);
+            });
+        },
+        oneditsave: function() {
+        }
+    });
+</script>
+
+<style>
+    /* ML Inference Node Styles */
+    .ml-section {
+        background: #fafafa;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        overflow: hidden;
+    }
+    
+    .ml-section-header {
+        background: linear-gradient(135deg, #9482f1 0%, #7d6bd3 100%);
+        color: #fff;
+        padding: 10px 14px;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        user-select: none;
+    }
+    
+    .ml-section-header:hover {
+        background: linear-gradient(135deg, #a896f5 0%, #9482f1 100%);
+    }
+    
+    .ml-section-header i:first-child {
+        margin-right: 8px;
+    }
+    
+    .ml-section-content {
+        padding: 14px;
+    }
+    
+    .ml-drop-zone {
+        border: 2px dashed #bdbdbd;
+        border-radius: 8px;
+        padding: 24px;
+        text-align: center;
+        background: #fff;
+        transition: all 0.2s ease;
+        cursor: pointer;
+    }
+    
+    .ml-drop-zone:hover {
+        border-color: #9482f1;
+        background: #f3f1ff;
+    }
+    
+    .ml-drop-active {
+        border-color: #9482f1 !important;
+        background: #e8e4ff !important;
+        transform: scale(1.01);
+    }
+    
+    .ml-drop-icon {
+        font-size: 36px;
+        color: #9e9e9e;
+        margin-bottom: 10px;
+    }
+    
+    .ml-drop-zone:hover .ml-drop-icon {
+        color: #9482f1;
+    }
+    
+    .ml-drop-text {
+        color: #616161;
+        margin-bottom: 12px;
+    }
+    
+    .ml-upload-buttons {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        flex-wrap: wrap;
+    }
+    
+    .ml-upload-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        border: none;
+    }
+    
+    .ml-upload-btn-onnx {
+        background: linear-gradient(135deg, #FF8A65 0%, #FF6F00 100%);
+        color: white;
+    }
+    
+    .ml-upload-btn-onnx:hover {
+        background: linear-gradient(135deg, #FFAB91 0%, #FF8A65 100%);
+        transform: translateY(-1px);
+    }
+    
+    .ml-upload-btn-tfjs {
+        background: linear-gradient(135deg, #64B5F6 0%, #1976D2 100%);
+        color: white;
+    }
+    
+    .ml-upload-btn-tfjs:hover {
+        background: linear-gradient(135deg, #90CAF9 0%, #64B5F6 100%);
+        transform: translateY(-1px);
+    }
+    
+    .ml-upload-loading, .ml-upload-success, .ml-upload-error {
+        padding: 8px 12px;
+        border-radius: 4px;
+        margin-top: 10px;
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    
+    .ml-upload-loading {
+        background: #e3f2fd;
+        color: #1565c0;
+    }
+    
+    .ml-upload-success {
+        background: #e8f5e9;
+        color: #2e7d32;
+    }
+    
+    .ml-upload-error {
+        background: #ffebee;
+        color: #c62828;
+    }
+    
+    .ml-model-list {
+        max-height: 200px;
+        overflow-y: auto;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        background: #fff;
+    }
+    
+    .ml-model-item {
+        display: flex;
+        align-items: center;
+        padding: 10px 12px;
+        border-bottom: 1px solid #f0f0f0;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+    
+    .ml-model-item:last-child {
+        border-bottom: none;
+    }
+    
+    .ml-model-item:hover {
+        background: #f5f5f5;
+    }
+    
+    .ml-model-selected {
+        background: #e8f5e9 !important;
+        border-left: 3px solid #4caf50;
+    }
+    
+    .ml-model-icon {
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: 16px;
+        margin-right: 12px;
+        flex-shrink: 0;
+    }
+    
+    .ml-model-info {
+        flex: 1;
+        min-width: 0;
+    }
+    
+    .ml-model-name {
+        font-weight: 500;
+        color: #212121;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 13px;
+    }
+    
+    .ml-model-meta {
+        display: flex;
+        gap: 8px;
+        margin-top: 3px;
+    }
+    
+    .ml-model-type {
+        font-size: 10px;
+        font-weight: 600;
+        padding: 2px 6px;
+        border-radius: 3px;
+        background: #e0e0e0;
+        color: #616161;
+    }
+    
+    .ml-model-size {
+        font-size: 11px;
+        color: #9e9e9e;
+    }
+    
+    .ml-model-delete {
+        width: 28px;
+        height: 28px;
+        border: none;
+        background: transparent;
+        color: #9e9e9e;
+        cursor: pointer;
+        border-radius: 4px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.15s ease;
+        flex-shrink: 0;
+    }
+    
+    .ml-model-delete:hover {
+        background: #ffebee;
+        color: #e53935;
+    }
+    
+    .ml-empty-state {
+        padding: 30px;
+        text-align: center;
+        color: #9e9e9e;
+    }
+    
+    .ml-empty-state i {
+        font-size: 40px;
+        margin-bottom: 10px;
+        opacity: 0.5;
+    }
+    
+    .ml-empty-state p {
+        margin: 0 0 5px 0;
+        font-weight: 500;
+    }
+    
+    .ml-empty-state small {
+        font-size: 12px;
+    }
+    
+    .ml-error-state {
+        padding: 20px;
+        text-align: center;
+        color: #e53935;
+        background: #ffebee;
+        border-radius: 4px;
+    }
+    
+    .ml-runtime-badges {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+    }
+    
+    .ml-runtime-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 5px 10px;
+        border-radius: 12px;
+        font-size: 11px;
+        font-weight: 500;
+    }
+    
+    .ml-runtime-installed {
+        background: #e8f5e9;
+        color: #2e7d32;
+    }
+    
+    .ml-runtime-missing {
+        background: #ffebee;
+        color: #c62828;
+    }
+    
+    .ml-config-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+    }
+    
+    .ml-config-item {
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .ml-config-item label {
+        font-size: 11px;
+        color: #666;
+        margin-bottom: 4px;
+        font-weight: 500;
+    }
+    
+    .ml-config-item input,
+    .ml-config-item select {
+        padding: 6px 10px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 13px;
+    }
+    
+    .ml-config-item input:focus,
+    .ml-config-item select:focus {
+        border-color: #9482f1;
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(148, 130, 241, 0.1);
+    }
+    
+    .ml-config-full {
+        grid-column: 1 / -1;
+    }
+    
+    .ml-help-text {
+        font-size: 11px;
+        color: #888;
+        margin-top: 4px;
+    }
+    
+    .ml-checkbox-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 0;
+    }
+    
+    .ml-checkbox-row input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        accent-color: #9482f1;
+    }
+    
+    .ml-checkbox-row label {
+        font-size: 13px;
+        color: #424242;
+        cursor: pointer;
+    }
+</style>
+
+<script type="text/html" data-template-name="ml-inference">
+    <!-- Name Field -->
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    
+    <!-- Disclaimer -->
+    <div style="background: #fff3e0; border: 2px solid #ff9800; border-radius: 6px; padding: 12px; margin-bottom: 12px;">
+        <div style="display: flex; align-items: start; gap: 10px;">
+            <i class="fa fa-exclamation-triangle" style="color: #e65100; font-size: 20px; margin-top: 2px;"></i>
+            <div>
+                <strong style="color: #e65100; display: block; margin-bottom: 4px;">⚠️ Docker Container Required</strong>
+                <div style="font-size: 12px; color: #666; line-height: 1.5;">
+                    This node requires TensorFlow.js and ONNX Runtime with native bindings. 
+                    These dependencies only work properly in a <strong>custom Docker container</strong> with Debian-based Node-RED image.
+                    Standard Node-RED installations may not work due to missing native libraries.
+                    <br><br>
+                    <strong>For Docker:</strong> Use the provided <code>Dockerfile</code> or <code>docker-compose.dev.yml</code> which includes the required dependencies.
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Model Upload Section -->
+    <div class="ml-section">
+        <div class="ml-section-header">
+            <span><i class="fa fa-cloud-upload"></i> Upload Model</span>
+            <i class="fa fa-chevron-down ml-collapse-icon"></i>
+        </div>
+        <div class="ml-section-content">
+            <div id="ml-drop-zone" class="ml-drop-zone">
+                <div class="ml-drop-icon"><i class="fa fa-cloud-upload"></i></div>
+                <div class="ml-drop-text">Drag & drop model files here</div>
+                <div class="ml-upload-buttons">
+                    <label for="model-file-onnx" class="ml-upload-btn ml-upload-btn-onnx">
+                        <i class="fa fa-cube"></i> ONNX Model
+                    </label>
+                    <input type="file" id="model-file-onnx" accept=".onnx" style="display: none;">
+                    
+                    <label for="model-file-tfjs" class="ml-upload-btn ml-upload-btn-tfjs">
+                        <i class="fa fa-sitemap"></i> TensorFlow.js
+                    </label>
+                    <input type="file" id="model-file-tfjs" accept=".json,.bin" multiple style="display: none;">
+                </div>
+            </div>
+            <div id="upload-status"></div>
+        </div>
+    </div>
+    
+    <!-- Model Library Section -->
+    <div class="ml-section">
+        <div class="ml-section-header">
+            <span><i class="fa fa-folder-open"></i> Model Library</span>
+            <i class="fa fa-chevron-down ml-collapse-icon"></i>
+        </div>
+        <div class="ml-section-content">
+            <div id="model-list-container">
+                <div class="ml-empty-state">
+                    <i class="fa fa-spinner fa-spin"></i>
+                    <p>Loading models...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Model Source Configuration -->
+    <div class="ml-section">
+        <div class="ml-section-header">
+            <span><i class="fa fa-database"></i> Model Source</span>
+            <i class="fa fa-chevron-down ml-collapse-icon"></i>
+        </div>
+        <div class="ml-section-content">
+            <div class="ml-config-item">
+                <label for="node-input-modelSource">
+                    <i class="fa fa-cloud"></i> Source Type
+                </label>
+                <select id="node-input-modelSource">
+                    <option value="local">Local File</option>
+                    <option value="url">URL (with Authentication)</option>
+                    <option value="huggingface">Hugging Face Hub</option>
+                    <option value="mlflow">MLflow Registry</option>
+                    <option value="custom">Custom Registry</option>
+                </select>
+                <div class="ml-help-text">Select where to load the model from</div>
+            </div>
+            
+            <!-- URL Authentication Section -->
+            <div id="url-auth-section" style="display: none; margin-top: 12px;">
+                <div class="ml-config-grid">
+                    <div class="ml-config-item">
+                        <label for="node-input-urlAuthType">
+                            <i class="fa fa-key"></i> Auth Type
+                        </label>
+                        <select id="node-input-urlAuthType">
+                            <option value="">None</option>
+                            <option value="bearer">Bearer Token</option>
+                            <option value="basic">Basic Auth</option>
+                        </select>
+                    </div>
+                    
+                    <div class="ml-config-item">
+                        <label for="node-input-urlAuthToken">
+                            <i class="fa fa-lock"></i> Auth Token/Credentials
+                        </label>
+                        <input type="password" id="node-input-urlAuthToken" placeholder="Token or user:pass">
+                        <div class="ml-help-text">Bearer: token | Basic: user:password</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Hugging Face Hub Section -->
+            <div id="huggingface-section" style="display: none; margin-top: 12px;">
+                <div class="ml-config-grid">
+                    <div class="ml-config-item">
+                        <label for="node-input-hfModelId">
+                            <i class="fa fa-github"></i> Model ID
+                        </label>
+                        <input type="text" id="node-input-hfModelId" placeholder="e.g., microsoft/DialoGPT-medium">
+                        <div class="ml-help-text">Hugging Face model identifier</div>
+                    </div>
+                    
+                    <div class="ml-config-item">
+                        <label for="node-input-hfRevision">
+                            <i class="fa fa-code-branch"></i> Revision
+                        </label>
+                        <input type="text" id="node-input-hfRevision" placeholder="main">
+                        <div class="ml-help-text">Branch, tag, or commit hash (default: main)</div>
+                    </div>
+                    
+                    <div class="ml-config-item">
+                        <label for="node-input-hfToken">
+                            <i class="fa fa-key"></i> HF Token (optional)
+                        </label>
+                        <input type="password" id="node-input-hfToken" placeholder="hf_...">
+                        <div class="ml-help-text">Optional Hugging Face API token</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- MLflow Registry Section -->
+            <div id="mlflow-section" style="display: none; margin-top: 12px;">
+                <div class="ml-config-grid">
+                    <div class="ml-config-item">
+                        <label for="node-input-mlflowRegistryUri">
+                            <i class="fa fa-server"></i> Registry URI
+                        </label>
+                        <input type="text" id="node-input-mlflowRegistryUri" placeholder="http://mlflow-server:5000">
+                        <div class="ml-help-text">MLflow tracking server URL</div>
+                    </div>
+                    
+                    <div class="ml-config-item">
+                        <label for="node-input-mlflowModelName">
+                            <i class="fa fa-cube"></i> Model Name
+                        </label>
+                        <input type="text" id="node-input-mlflowModelName" placeholder="anomaly-detector">
+                        <div class="ml-help-text">Registered model name in MLflow</div>
+                    </div>
+                    
+                    <div class="ml-config-item">
+                        <label for="node-input-mlflowVersion">
+                            <i class="fa fa-tag"></i> Version
+                        </label>
+                        <input type="text" id="node-input-mlflowVersion" placeholder="latest">
+                        <div class="ml-help-text">Version number or 'latest'</div>
+                    </div>
+                    
+                    <div class="ml-config-item">
+                        <label for="node-input-mlflowStage">
+                            <i class="fa fa-layer-group"></i> Stage
+                        </label>
+                        <select id="node-input-mlflowStage">
+                            <option value="production">Production</option>
+                            <option value="staging">Staging</option>
+                            <option value="archived">Archived</option>
+                        </select>
+                        <div class="ml-help-text">Model stage in registry</div>
+                    </div>
+                    
+                    <div class="ml-config-item">
+                        <label for="node-input-mlflowAuthToken">
+                            <i class="fa fa-key"></i> Auth Token (optional)
+                        </label>
+                        <input type="password" id="node-input-mlflowAuthToken" placeholder="Token">
+                        <div class="ml-help-text">Optional MLflow authentication token</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Custom Registry Section -->
+            <div id="custom-section" style="display: none; margin-top: 12px;">
+                <div class="ml-config-grid">
+                    <div class="ml-config-item">
+                        <label for="node-input-customRegistryUrl">
+                            <i class="fa fa-cloud"></i> Registry URL
+                        </label>
+                        <input type="text" id="node-input-customRegistryUrl" placeholder="https://api.company.com/models">
+                        <div class="ml-help-text">Base URL of custom model registry</div>
+                    </div>
+                    
+                    <div class="ml-config-item">
+                        <label for="node-input-customModelId">
+                            <i class="fa fa-cube"></i> Model ID
+                        </label>
+                        <input type="text" id="node-input-customModelId" placeholder="sensor-anomaly-v2">
+                        <div class="ml-help-text">Model identifier in registry</div>
+                    </div>
+                    
+                    <div class="ml-config-item">
+                        <label for="node-input-customApiKey">
+                            <i class="fa fa-key"></i> API Key (optional)
+                        </label>
+                        <input type="password" id="node-input-customApiKey" placeholder="API Key">
+                        <div class="ml-help-text">Optional API key for authentication</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Auto-Update & Lifecycle Section -->
+            <div class="ml-section" style="margin-top: 12px;">
+                <div class="ml-section-header">
+                    <span><i class="fa fa-sync"></i> Auto-Update & Lifecycle</span>
+                    <i class="fa fa-chevron-down ml-collapse-icon"></i>
+                </div>
+                <div class="ml-section-content">
+                    <div class="ml-config-grid">
+                        <div class="ml-config-item">
+                            <label for="node-input-autoUpdate">
+                                <i class="fa fa-sync-alt"></i> Auto-Update
+                            </label>
+                            <input type="checkbox" id="node-input-autoUpdate">
+                            <div class="ml-help-text">Automatically check for model updates</div>
+                        </div>
+                        
+                        <div class="ml-config-item">
+                            <label for="node-input-updateCheckInterval">
+                                <i class="fa fa-clock"></i> Update Interval (seconds)
+                            </label>
+                            <input type="number" id="node-input-updateCheckInterval" placeholder="3600" min="60">
+                            <div class="ml-help-text">How often to check for updates (default: 3600s)</div>
+                        </div>
+                        
+                        <div class="ml-config-item">
+                            <label for="node-input-modelStage">
+                                <i class="fa fa-layer-group"></i> Model Stage
+                            </label>
+                            <select id="node-input-modelStage">
+                                <option value="production">Production</option>
+                                <option value="staging">Staging</option>
+                                <option value="development">Development</option>
+                                <option value="deprecated">Deprecated</option>
+                                <option value="archived">Archived</option>
+                            </select>
+                            <div class="ml-help-text">Lifecycle stage of this model</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Model Path (manual) -->
+    <div class="form-row">
+        <label for="node-input-modelPath"><i class="fa fa-link"></i> Model Path / URL</label>
+        <input type="text" id="node-input-modelPath" placeholder="Select from library, enter path, or URL">
+    </div>
+    
+    <!-- Model Configuration Section -->
+    <div class="ml-section">
+        <div class="ml-section-header">
+            <span><i class="fa fa-sliders"></i> Configuration</span>
+            <i class="fa fa-chevron-down ml-collapse-icon"></i>
+        </div>
+        <div class="ml-section-content">
+            <div class="ml-config-grid">
+                <div class="ml-config-item">
+                    <label for="node-input-modelType">Model Type</label>
+                    <select id="node-input-modelType">
+                        <option value="auto">Auto-detect</option>
+                        <option value="tfjs">TensorFlow.js (model.json)</option>
+                        <option value="onnx">ONNX (.onnx)</option>
+                        <option value="tflite">TFLite (.tflite)</option>
+                        <option value="keras">Keras (.keras, .h5)</option>
+                        <option value="sklearn">scikit-learn (.pkl, .joblib)</option>
+                        <option value="savedmodel">TensorFlow SavedModel</option>
+                        <option value="coral">Coral Edge TPU (accelerated)</option>
+                    </select>
+                </div>
+                
+                <div class="ml-config-item">
+                    <label for="node-input-inputShape">Input Shape</label>
+                    <input type="text" id="node-input-inputShape" placeholder="e.g., 1,10">
+                    <div id="shape-help" class="ml-help-text">batch,features (e.g., 1,10)</div>
+                </div>
+                
+                <div class="ml-config-item">
+                    <label for="node-input-inputProperty">Input Property</label>
+                    <input type="text" id="node-input-inputProperty" placeholder="payload">
+                </div>
+                
+                <div class="ml-config-item">
+                    <label for="node-input-outputProperty">Output Property</label>
+                    <input type="text" id="node-input-outputProperty" placeholder="prediction">
+                </div>
+                
+                <div class="ml-config-item ml-config-full">
+                    <label for="node-input-preprocessMode">Preprocess Mode</label>
+                    <select id="node-input-preprocessMode">
+                        <option value="array">Array (flatten input)</option>
+                        <option value="object">Object (extract values)</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="ml-checkbox-row">
+                <input type="checkbox" id="node-input-warmup">
+                <label for="node-input-warmup"><i class="fa fa-fire" style="color: #ff9800;"></i> Run warmup inference on load</label>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Runtime Status -->
+    <div class="ml-section" style="background: transparent; border: none;">
+        <div style="font-size: 12px; color: #666; margin-bottom: 6px;"><i class="fa fa-microchip"></i> Available Runtimes:</div>
+        <div id="runtime-status" class="ml-runtime-badges">
+            <span class="ml-runtime-badge" style="background: #f5f5f5;"><i class="fa fa-spinner fa-spin"></i> Checking...</span>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="ml-inference">
+    <p>Runs machine learning inference using TensorFlow.js or ONNX Runtime models.</p>
+    
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number | array | object</span></dt>
+        <dd>The input data for the model. Can be a single number, array of features, or object with feature values.</dd>
+        <dt class="optional">loadModel <span class="property-type">string</span></dt>
+        <dd>Path to dynamically load a new model at runtime.</dd>
+    </dl>
+    
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>prediction <span class="property-type">array</span></dt>
+        <dd>The model prediction output (configurable property name).</dd>
+        <dt>mlInference <span class="property-type">object</span></dt>
+        <dd>Metadata including modelPath, modelFormat, inferenceTime, and timestamp.</dd>
+    </dl>
+    
+    <h3>Supported Model Formats</h3>
+    <p>This node supports multiple ML frameworks via different runtimes:</p>
+    <table>
+        <tr><th>Format</th><th>Extension</th><th>Runtime</th><th>Created With</th></tr>
+        <tr><td>ONNX</td><td>.onnx</td><td>ONNX Runtime (Node.js)</td><td>PyTorch, TensorFlow, scikit-learn</td></tr>
+        <tr><td>TensorFlow.js</td><td>model.json + .bin</td><td>TensorFlow.js (Node.js)</td><td>tensorflowjs_converter, Keras</td></tr>
+        <tr><td>TensorFlow SavedModel</td><td>saved_model.pb</td><td>TensorFlow.js (Node.js)</td><td>tf.saved_model.save()</td></tr>
+        <tr><td>TFLite</td><td>.tflite</td><td>Python Bridge</td><td>TensorFlow Lite Converter</td></tr>
+        <tr><td>Keras</td><td>.keras, .h5</td><td>Python Bridge</td><td>model.save(), Keras 3</td></tr>
+        <tr><td>scikit-learn</td><td>.pkl, .joblib</td><td>Python Bridge</td><td>joblib.dump(), pickle</td></tr>
+        <tr><td>Coral Edge TPU</td><td>.tflite</td><td>Python Bridge + Coral</td><td>TFLite (INT8 quantized)</td></tr>
+    </table>
+    
+    <h3>Uploading Models</h3>
+    <p>Upload models directly in the node editor:</p>
+    <ul>
+        <li><b>Drag & Drop:</b> Drag model files onto the upload area</li>
+        <li><b>ONNX:</b> Single .onnx file</li>
+        <li><b>TensorFlow.js:</b> model.json + all .bin shard files</li>
+        <li><b>TFLite:</b> Single .tflite file</li>
+        <li><b>Keras:</b> Single .keras or .h5 file</li>
+        <li><b>scikit-learn:</b> Single .pkl or .joblib file</li>
+    </ul>
+    <p>Models are stored in <code>~/.node-red/ml-models/</code></p>
+    
+    <h3>Coral Edge TPU Setup</h3>
+    <p>To use Coral Edge TPU:</p>
+    <ol>
+        <li>Install PyCoral: <code>pip3 install pycoral</code></li>
+        <li>Connect Coral USB Accelerator or use Coral Dev Board</li>
+        <li>Convert model to quantized TFLite format</li>
+        <li>Upload .tflite file via the node editor</li>
+    </ol>
+    <p><b>Note:</b> Coral provides 10-100x faster inference than CPU, ideal for real-time applications.</p>
+    
+    <h3>Configuration</h3>
+    <ul>
+        <li><b>Model Path:</b> Local path, URL, or model ID (Hugging Face, MLflow)</li>
+        <li><b>Model Type:</b> Auto-detect, TensorFlow.js, ONNX, TFLite, Keras, scikit-learn, or Coral</li>
+        <li><b>Input Shape:</b> Tensor dimensions (e.g., "1,10" for batch=1, features=10)</li>
+        <li><b>Input Property:</b> Where to read input data (default: payload)</li>
+        <li><b>Output Property:</b> Where to store prediction (default: prediction)</li>
+        <li><b>Warmup:</b> Run dummy inference on load for faster first prediction</li>
+    </ul>
+    
+    <h3>Python Bridge (TFLite, Keras, scikit-learn)</h3>
+    <p>Some model formats require Python. Ensure these are installed in the Node-RED environment:</p>
+    <pre>pip install numpy tensorflow keras scikit-learn joblib tflite-runtime</pre>
+    <p>The Docker image includes all required Python dependencies.</p>
+    
+    <h3>Example: Autoencoder Anomaly Detection</h3>
+    <pre>
+// Input: features from vibration-features node
+msg.payload = [0.45, 3.2, 0.8, -0.2, 1.5];
+
+// Output:
+msg.prediction = [[0.44, 3.1, 0.79, -0.19, 1.48]];
+msg.mlInference = {
+    modelFormat: "onnx",
+    inferenceTime: 5
+};
+
+// Calculate reconstruction error
+var error = msg.payload.reduce((sum, val, i) => 
+    sum + Math.pow(val - msg.prediction[0][i], 2), 0);
+msg.isAnomaly = error > 0.1;
+    </pre>
+    
+    <h3>Converting Models</h3>
+    <p><b>PyTorch to ONNX:</b></p>
+    <pre>torch.onnx.export(model, dummy_input, "model.onnx")</pre>
+    
+    <p><b>Keras to TensorFlow.js:</b></p>
+    <pre>tensorflowjs_converter --input_format=keras model.h5 ./tfjs_model</pre>
+    
+    <p><b>TensorFlow/Keras to Coral TFLite (quantized):</b></p>
+    <pre>import tensorflow as tf
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+converter.inference_input_type = tf.int8
+converter.inference_output_type = tf.int8
+tflite_model = converter.convert()
+with open('model_edgetpu.tflite', 'wb') as f:
+    f.write(tflite_model)</pre>
+    
+    <h3>Use Cases</h3>
+    <ul>
+        <li><b>Anomaly Detection:</b> Autoencoder reconstruction error</li>
+        <li><b>Classification:</b> Equipment state (normal/warning/critical)</li>
+        <li><b>Regression:</b> Remaining useful life prediction</li>
+        <li><b>Time Series:</b> LSTM forecasting models</li>
+    </ul>
+    
+    <h3>Installation</h3>
+    <pre>
+# TensorFlow.js
+npm install @tensorflow/tfjs-node
+
+# ONNX Runtime  
+npm install onnxruntime-node
+    </pre>
+</script>

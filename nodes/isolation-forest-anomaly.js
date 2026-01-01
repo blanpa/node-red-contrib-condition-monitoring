@@ -15,11 +15,22 @@ module.exports = function(RED) {
         
         this.contamination = parseFloat(config.contamination) || 0.1;
         this.windowSize = parseInt(config.windowSize) || 100;
+        this.numEstimators = parseInt(config.numEstimators) || 100;
+        this.maxSamples = parseInt(config.maxSamples) || 256;
+        this.outputTopic = config.outputTopic || "";
+        this.debug = config.debug === true;
         this.dataBuffer = [];
         this.scoreBuffer = []; // Store prediction scores for threshold calculation
         this.model = null;
         this.isTrained = false;
         this.anomalyThreshold = 0.5; // Default threshold, will be updated dynamically
+        
+        // Debug logging helper
+        var debugLog = function(message) {
+            if (node.debug) {
+                node.warn("[DEBUG] " + message);
+            }
+        };
         
         function trainModel() {
             if (!IsolationForest || node.dataBuffer.length < 10) {
@@ -41,10 +52,13 @@ module.exports = function(RED) {
                 });
                 
                 // Train Isolation Forest
+                var actualMaxSamples = Math.min(node.maxSamples, node.dataBuffer.length);
+                debugLog("Training Isolation Forest: trees=" + node.numEstimators + ", samples=" + actualMaxSamples);
+                
                 node.model = new IsolationForest({
                     contamination: node.contamination,
-                    numEstimators: 100,
-                    maxSamples: Math.min(256, node.dataBuffer.length)
+                    numEstimators: node.numEstimators,
+                    maxSamples: actualMaxSamples
                 });
                 
                 node.model.train(trainingData);
@@ -147,6 +161,8 @@ module.exports = function(RED) {
                 // Higher scores indicate anomalies (points that are easier to isolate)
                 var isAnomaly = score >= node.anomalyThreshold;
                 
+                debugLog("Score: " + score.toFixed(4) + ", Threshold: " + node.anomalyThreshold.toFixed(4) + ", Anomaly: " + isAnomaly);
+                
                 // Create output message
                 var outputMsg = {
                     payload: value,
@@ -154,14 +170,24 @@ module.exports = function(RED) {
                     anomalyScore: score,
                     method: "isolation-forest",
                     contamination: node.contamination,
+                    numEstimators: node.numEstimators,
                     timestamp: Date.now()
                 };
+                
+                // Set topic if configured
+                if (node.outputTopic) {
+                    outputMsg.topic = node.outputTopic;
+                }
                 
                 // Copy original message properties
                 Object.keys(msg).forEach(function(key) {
                     if (key !== 'payload' && key !== 'isAnomaly' && key !== 'anomalyScore' && 
-                        key !== 'method' && key !== 'contamination' && key !== 'timestamp') {
+                        key !== 'method' && key !== 'contamination' && key !== 'timestamp' && key !== 'topic') {
                         outputMsg[key] = msg[key];
+                    }
+                    // Preserve original topic if no output topic configured
+                    if (key === 'topic' && !node.outputTopic) {
+                        outputMsg.topic = msg.topic;
                     }
                 });
                 

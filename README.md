@@ -3,22 +3,23 @@
 A comprehensive Node-RED module for **anomaly detection**, **predictive maintenance**, and **time series analysis**.
 
 [![npm version](https://img.shields.io/npm/v/node-red-contrib-condition-monitoring.svg)](https://www.npmjs.com/package/node-red-contrib-condition-monitoring)
+[![npm downloads](https://img.shields.io/npm/dm/node-red-contrib-condition-monitoring.svg)](https://www.npmjs.com/package/node-red-contrib-condition-monitoring)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status: Beta](https://img.shields.io/badge/Status-Beta-orange.svg)](CHANGELOG.md)
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg)](CHANGELOG.md)
+[![Node-RED](https://img.shields.io/badge/Node--RED-%3E%3D2.0.0-red.svg)](https://nodered.org)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D14.0.0-green.svg)](https://nodejs.org)
+[![Status: Beta](https://img.shields.io/badge/Status-Beta-yellow.svg)](CHANGELOG.md)
 
 ---
 
-## Project Status: BETA (v0.1.2)
+## Project Status: v0.2.0 Beta
 
-**This is the first public release - currently in beta testing.**
+**Major consolidation release - 18 nodes → 7 nodes**
 
-- **First Release:** All core features are implemented and functional
-- **Beta Phase:** Undergoing real-world validation and testing
-- **Feedback Welcome:** Please report issues and share your experience
-- **API May Change:** Breaking changes possible before v1.0 stable release
-- **Production Use:** Use with caution and proper testing in your environment
-- **Goal:** Reach v1.0.0 stable after community feedback and validation
+- **Streamlined:** All functionality consolidated into 7 powerful nodes
+- **Easier to Use:** Less confusion, clearer purpose per node
+- **Same Features:** All original features preserved
+- **Modern UI:** Consistent, collapsible configuration sections
+- **Breaking Change:** See migration guide below
 
 ---
 
@@ -36,11 +37,13 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ## Features
 
-- **10 Anomaly Detection Methods** - Z-Score, IQR, Moving Average, Isolation Forest, Threshold, Percentile, EMA, CUSUM, Multi-Value
-- **7 Predictive Maintenance Nodes** - Trend Prediction (RUL), FFT Analysis, Vibration Features, Health Index, Rate of Change, Peak Detection, Correlation Analysis
-- **Real-time Processing** - Continuous data stream analysis
-- **Ready-to-Use Examples** - 5 complete example flows in `/examples` directory
-- **Fully Documented** - Built-in help for every node
+- **7 Powerful Nodes** - Consolidated from 18 nodes for easier use
+- **10 Anomaly Detection Methods** - Z-Score, IQR, Moving Average, Threshold, Percentile, EMA, CUSUM + Isolation Forest
+- **Signal Analysis** - FFT, Vibration Features, Peak Detection
+- **Trend Prediction** - Linear Regression, Exponential Smoothing, Rate of Change
+- **Multi-Value Processing** - Split, Analyze, Correlate multiple sensors
+- **ML Inference** - TensorFlow.js, ONNX, Google Coral support
+- **Model Registry** - Hugging Face Hub, MLflow, Custom Registry integration
 
 ## Installation
 
@@ -69,198 +72,246 @@ docker-compose up -d
 
 1. Open Node-RED: `http://localhost:1880`
 2. Menu → Import → Examples
-3. Select one of the 4 example flows:
-   - **Example 1:** Motor Monitoring (Z-Score, Trend Prediction, Health Index, Correlation)
-   - **Example 2:** Bearing Vibration Analysis (FFT, Peak Detection, IQR)
-   - **Example 3:** Process Monitoring (Threshold, CUSUM, EMA, Percentile)
-   - **Example 4:** ML Anomaly Detection (Isolation Forest)
+3. Select one of the example flows
 
-**See `/examples/README.md` for detailed documentation of all examples.**
+## Available Nodes (7 Nodes)
 
-## Available Nodes
+All nodes are in the **`condition-monitoring`** category.
 
-### Anomaly Detection (10 Nodes)
+### 1. Anomaly Detector
 
-| Node | Method | Best For | Output |
-|------|--------|----------|--------|
-| **Z-Score** | Statistical | General purpose anomalies | 2 outputs (normal/anomaly) |
-| **IQR** | Quartile-based | Robust to outliers | 2 outputs |
-| **Moving Average** | Trend-based | Gradual changes | 2 outputs |
-| **Isolation Forest** | Machine Learning | Complex patterns | 2 outputs |
-| **Threshold** | Min/Max limits | Hard boundaries | 2 outputs |
-| **Percentile** | Rank-based | Dynamic thresholds | 2 outputs |
-| **EMA** | Exponential smoothing | Recent changes | 2 outputs |
-| **CUSUM** | Cumulative sum | Drift detection | 2 outputs |
-| **Multi-Value Anomaly** | Any method | Multiple sensors | 2 outputs |
-| **Multi-Value Splitter** | Utility | Split sensor arrays | 1 output |
+**7 detection methods in one node:**
 
-### Predictive Maintenance (7 Nodes)
+| Method | Best For |
+|--------|----------|
+| **Z-Score** | Normal distributions, general purpose |
+| **IQR** | Robust to outliers, skewed data |
+| **Threshold** | Fixed min/max limits |
+| **Percentile** | Dynamic bounds based on data distribution |
+| **EMA** | Recent changes, adaptive baseline |
+| **CUSUM** | Drift detection, gradual shifts |
+| **Moving Average** | Smoothed baseline comparison |
 
-| Node | Function | Output | Use Case |
-|------|----------|--------|----------|
-| **Trend Prediction** | RUL calculation | Future values, time-to-threshold | "Motor fails in 48h" |
-| **FFT Analysis** | Frequency analysis | Peaks, spectral features | Bearing fault detection |
-| **Vibration Features** | Feature extraction | RMS, Crest Factor, Kurtosis, Skewness | Comprehensive vibration analysis |
-| **Health Index** | Multi-sensor aggregation | 0-100 health score | Overall equipment status |
-| **Rate of Change** | Derivative analysis | Speed of change, acceleration | Rapid temperature rise |
-| **Peak Detection** | Impact detection | Peak events | Bearing impacts, shocks |
-| **Correlation Anomaly** | Sensor relationship | Correlation coefficient | Temp vs Power relationship |
+**Example:**
+```
+[MQTT Sensor] → [Anomaly Detector (Z-Score)] → [Normal] → [Dashboard]
+                                              → [Anomaly] → [Alarm]
+```
+
+### 2. Isolation Forest
+
+**ML-based anomaly detection:**
+- Unsupervised learning
+- Detects complex, multivariate anomalies
+- No training labels required
+
+### 3. Multi-Value Processor
+
+**3 modes for multi-sensor data:**
+
+| Mode | Function |
+|------|----------|
+| **Split** | Extract individual values from arrays/objects |
+| **Analyze** | Anomaly detection per value (Z-Score, IQR, Threshold) |
+| **Correlate** | Pearson/Spearman correlation between two sensors |
+
+**Example:**
+```
+[Sensors] → [Multi-Value (Split)] → [Anomaly Detector] → ...
+```
+
+### 4. Signal Analyzer
+
+**3 modes for signal analysis:**
+
+| Mode | Output |
+|------|--------|
+| **FFT** | Frequency peaks, spectral features |
+| **Vibration** | RMS, Crest Factor, Kurtosis, Skewness, Health Score |
+| **Peaks** | Local maxima/minima detection |
+
+**Example:**
+```
+[Vibration Sensor] → [Signal Analyzer (Vibration)] → RMS, Crest Factor
+                   → [Signal Analyzer (FFT)] → Frequency Peaks
+```
+
+### 5. Trend Predictor
+
+**2 modes for trend analysis:**
+
+| Mode | Output |
+|------|--------|
+| **Prediction** | Future values, Remaining Useful Life (RUL) |
+| **Rate of Change** | First/second derivative, acceleration |
+
+**Example:**
+```
+[Temperature] → [Trend Predictor] → "Threshold reached in 48h"
+```
+
+### 6. Health Index
+
+**Multi-sensor health aggregation:**
+- Weighted combination of sensors
+- 0-100% health score
+- Configurable aggregation methods
+
+### 7. ML Inference
+
+**Machine Learning model inference:**
+- TensorFlow.js models (.json + .bin)
+- ONNX models (.onnx)
+- Google Coral / Edge TPU (.tflite)
+- Model Registry integration (Hugging Face, MLflow, Custom)
+
+**⚠️ Requires custom Docker container** - See Docker setup below.
+
+---
 
 ## Which Node Should I Use?
 
-### For Anomaly Detection:
-
-**Simple Use Cases:**
-- **Hard boundaries (min/max)?** → **Threshold Anomaly**
-  - Example: Temperature must stay between 20-80°C
-  
-- **Statistical outliers?** → **Z-Score** or **IQR Anomaly**
-  - Z-Score: Best for normally distributed data
-  - IQR: More robust, works with any distribution
-
-**Trend & Drift Detection:**
-- **Slow gradual changes?** → **CUSUM Anomaly**
-  - Example: Pump flow slowly decreasing over days
-  
-- **Moving baseline?** → **Moving Average** or **EMA Anomaly**
-  - Moving Average: Equal weight to all values in window
-  - EMA: Recent values weighted more (faster response)
-
-**Advanced Cases:**
-- **Complex patterns, no clear rules?** → **Isolation Forest**
-  - Machine learning approach, learns automatically
-  
-- **Extreme values only?** → **Percentile Anomaly**
-  - Example: Detect only top 5% and bottom 5%
-
-**Multiple Sensors:**
-- **Analyze multiple sensors together?** → **Multi-Value Anomaly**
-- **Split sensor array for separate processing?** → **Multi-Value Splitter**
-
----
-
-### For Predictive Maintenance:
-
-**Vibration Analysis:**
-- **Time-domain features (RMS, Crest Factor, Kurtosis)?** → **Vibration Features**
-  - Best for: Bearing condition, overall vibration health
-  
-- **Frequency analysis (FFT, harmonics)?** → **FFT Analysis**
-  - Best for: Finding specific fault frequencies (bearing, gear defects)
-  
-- **Count impacts/shocks?** → **Peak Detection**
-  - Best for: Impact counting, shock detection
-
-**Trend & Prediction:**
-- **Predict when threshold will be reached?** → **Trend Prediction**
-  - Calculates Remaining Useful Life (RUL)
-  - Example: "Temperature will exceed 100°C in 48 hours"
-  
-- **Measure rate of degradation?** → **Rate of Change**
-  - Detects rapid changes (acceleration)
-  - Example: "Temperature rising 5°C per hour"
-
-**Health Assessment:**
-- **Single health score from multiple sensors?** → **Health Index**
-  - Combines temperature, vibration, pressure into 0-100% score
-  
-- **Validate sensor relationships?** → **Correlation Anomaly**
-  - Example: Check if temperature and power consumption correlate correctly
-
----
-
-### Quick Decision Tree:
+### Quick Decision Tree
 
 ```
-Do you have historical data?
-├─ NO  → Start with Threshold or Z-Score
-└─ YES → Continue below
-
-Is it vibration data?
-├─ YES → Vibration Features + FFT Analysis + Peak Detection
-└─ NO  → Continue below
-
-Single sensor or multiple?
-├─ SINGLE → Z-Score / Moving Average / CUSUM
-└─ MULTIPLE → Multi-Value Splitter + Individual Analysis → Health Index
-
-Need to predict failures?
-└─ YES → Trend Prediction + Rate of Change + Health Index
+What do you want to detect?
+├─ Simple threshold violations → Anomaly Detector (Threshold)
+├─ Statistical outliers → Anomaly Detector (Z-Score/IQR)
+├─ Gradual drift → Anomaly Detector (CUSUM)
+├─ Complex patterns → Isolation Forest
+├─ Vibration issues → Signal Analyzer (Vibration/FFT)
+├─ Multiple sensors → Multi-Value Processor
+├─ Future prediction → Trend Predictor
+├─ Overall health → Health Index
+└─ Custom ML model → ML Inference
 ```
+
+---
 
 ## Usage Examples
 
 ### Simple Temperature Monitoring
 
 ```
-[MQTT Sensor] → [Z-Score Anomaly] → [Normal] → [Dashboard]
-                                   → [Anomaly] → [Alarm]
+[MQTT] → [Anomaly Detector] → [Normal] → [Dashboard]
+                             → [Anomaly] → [Email Alert]
 ```
 
 ### Motor Predictive Maintenance
 
 ```
-[Sensors] → [Multi-Value Splitter] → [Z-Score]
-                                   → [Trend Prediction] → RUL Display
-                                   → [FFT Analysis] → Frequency Chart
-         → [Health Index] → Health Dashboard
+[Sensors] → [Multi-Value (Split)] → [Anomaly Detector]
+                                  → [Trend Predictor] → RUL Display
+                                  → [Signal Analyzer (FFT)] → Frequency Chart
+          → [Health Index] → Dashboard
 ```
 
 ### Bearing Vibration Analysis
 
 ```
-[Vibration Sensor] → [Vibration Features] → RMS, Crest Factor, Kurtosis
-                   → [FFT Analysis] → Frequency Peaks
-                   → [Peak Detection] → Impact Counter
-                   → [IQR Anomaly] → Outlier Detection
+[Vibration] → [Signal Analyzer (Vibration)] → Features
+            → [Signal Analyzer (FFT)] → Frequencies
+            → [Signal Analyzer (Peaks)] → Impacts
+            → [Anomaly Detector (IQR)] → Outliers
 ```
 
-## Documentation
+### ML Anomaly Detection
 
-### Node-Specific Help
-Each node has comprehensive built-in documentation:
-1. Drag node to canvas
-2. Select it
-3. Click **Info** in sidebar
-4. Read detailed docs with examples
+```
+[Features] → [ML Inference (Autoencoder)] → Reconstruction Error → [Anomaly Detector (Threshold)]
+```
 
-### Additional Documentation
-- **[examples/README.md](examples/README.md)** - Detailed guide for all 5 example flows
-- **[PAYLOAD_FORMAT.md](PAYLOAD_FORMAT.md)** - Input format specifications
-- **[MULTI_VALUE.md](MULTI_VALUE.md)** - Working with multiple sensors
-- **[DOCKER.md](DOCKER.md)** - Docker deployment guide
+---
 
-## Node Configuration
+## Migration Guide (v0.x → v1.0)
 
-### Example: Z-Score Anomaly
+### Node Mapping
+
+| Old Node(s) | New Node | Notes |
+|-------------|----------|-------|
+| zscore-anomaly | anomaly-detector | Set `method: zscore` |
+| iqr-anomaly | anomaly-detector | Set `method: iqr` |
+| threshold-anomaly | anomaly-detector | Set `method: threshold` |
+| percentile-anomaly | anomaly-detector | Set `method: percentile` |
+| ema-anomaly | anomaly-detector | Set `method: ema` |
+| cusum-anomaly | anomaly-detector | Set `method: cusum` |
+| moving-average-anomaly | anomaly-detector | Set `method: moving-average` |
+| multi-value-splitter | multi-value-processor | Set `mode: split` |
+| multi-value-anomaly | multi-value-processor | Set `mode: analyze` |
+| correlation-anomaly | multi-value-processor | Set `mode: correlate` |
+| fft-analysis | signal-analyzer | Set `mode: fft` |
+| vibration-features | signal-analyzer | Set `mode: vibration` |
+| peak-detection | signal-analyzer | Set `mode: peaks` |
+| trend-prediction | trend-predictor | Set `mode: prediction` |
+| rate-of-change | trend-predictor | Set `mode: rate-of-change` |
+| isolation-forest-anomaly | isolation-forest | (unchanged) |
+| health-index | health-index | (unchanged) |
+| ml-inference | ml-inference | (unchanged) |
+
+### Configuration Mapping
+
+**Anomaly Detector:**
+```javascript
+// Old (zscore-anomaly)
+{ threshold: 3.0, warningThreshold: 2.0, windowSize: 100 }
+
+// New (anomaly-detector)
+{ method: "zscore", zscoreThreshold: 3.0, zscoreWarning: 2.0, windowSize: 100 }
+```
+
+---
+
+## Node Configuration Examples
+
+### Anomaly Detector (Z-Score)
 
 ```javascript
 // Input
 msg.payload = 42.5;
 
-// Output (Anomaly) - v0.1.2+
+// Output
 {
   "payload": 42.5,
+  "isAnomaly": true,
+  "severity": "critical",
+  "method": "zscore",
   "zScore": 3.2,
   "mean": 35.0,
   "stdDev": 2.3,
-  "isAnomaly": true,
-  "severity": "critical",     // NEW: "normal", "warning", or "critical"
   "threshold": 3.0,
-  "warningThreshold": 2.1,    // NEW
-  "bufferSize": 100,          // NEW
-  "windowSize": 100           // NEW
+  "warningThreshold": 2.0,
+  "bufferSize": 100,
+  "windowSize": 100
 }
-
-// Reset the node
-msg.reset = true;  // NEW: Clears buffer and restarts learning
 ```
 
-### Example: Trend Prediction
+### Signal Analyzer (FFT)
+
+```javascript
+// Input (continuous stream)
+msg.payload = 0.45;
+
+// Output
+{
+  "payload": 0.45,
+  "peaks": [
+    { "frequency": 30, "magnitude": 0.5 },
+    { "frequency": 157, "magnitude": 0.3 }
+  ],
+  "dominantFrequency": 30,
+  "features": {
+    "spectralCentroid": 85.2,
+    "crestFactor": 3.5,
+    "rms": 0.42
+  }
+}
+```
+
+### Trend Predictor (RUL)
 
 ```javascript
 // Input
-msg.payload = 75.2;  // Temperature
+msg.payload = 75.2;
 msg.timestamp = Date.now();
 
 // Output
@@ -269,112 +320,63 @@ msg.timestamp = Date.now();
   "trend": "increasing",
   "slope": 0.5,
   "predictedValues": [76.2, 76.7, 77.2, ...],
-  "timeToThreshold": 172800000,  // 48 hours in ms
+  "timeToThreshold": 172800000,
   "stepsToThreshold": 96
 }
 ```
 
-### Example: FFT Analysis
+---
 
-```javascript
-// Input (continuous stream at 1000 Hz)
-msg.payload = 0.45;  // Vibration amplitude
+## Docker Setup
 
-// Output
-{
-  "payload": 0.45,
-  "peaks": [
-    { "frequency": 30, "magnitude": 0.5 },
-    { "frequency": 157, "magnitude": 0.3 }  // Bearing fault!
-  ],
-  "dominantFrequency": 30,
-  "features": {
-    "spectralCentroid": 85.2,
-    "crestFactor": 3.5,  // High = impulsive behavior
-    "rms": 0.42
-  }
-}
-```
+### For ML Inference Node
 
-## Learning Path
-
-1. **Start Simple** - Import Example 3 (Process Monitoring)
-2. **Learn Basics** - Understand threshold and Z-Score detection
-3. **Advanced Methods** - Try FFT and Trend Prediction
-4. **Combine Nodes** - Build complete predictive maintenance system
-
-## Real-World Applications
-
-- **Manufacturing** - Machine health monitoring, quality control
-- **Energy** - Battery degradation, power quality monitoring
-- **Automotive** - Vehicle diagnostics, fleet management
-- **HVAC** - Climate system optimization, energy efficiency
-- **Water Treatment** - Pump monitoring, leak detection
-- **Aerospace** - Engine monitoring, structural health
-- **Medical** - Equipment monitoring, vital sign analysis
-
-## Technical Details
-
-### Statistical Methods
-
-| Method | Type | Complexity | Speed | Accuracy |
-|--------|------|------------|-------|----------|
-| Threshold | Rule-based | Low | Fast | Medium |
-| Z-Score | Statistical | Low | Fast | High |
-| IQR | Statistical | Medium | Fast | High |
-| Percentile | Statistical | Medium | Fast | High |
-| Moving Average | Trend | Low | Fast | Medium |
-| EMA | Trend | Low | Fast | Medium |
-| CUSUM | Cumulative | Medium | Fast | High |
-| Isolation Forest | ML | High | Medium | Very High |
-
-### Predictive Maintenance Capabilities
-
-| Feature | Node | Output |
-|---------|------|--------|
-| RUL Estimation | Trend Prediction | Time until failure |
-| Frequency Analysis | FFT Analysis | Fault frequencies |
-| Overall Health | Health Index | 0-100 score |
-| Change Speed | Rate of Change | Derivative |
-| Impact Events | Peak Detection | Peak count |
-| Sensor Validation | Correlation | Relationship strength |
-
-## Development
-
-### Run with Docker
+**The ML Inference node requires a Debian-based container with native dependencies.**
 
 ```bash
-# Development mode (with hot-reload)
+# Use the provided docker-compose.dev.yml
 docker-compose -f docker-compose.dev.yml up
 
-# Production mode
-docker-compose up
+# This builds a custom image with:
+# - Python 3 + build tools
+# - TensorFlow.js Node bindings
+# - ONNX Runtime Node bindings
 ```
 
-### Local Development
+### Standard Setup
 
 ```bash
-# Install dependencies
-npm install
+# Production mode
+docker-compose up
 
-# Link to Node-RED
-npm link
-cd ~/.node-red
-npm link node-red-contrib-condition-monitoring
-
-# Restart Node-RED
-node-red-restart
+# Development mode (hot-reload)
+docker-compose -f docker-compose.dev.yml up
 ```
+
+---
 
 ## Dependencies
 
 ### Required
-- Node-RED >= 1.0.0
+- Node-RED >= 2.0.0
 - Node.js >= 14.0.0
 
-### Optional
-- `ml-isolation-forest` - For Isolation Forest node (falls back to Z-Score if not available)
-- `simple-statistics` - For advanced statistical functions
+### Core Dependencies
+- `ml-isolation-forest` - For Isolation Forest node
+- `simple-statistics` - For statistical functions
+
+### Optional (ML Inference)
+- `@tensorflow/tfjs-node` - TensorFlow.js support
+- `onnxruntime-node` - ONNX Runtime support
+
+---
+
+## Documentation
+
+- **[models/README.md](models/README.md)** - ML models guide and training instructions
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history and changes
+
+---
 
 ## Contributing
 
@@ -392,31 +394,17 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 **blanpa**
 
-## Issues & Support
-
-- **Bug Reports:** Open an issue on GitHub
-- **Questions:** Check `/examples/README.md` first
-- **Feature Requests:** Submit via GitHub issues
+---
 
 ## Roadmap
 
+- [x] Consolidate 18 nodes → 7 nodes
+- [x] ML Inference with Model Registry
+- [x] Google Coral / Edge TPU support
 - [ ] Dashboard UI components
-- [ ] Export/import of trained models
-- [ ] MQTT examples
+- [ ] Pre-trained models for common use cases
 - [ ] Real-time charting integration
-- [ ] More ML algorithms (LSTM, Prophet)
-- [ ] Automated reporting
-
-## Show Your Support
-
-If you find this useful, please consider:
-- Starring the repository
-- Sharing with others
-- Reporting bugs
-- Suggesting features
 
 ---
 
-**Made with love for the Node-RED community**
-
-**Get Started:** Import an example flow and start monitoring in minutes!
+**Made with ❤️ for the Node-RED community**

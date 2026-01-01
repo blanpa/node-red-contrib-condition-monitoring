@@ -1,0 +1,14 @@
+{
+  "name": "sensor-tflite",
+  "version": "2.0.0",
+  "type": "tflite",
+  "description": "5-sensor anomaly detection optimized for edge devices",
+  "inputShape": [
+    1,
+    5
+  ],
+  "trainedOn": "Realistic synthetic industrial data",
+  "createdAt": "2026-01-01T00:29:56.318361",
+  "framework": "tflite",
+  "accuracy": 0.9850000143051147
+}

@@ -1,0 +1,14 @@
+{
+  "name": "random-forest-anomaly",
+  "version": "2.0.0",
+  "type": "sklearn-rf",
+  "description": "Random Forest classifier for sensor anomaly detection",
+  "inputShape": [
+    1,
+    5
+  ],
+  "trainedOn": "Realistic synthetic industrial data",
+  "createdAt": "2026-01-01T00:29:56.919362",
+  "framework": "sklearn",
+  "accuracy": 0.994
+}

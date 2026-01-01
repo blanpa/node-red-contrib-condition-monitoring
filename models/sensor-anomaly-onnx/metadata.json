@@ -1,0 +1,14 @@
+{
+  "name": "sensor-anomaly",
+  "version": "2.0.0",
+  "type": "onnx",
+  "description": "Alias for sensor-onnx model",
+  "inputShape": [
+    1,
+    5
+  ],
+  "trainedOn": "Realistic synthetic industrial data",
+  "createdAt": "2026-01-01T00:29:17.746193",
+  "framework": "onnx",
+  "accuracy": 1.0
+}

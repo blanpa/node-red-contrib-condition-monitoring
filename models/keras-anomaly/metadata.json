@@ -1,0 +1,14 @@
+{
+  "name": "keras-sensor-anomaly",
+  "version": "2.0.0",
+  "type": "keras",
+  "description": "5-sensor anomaly detection (Keras 3 format)",
+  "inputShape": [
+    1,
+    5
+  ],
+  "trainedOn": "Realistic synthetic industrial data",
+  "createdAt": "2026-01-01T00:29:42.922260",
+  "framework": "keras",
+  "accuracy": 0.9881250262260437
+}

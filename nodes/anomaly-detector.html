@@ -1,0 +1,495 @@
+<script type="text/javascript">
+    RED.nodes.registerType('anomaly-detector', {
+        category: 'condition-monitoring',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            method: { value: "zscore" },
+            windowSize: { value: 100, validate: RED.validators.number() },
+            // Z-Score
+            zscoreThreshold: { value: 3.0 },
+            zscoreWarning: { value: 2.0 },
+            // IQR
+            iqrMultiplier: { value: 1.5 },
+            iqrWarningMultiplier: { value: 1.2 },
+            // Threshold
+            minThreshold: { value: "" },
+            maxThreshold: { value: "" },
+            warningMargin: { value: 10 },
+            // Percentile
+            lowerPercentile: { value: 5.0 },
+            upperPercentile: { value: 95.0 },
+            // EMA
+            emaAlpha: { value: 0.3 },
+            emaThreshold: { value: 2.0 },
+            emaWarning: { value: 1.5 },
+            emaMethod: { value: "stddev" },
+            // CUSUM
+            cusumTarget: { value: "" },
+            cusumThreshold: { value: 5.0 },
+            cusumWarning: { value: 3.5 },
+            cusumDrift: { value: 0.5 },
+            // Moving Average
+            maThreshold: { value: 2.0 },
+            maWarning: { value: 1.5 },
+            maMethod: { value: "stddev" },
+            // Advanced
+            outputTopic: { value: "" },
+            debug: { value: false }
+        },
+        inputs: 1,
+        outputs: 2,
+        outputLabels: ["normal", "anomaly"],
+        icon: "icon.png",
+        label: function() {
+            return this.name || "Anomaly Detector";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        paletteLabel: "Anomaly Detector",
+        oneditprepare: function() {
+            var node = this;
+            
+            function showMethodConfig(method) {
+                $(".method-config").hide();
+                $("#config-" + method).show();
+            }
+            
+            $("#node-input-method").on("change", function() {
+                showMethodConfig($(this).val());
+            });
+            
+            showMethodConfig(node.method || "zscore");
+            
+            // Collapsible sections
+            $(".cm-section-header").on("click", function() {
+                var $content = $(this).next(".cm-section-content");
+                var $icon = $(this).find(".cm-collapse-icon");
+                $content.slideToggle(200);
+                $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
+        }
+    });
+</script>
+
+<style>
+    .cm-section {
+        background: #fafafa;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        overflow: hidden;
+    }
+    
+    .cm-section-header {
+        background: linear-gradient(135deg, #9482f1 0%, #7d6bd3 100%);
+        color: #fff;
+        padding: 10px 14px;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        user-select: none;
+    }
+    
+    .cm-section-header:hover {
+        background: linear-gradient(135deg, #a896f5 0%, #9482f1 100%);
+    }
+    
+    .cm-section-header i:first-child {
+        margin-right: 8px;
+    }
+    
+    .cm-section-content {
+        padding: 14px;
+    }
+    
+    .cm-config-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }
+    
+    .cm-config-item {
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .cm-config-item label {
+        font-size: 11px;
+        color: #666;
+        margin-bottom: 6px;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    
+    .cm-config-item input,
+    .cm-config-item select {
+        padding: 8px 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 13px;
+    }
+    
+    .cm-config-item input:focus,
+    .cm-config-item select:focus {
+        border-color: #9482f1;
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(148, 130, 241, 0.2);
+    }
+    
+    .cm-help-text {
+        font-size: 10px;
+        color: #888;
+        margin-top: 4px;
+    }
+    
+    .method-config {
+        display: none;
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px dashed #ddd;
+    }
+    
+    .method-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 10px;
+        font-weight: 600;
+        margin-left: 8px;
+    }
+    
+    .method-badge.statistical { background: #e3f2fd; color: #1976d2; }
+    .method-badge.adaptive { background: #f3e5f5; color: #7b1fa2; }
+    .method-badge.fixed { background: #fff3e0; color: #e65100; }
+</style>
+
+<script type="text/html" data-template-name="anomaly-detector">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cogs"></i> Detection Method</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-method">
+                    <i class="fa fa-chart-line"></i> Method
+                </label>
+                <select id="node-input-method">
+                    <option value="zscore">Z-Score (Standard Deviation)</option>
+                    <option value="iqr">IQR (Interquartile Range)</option>
+                    <option value="threshold">Fixed Threshold</option>
+                    <option value="percentile">Percentile</option>
+                    <option value="ema">EMA (Exponential Moving Average)</option>
+                    <option value="cusum">CUSUM (Cumulative Sum)</option>
+                    <option value="moving-average">Moving Average</option>
+                </select>
+                <div class="cm-help-text">Select the anomaly detection algorithm</div>
+            </div>
+            
+            <div class="cm-config-item" style="margin-top: 12px;">
+                <label for="node-input-windowSize">
+                    <i class="fa fa-window-maximize"></i> Window Size
+                </label>
+                <input type="number" id="node-input-windowSize" min="2" placeholder="100">
+                <div class="cm-help-text">Number of values to keep in buffer for analysis</div>
+            </div>
+            
+            <!-- Z-Score Config -->
+            <div id="config-zscore" class="method-config">
+                <h4><i class="fa fa-chart-bar"></i> Z-Score Settings <span class="method-badge statistical">Statistical</span></h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Critical Threshold (σ)</label>
+                        <input type="number" id="node-input-zscoreThreshold" step="0.1" min="0">
+                        <div class="cm-help-text">Z-Score above this = critical (default: 3.0σ)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Warning Threshold (σ)</label>
+                        <input type="number" id="node-input-zscoreWarning" step="0.1" min="0">
+                        <div class="cm-help-text">Z-Score above this = warning (default: 2.0σ)</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- IQR Config -->
+            <div id="config-iqr" class="method-config">
+                <h4><i class="fa fa-chart-area"></i> IQR Settings <span class="method-badge statistical">Statistical</span></h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Critical Multiplier</label>
+                        <input type="number" id="node-input-iqrMultiplier" step="0.1" min="0">
+                        <div class="cm-help-text">Q1 - multiplier*IQR to Q3 + multiplier*IQR (default: 1.5)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Warning Multiplier</label>
+                        <input type="number" id="node-input-iqrWarningMultiplier" step="0.1" min="0">
+                        <div class="cm-help-text">Warning zone multiplier (default: 1.2)</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Threshold Config -->
+            <div id="config-threshold" class="method-config">
+                <h4><i class="fa fa-sliders-h"></i> Threshold Settings <span class="method-badge fixed">Fixed</span></h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Minimum Threshold</label>
+                        <input type="number" id="node-input-minThreshold" step="any">
+                        <div class="cm-help-text">Values below this are anomalies (leave empty to disable)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Maximum Threshold</label>
+                        <input type="number" id="node-input-maxThreshold" step="any">
+                        <div class="cm-help-text">Values above this are anomalies (leave empty to disable)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Warning Margin (%)</label>
+                        <input type="number" id="node-input-warningMargin" step="1" min="0" max="100">
+                        <div class="cm-help-text">Percentage margin for warning zone (default: 10%)</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Percentile Config -->
+            <div id="config-percentile" class="method-config">
+                <h4><i class="fa fa-percentage"></i> Percentile Settings <span class="method-badge statistical">Statistical</span></h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Lower Percentile</label>
+                        <input type="number" id="node-input-lowerPercentile" step="0.1" min="0" max="100">
+                        <div class="cm-help-text">Values below this percentile are anomalies (default: 5)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Upper Percentile</label>
+                        <input type="number" id="node-input-upperPercentile" step="0.1" min="0" max="100">
+                        <div class="cm-help-text">Values above this percentile are anomalies (default: 95)</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- EMA Config -->
+            <div id="config-ema" class="method-config">
+                <h4><i class="fa fa-wave-square"></i> EMA Settings <span class="method-badge adaptive">Adaptive</span></h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Alpha (Smoothing Factor)</label>
+                        <input type="number" id="node-input-emaAlpha" step="0.01" min="0" max="1">
+                        <div class="cm-help-text">0-1, higher = more responsive (default: 0.3)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Detection Method</label>
+                        <select id="node-input-emaMethod">
+                            <option value="stddev">Standard Deviation</option>
+                            <option value="percentage">Percentage</option>
+                        </select>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Critical Threshold</label>
+                        <input type="number" id="node-input-emaThreshold" step="0.1" min="0">
+                        <div class="cm-help-text">Deviation threshold for critical (default: 2.0)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Warning Threshold</label>
+                        <input type="number" id="node-input-emaWarning" step="0.1" min="0">
+                        <div class="cm-help-text">Deviation threshold for warning (default: 1.5)</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- CUSUM Config -->
+            <div id="config-cusum" class="method-config">
+                <h4><i class="fa fa-chart-line"></i> CUSUM Settings <span class="method-badge adaptive">Adaptive</span></h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Target Value</label>
+                        <input type="number" id="node-input-cusumTarget" step="any">
+                        <div class="cm-help-text">Expected value (leave empty for auto-mean)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Drift</label>
+                        <input type="number" id="node-input-cusumDrift" step="0.1" min="0">
+                        <div class="cm-help-text">Allowable drift before detection (default: 0.5)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Critical Threshold</label>
+                        <input type="number" id="node-input-cusumThreshold" step="0.1" min="0">
+                        <div class="cm-help-text">CUSUM threshold for critical (default: 5.0)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Warning Threshold</label>
+                        <input type="number" id="node-input-cusumWarning" step="0.1" min="0">
+                        <div class="cm-help-text">CUSUM threshold for warning (default: 3.5)</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Moving Average Config -->
+            <div id="config-moving-average" class="method-config">
+                <h4><i class="fa fa-arrows-alt-h"></i> Moving Average Settings <span class="method-badge adaptive">Adaptive</span></h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Detection Method</label>
+                        <select id="node-input-maMethod">
+                            <option value="stddev">Standard Deviation</option>
+                            <option value="percentage">Percentage</option>
+                        </select>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Critical Threshold</label>
+                        <input type="number" id="node-input-maThreshold" step="0.1" min="0">
+                        <div class="cm-help-text">Deviation threshold for critical (default: 2.0)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Warning Threshold</label>
+                        <input type="number" id="node-input-maWarning" step="0.1" min="0">
+                        <div class="cm-help-text">Deviation threshold for warning (default: 1.5)</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Advanced Settings -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cog"></i> Advanced Settings</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-grid">
+                <div class="cm-config-item">
+                    <label for="node-input-outputTopic">
+                        <i class="fa fa-tag"></i> Output Topic
+                    </label>
+                    <input type="text" id="node-input-outputTopic" placeholder="Leave empty to preserve original">
+                    <div class="cm-help-text">Set msg.topic on output (empty = keep original)</div>
+                </div>
+                
+                <div class="cm-config-item">
+                    <label for="node-input-debug">
+                        <i class="fa fa-bug"></i> Debug Mode
+                    </label>
+                    <input type="checkbox" id="node-input-debug" style="width: auto; margin-top: 8px;">
+                    <div class="cm-help-text">Log detailed info to Node-RED debug</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="anomaly-detector">
+    <p>A unified anomaly detection node supporting 7 statistical methods for time-series analysis.</p>
+    
+    <h3>Detection Methods</h3>
+    <dl>
+        <dt><b>Z-Score</b> <span style="color:#1976d2">[Statistical]</span></dt>
+        <dd>Detects anomalies based on standard deviations (σ) from the mean. 
+        <br><b>Best for:</b> Normally distributed data, general purpose.
+        <br><b>Thresholds:</b> Critical ≥3σ, Warning ≥2σ (configurable)</dd>
+        
+        <dt><b>IQR (Interquartile Range)</b> <span style="color:#1976d2">[Statistical]</span></dt>
+        <dd>Uses quartiles (Q1, Q3) to detect outliers. Values outside Q1-1.5×IQR to Q3+1.5×IQR are anomalies.
+        <br><b>Best for:</b> Skewed data, robust to extreme outliers.
+        <br><b>Note:</b> Requires minimum 4 data points.</dd>
+        
+        <dt><b>Fixed Threshold</b> <span style="color:#e65100">[Fixed]</span></dt>
+        <dd>Simple min/max boundary checking with optional warning margins.
+        <br><b>Best for:</b> Known operational limits (e.g., temperature 0-100°C).</dd>
+        
+        <dt><b>Percentile</b> <span style="color:#1976d2">[Statistical]</span></dt>
+        <dd>Detects values outside specified percentile bounds (default: 5th-95th).
+        <br><b>Best for:</b> Dynamic bounds based on data distribution.</dd>
+        
+        <dt><b>EMA (Exponential Moving Average)</b> <span style="color:#7b1fa2">[Adaptive]</span></dt>
+        <dd>Compares values to an exponentially weighted average. Recent values have more weight.
+        <br><b>Best for:</b> Trend detection, adaptive baseline.
+        <br><b>Alpha:</b> 0.3 default (higher = more responsive).</dd>
+        
+        <dt><b>CUSUM (Cumulative Sum)</b> <span style="color:#7b1fa2">[Adaptive]</span></dt>
+        <dd>Accumulates deviations from target to detect persistent shifts or drift.
+        <br><b>Best for:</b> Process control, detecting gradual changes.
+        <br><b>Note:</b> Resets after critical detection.</dd>
+        
+        <dt><b>Moving Average</b> <span style="color:#7b1fa2">[Adaptive]</span></dt>
+        <dd>Compares values to a simple moving average within the window.
+        <br><b>Best for:</b> Smoothed baseline comparison, noise reduction.</dd>
+    </dl>
+    
+    <h3>Inputs</h3>
+    <dl>
+        <dt>msg.payload <span class="property-type">number</span></dt>
+        <dd>The numeric value to analyze (required)</dd>
+        
+        <dt>msg.reset <span class="property-type">boolean</span></dt>
+        <dd>Set to <code>true</code> to clear the internal buffer and reset state</dd>
+        
+        <dt>msg.timestamp <span class="property-type">number</span></dt>
+        <dd>Optional timestamp in milliseconds (uses Date.now() if not provided)</dd>
+    </dl>
+    
+    <h3>Outputs</h3>
+    <ol>
+        <li><b>Output 1 (Normal)</b> - Messages classified as normal</li>
+        <li><b>Output 2 (Anomaly)</b> - Messages classified as warning or critical anomalies</li>
+    </ol>
+    
+    <h3>Output Properties</h3>
+    <dl>
+        <dt>msg.payload <span class="property-type">number</span></dt>
+        <dd>Original input value</dd>
+        
+        <dt>msg.isAnomaly <span class="property-type">boolean</span></dt>
+        <dd>Whether the value is an anomaly</dd>
+        
+        <dt>msg.severity <span class="property-type">string</span></dt>
+        <dd><code>"normal"</code>, <code>"warning"</code>, or <code>"critical"</code></dd>
+        
+        <dt>msg.method <span class="property-type">string</span></dt>
+        <dd>Detection method used (e.g., "zscore", "iqr")</dd>
+        
+        <dt>msg.bufferSize <span class="property-type">number</span></dt>
+        <dd>Current number of values in the analysis buffer</dd>
+        
+        <dt>msg.windowSize <span class="property-type">number</span></dt>
+        <dd>Configured maximum buffer size</dd>
+    </dl>
+    
+    <h3>Method-Specific Output</h3>
+    <p>Additional properties are added based on the detection method:</p>
+    <ul>
+        <li><b>Z-Score:</b> <code>zScore</code>, <code>mean</code>, <code>stdDev</code></li>
+        <li><b>IQR:</b> <code>q1</code>, <code>q3</code>, <code>iqr</code>, <code>median</code>, <code>lowerBound</code>, <code>upperBound</code></li>
+        <li><b>Threshold:</b> <code>minThreshold</code>, <code>maxThreshold</code>, <code>reason</code></li>
+        <li><b>Percentile:</b> <code>lowerBound</code>, <code>upperBound</code></li>
+        <li><b>EMA:</b> <code>ema</code>, <code>deviation</code>, <code>deviationFactor</code></li>
+        <li><b>CUSUM:</b> <code>target</code>, <code>cusumPos</code>, <code>cusumNeg</code>, <code>cusumMax</code></li>
+        <li><b>Moving Average:</b> <code>movingAverage</code>, <code>stdDev</code>, <code>deviation</code></li>
+    </ul>
+    
+    <h3>Warm-up Period</h3>
+    <p>Most methods require a minimum number of data points before detection starts:</p>
+    <ul>
+        <li>Z-Score, Percentile, EMA, MA, CUSUM: 2 samples minimum</li>
+        <li>IQR: 4 samples minimum</li>
+    </ul>
+    <p>During warm-up, the node status shows "warmup X/Y" and passes messages through Output 1.</p>
+    
+    <h3>Use Cases</h3>
+    <ul>
+        <li><b>Temperature Monitoring:</b> Use Threshold for known limits or Z-Score for statistical detection</li>
+        <li><b>Vibration Analysis:</b> Use IQR for robust outlier detection</li>
+        <li><b>Process Control:</b> Use CUSUM to detect drift over time</li>
+        <li><b>Sensor Validation:</b> Use Percentile for dynamic bounds</li>
+    </ul>
+</script>

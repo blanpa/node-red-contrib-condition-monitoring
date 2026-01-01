@@ -1,0 +1,278 @@
+<script type="text/javascript">
+    RED.nodes.registerType('trend-predictor', {
+        category: 'condition-monitoring',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            mode: { value: "prediction" },
+            method: { value: "linear" },
+            predictionSteps: { value: 10 },
+            windowSize: { value: 50 },
+            threshold: { value: "" },
+            rocMethod: { value: "absolute" },
+            timeWindow: { value: 1 },
+            rocThreshold: { value: "" },
+            outputTopic: { value: "" },
+            debug: { value: false }
+        },
+        inputs: 1,
+        outputs: 2,
+        outputLabels: ["normal", "threshold/anomaly"],
+        icon: "icon.png",
+        label: function() {
+            return this.name || "Trend Predictor";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        paletteLabel: "Trend Predictor",
+        oneditprepare: function() {
+            function showModeConfig(mode) {
+                $(".mode-config").hide();
+                $("#config-" + mode).show();
+            }
+            
+            $("#node-input-mode").on("change", function() {
+                showModeConfig($(this).val());
+            });
+            
+            showModeConfig(this.mode || "prediction");
+            
+            $(".cm-section-header").on("click", function() {
+                var $content = $(this).next(".cm-section-content");
+                var $icon = $(this).find(".cm-collapse-icon");
+                $content.slideToggle(200);
+                $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
+        }
+    });
+</script>
+
+<style>
+    .cm-section { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
+    .cm-section-header { background: linear-gradient(135deg, #9482f1 0%, #7d6bd3 100%); color: #fff; padding: 10px 14px; font-weight: 500; cursor: pointer; display: flex; align-items: center; justify-content: space-between; }
+    .cm-section-header:hover { background: linear-gradient(135deg, #a896f5 0%, #9482f1 100%); }
+    .cm-section-content { padding: 14px; }
+    .cm-config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .cm-config-item { display: flex; flex-direction: column; }
+    .cm-config-item label { font-size: 11px; color: #666; margin-bottom: 6px; font-weight: 500; }
+    .cm-config-item input, .cm-config-item select { padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+    .cm-help-text { font-size: 10px; color: #888; margin-top: 4px; }
+    .mode-config { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed #ddd; }
+</style>
+
+<script type="text/html" data-template-name="trend-predictor">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-chart-line"></i> Prediction Mode</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-mode"><i class="fa fa-cog"></i> Mode</label>
+                <select id="node-input-mode">
+                    <option value="prediction">Trend Prediction (RUL)</option>
+                    <option value="rate-of-change">Rate of Change</option>
+                </select>
+                <div class="cm-help-text">Select the analysis mode</div>
+            </div>
+            
+            <!-- Prediction Config -->
+            <div id="config-prediction" class="mode-config">
+                <h4><i class="fa fa-chart-line"></i> Trend Prediction Settings</h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Method</label>
+                        <select id="node-input-method">
+                            <option value="linear">Linear Regression</option>
+                            <option value="exponential">Exponential Smoothing</option>
+                        </select>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Prediction Steps</label>
+                        <input type="number" id="node-input-predictionSteps" min="1">
+                        <div class="cm-help-text">Number of future steps to predict</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Window Size</label>
+                        <input type="number" id="node-input-windowSize" min="3">
+                        <div class="cm-help-text">Historical samples to use</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Failure Threshold (RUL)</label>
+                        <input type="number" id="node-input-threshold" step="any">
+                        <div class="cm-help-text">Optional: Calculate time to reach this value</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Rate of Change Config -->
+            <div id="config-rate-of-change" class="mode-config">
+                <h4><i class="fa fa-tachometer-alt"></i> Rate of Change Settings</h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Method</label>
+                        <select id="node-input-rocMethod">
+                            <option value="absolute">Absolute (/s)</option>
+                            <option value="percentage">Percentage (%/s)</option>
+                        </select>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Time Window (seconds)</label>
+                        <input type="number" id="node-input-timeWindow" min="1">
+                        <div class="cm-help-text">Window for rate calculation</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Anomaly Threshold</label>
+                        <input type="number" id="node-input-rocThreshold" step="any">
+                        <div class="cm-help-text">Optional: Rate above this is anomalous</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Advanced Settings -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cog"></i> Advanced Settings</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-grid">
+                <div class="cm-config-item">
+                    <label for="node-input-outputTopic">
+                        <i class="fa fa-tag"></i> Output Topic
+                    </label>
+                    <input type="text" id="node-input-outputTopic" placeholder="Leave empty to preserve original">
+                    <div class="cm-help-text">Set msg.topic on output (empty = keep original)</div>
+                </div>
+                
+                <div class="cm-config-item">
+                    <label for="node-input-debug">
+                        <i class="fa fa-bug"></i> Debug Mode
+                    </label>
+                    <input type="checkbox" id="node-input-debug" style="width: auto; margin-top: 8px;">
+                    <div class="cm-help-text">Log detailed info to Node-RED debug</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="trend-predictor">
+    <p>A unified node for trend analysis, future value prediction, and Remaining Useful Life (RUL) estimation.</p>
+    
+    <h3>Analysis Modes</h3>
+    <dl>
+        <dt><b>Trend Prediction (RUL)</b></dt>
+        <dd>Predicts future values using regression and estimates when a failure threshold will be reached.
+        <br><b>Methods:</b> Linear Regression, Exponential Smoothing (Holt)
+        <br><b>Use case:</b> Predict bearing failure time, estimate maintenance window</dd>
+        
+        <dt><b>Rate of Change</b></dt>
+        <dd>Calculates instantaneous rate (1st derivative) and acceleration (2nd derivative).
+        <br><b>Units:</b> Absolute (/s) or Percentage (%/s)
+        <br><b>Use case:</b> Detect sudden changes, monitor degradation speed</dd>
+    </dl>
+    
+    <h3>Inputs</h3>
+    <dl>
+        <dt>msg.payload <span class="property-type">number</span></dt>
+        <dd>The numeric value to analyze (required)</dd>
+        
+        <dt>msg.timestamp <span class="property-type">number</span></dt>
+        <dd>Optional timestamp in milliseconds. If not provided, uses <code>Date.now()</code>.
+        <br><b>Important:</b> Consistent timestamps improve RUL accuracy.</dd>
+        
+        <dt>msg.reset <span class="property-type">boolean</span></dt>
+        <dd>Set to <code>true</code> to clear history and reset calculations</dd>
+    </dl>
+    
+    <h3>Outputs</h3>
+    <ol>
+        <li><b>Output 1 (Normal)</b> - Regular trend data</li>
+        <li><b>Output 2 (Threshold/Anomaly)</b> - When threshold will be reached or rate is anomalous</li>
+    </ol>
+    
+    <h3>Trend Prediction Output</h3>
+    <dl>
+        <dt>msg.trend <span class="property-type">string</span></dt>
+        <dd><code>"increasing"</code> | <code>"decreasing"</code> | <code>"stable"</code>
+        <br>Based on slope magnitude (threshold: ±0.01)</dd>
+        
+        <dt>msg.slope <span class="property-type">number</span></dt>
+        <dd>Rate of change per sample step
+        <br><b>Linear:</b> Regression coefficient
+        <br><b>Exponential:</b> Smoothed trend component</dd>
+        
+        <dt>msg.predictedValues <span class="property-type">array</span></dt>
+        <dd>Array of N predicted future values (configurable)
+        <br>Example: <code>[75.2, 76.1, 77.0, 77.9, ...]</code></dd>
+        
+        <dt>msg.timeToThreshold <span class="property-type">number</span></dt>
+        <dd>Estimated time (ms) until failure threshold is reached.
+        <br>Returns <code>null</code> if threshold won't be reached within prediction horizon.</dd>
+        
+        <dt>msg.stepsToThreshold <span class="property-type">number</span></dt>
+        <dd>Number of steps until threshold is reached</dd>
+        
+        <dt>msg.method <span class="property-type">string</span></dt>
+        <dd><code>"linear"</code> or <code>"exponential"</code></dd>
+    </dl>
+    
+    <h3>Rate of Change Output</h3>
+    <dl>
+        <dt>msg.rateOfChange <span class="property-type">number</span></dt>
+        <dd>Current rate per second
+        <br><b>Absolute:</b> Units/second (e.g., °C/s)
+        <br><b>Percentage:</b> %/second relative to previous value</dd>
+        
+        <dt>msg.acceleration <span class="property-type">number</span></dt>
+        <dd>Rate of change of the rate (2nd derivative)
+        <br>Positive: Rate is increasing
+        <br>Negative: Rate is decreasing</dd>
+        
+        <dt>msg.isAnomalous <span class="property-type">boolean</span></dt>
+        <dd>True if |rateOfChange| exceeds configured threshold</dd>
+        
+        <dt>msg.method <span class="property-type">string</span></dt>
+        <dd><code>"absolute"</code> or <code>"percentage"</code></dd>
+    </dl>
+    
+    <h3>Prediction Methods</h3>
+    <dl>
+        <dt><b>Linear Regression</b></dt>
+        <dd>Fits a straight line to historical data using least squares.
+        <br><b>Best for:</b> Constant degradation rates
+        <br><b>Formula:</b> y = slope × x + intercept</dd>
+        
+        <dt><b>Exponential Smoothing (Holt)</b></dt>
+        <dd>Double exponential smoothing with trend component.
+        <br><b>Best for:</b> Data with changing trends
+        <br><b>Parameters:</b> α=0.3 (level), β=0.1 (trend)</dd>
+    </dl>
+    
+    <h3>RUL Estimation</h3>
+    <p>To calculate Remaining Useful Life:</p>
+    <ol>
+        <li>Set a <b>Failure Threshold</b> (e.g., vibration > 10 mm/s)</li>
+        <li>Node predicts when this threshold will be reached</li>
+        <li><code>timeToThreshold</code> gives estimated time remaining</li>
+    </ol>
+    <p><b>Example:</b> If vibration is trending up at 0.5 mm/s per hour and threshold is 10 mm/s (current: 6 mm/s), RUL ≈ 8 hours.</p>
+    
+    <h3>Use Cases</h3>
+    <ul>
+        <li><b>Bearing Degradation:</b> Predict when vibration will exceed alarm threshold</li>
+        <li><b>Filter Clogging:</b> Track pressure drop trend, predict replacement time</li>
+        <li><b>Battery Discharge:</b> Estimate remaining runtime</li>
+        <li><b>Temperature Runaway:</b> Detect acceleration in heating rate</li>
+        <li><b>Production Quality:</b> Trend analysis for SPC (Statistical Process Control)</li>
+    </ul>
+</script>

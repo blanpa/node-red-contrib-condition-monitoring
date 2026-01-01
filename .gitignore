@@ -3,8 +3,27 @@ node_modules/
 package-lock.json
 yarn.lock
 
-# Node-RED data directory (Docker volumes)
-node-red-data/
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node-RED data directory (Docker volumes) - except flows.json
+node-red-data/*
+!node-red-data/flows.json
+
+# Trained models (users should train their own or download)
+models/*.onnx
+models/*.tflite
+models/*.keras
+models/*.h5
+models/*.pkl
+models/*.joblib
+models/**/model.*
+models/**/saved_model/
+models/**/*.onnx.data
 
 # Logs
 *.log

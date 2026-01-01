@@ -1,0 +1,11 @@
+{
+  "format": "savedmodel",
+  "directory": "saved_model/",
+  "input_shape": [
+    5
+  ],
+  "input_name": "sensor_input",
+  "output_name": "anomaly_output",
+  "description": "Sensor anomaly detection (TensorFlow SavedModel)",
+  "tf_version": "2.19.0"
+}

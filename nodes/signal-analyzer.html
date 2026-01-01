@@ -1,0 +1,361 @@
+<script type="text/javascript">
+    RED.nodes.registerType('signal-analyzer', {
+        category: 'condition-monitoring',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            mode: { value: "fft" },
+            windowSize: { value: 256 },
+            fftSize: { value: 256 },
+            samplingRate: { value: 1000 },
+            peakThreshold: { value: 0.1 },
+            outputFormat: { value: "peaks" },
+            windowFunction: { value: "hann" },
+            overlapPercent: { value: 50 },
+            minPeakHeight: { value: "" },
+            minPeakDistance: { value: 5 },
+            peakType: { value: "both" },
+            vibOutputMode: { value: "all" },
+            outputTopic: { value: "" },
+            debug: { value: false }
+        },
+        inputs: 1,
+        outputs: 2,
+        outputLabels: ["normal", "anomaly/peak"],
+        icon: "icon.png",
+        label: function() {
+            return this.name || "Signal Analyzer";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        paletteLabel: "Signal Analyzer",
+        oneditprepare: function() {
+            function showModeConfig(mode) {
+                $(".mode-config").hide();
+                $("#config-" + mode).show();
+            }
+            
+            $("#node-input-mode").on("change", function() {
+                showModeConfig($(this).val());
+            });
+            
+            showModeConfig(this.mode || "fft");
+            
+            $(".cm-section-header").on("click", function() {
+                var $content = $(this).next(".cm-section-content");
+                var $icon = $(this).find(".cm-collapse-icon");
+                $content.slideToggle(200);
+                $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
+        }
+    });
+</script>
+
+<style>
+    .cm-section { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
+    .cm-section-header { background: linear-gradient(135deg, #9482f1 0%, #7d6bd3 100%); color: #fff; padding: 10px 14px; font-weight: 500; cursor: pointer; display: flex; align-items: center; justify-content: space-between; }
+    .cm-section-header:hover { background: linear-gradient(135deg, #a896f5 0%, #9482f1 100%); }
+    .cm-section-content { padding: 14px; }
+    .cm-config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .cm-config-item { display: flex; flex-direction: column; }
+    .cm-config-item label { font-size: 11px; color: #666; margin-bottom: 6px; font-weight: 500; }
+    .cm-config-item input, .cm-config-item select { padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+    .cm-help-text { font-size: 10px; color: #888; margin-top: 4px; }
+    .mode-config { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed #ddd; }
+</style>
+
+<script type="text/html" data-template-name="signal-analyzer">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-wave-square"></i> Analysis Mode</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-mode"><i class="fa fa-chart-line"></i> Mode</label>
+                <select id="node-input-mode">
+                    <option value="fft">FFT (Frequency Analysis)</option>
+                    <option value="vibration">Vibration Features</option>
+                    <option value="peaks">Peak Detection</option>
+                </select>
+                <div class="cm-help-text">Select the signal analysis mode</div>
+            </div>
+            
+            <div class="cm-config-item" style="margin-top: 12px;">
+                <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Window Size</label>
+                <input type="number" id="node-input-windowSize" min="8" placeholder="256">
+                <div class="cm-help-text">Number of samples to analyze</div>
+            </div>
+            
+            <!-- FFT Config -->
+            <div id="config-fft" class="mode-config">
+                <h4><i class="fa fa-chart-bar"></i> FFT Settings</h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>FFT Size</label>
+                        <select id="node-input-fftSize">
+                            <option value="64">64</option>
+                            <option value="128">128</option>
+                            <option value="256">256</option>
+                            <option value="512">512</option>
+                            <option value="1024">1024</option>
+                            <option value="2048">2048</option>
+                        </select>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Sampling Rate (Hz)</label>
+                        <input type="number" id="node-input-samplingRate" min="1">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Window Function</label>
+                        <select id="node-input-windowFunction">
+                            <option value="hann">Hann (default)</option>
+                            <option value="hamming">Hamming</option>
+                            <option value="blackman">Blackman</option>
+                            <option value="rectangular">Rectangular (none)</option>
+                        </select>
+                        <div class="cm-help-text">Window function to reduce spectral leakage</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Overlap (%)</label>
+                        <input type="number" id="node-input-overlapPercent" min="0" max="90" value="50">
+                        <div class="cm-help-text">Overlap between consecutive FFT frames (0-90%)</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Peak Threshold (0-1)</label>
+                        <input type="number" id="node-input-peakThreshold" step="0.01" min="0" max="1">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Output Format</label>
+                        <select id="node-input-outputFormat">
+                            <option value="peaks">Peaks Only</option>
+                            <option value="full">Full Spectrum</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Vibration Config -->
+            <div id="config-vibration" class="mode-config">
+                <h4><i class="fa fa-vibrate"></i> Vibration Settings</h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Output Mode</label>
+                        <select id="node-input-vibOutputMode">
+                            <option value="all">All features in one message</option>
+                            <option value="separate">Separate outputs</option>
+                        </select>
+                        <div class="cm-help-text">How to output calculated features</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Peak Detection Config -->
+            <div id="config-peaks" class="mode-config">
+                <h4><i class="fa fa-arrow-up"></i> Peak Detection Settings</h4>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Minimum Peak Height</label>
+                        <input type="number" id="node-input-minPeakHeight" step="any">
+                        <div class="cm-help-text">Leave empty for auto-threshold</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Minimum Peak Distance</label>
+                        <input type="number" id="node-input-minPeakDistance" min="1">
+                        <div class="cm-help-text">Minimum samples between peaks</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Peak Type</label>
+                        <select id="node-input-peakType">
+                            <option value="both">Both (Max & Min)</option>
+                            <option value="positive">Positive (Maxima)</option>
+                            <option value="negative">Negative (Minima)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Advanced Settings -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cog"></i> Advanced Settings</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-grid">
+                <div class="cm-config-item">
+                    <label for="node-input-outputTopic">
+                        <i class="fa fa-tag"></i> Output Topic
+                    </label>
+                    <input type="text" id="node-input-outputTopic" placeholder="Leave empty to preserve original">
+                    <div class="cm-help-text">Set msg.topic on output (empty = keep original)</div>
+                </div>
+                
+                <div class="cm-config-item">
+                    <label for="node-input-debug">
+                        <i class="fa fa-bug"></i> Debug Mode
+                    </label>
+                    <input type="checkbox" id="node-input-debug" style="width: auto; margin-top: 8px;">
+                    <div class="cm-help-text">Log detailed info to Node-RED debug</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="signal-analyzer">
+    <p>A unified node for advanced signal analysis: FFT frequency analysis, vibration feature extraction, and peak detection.</p>
+    
+    <h3>Analysis Modes</h3>
+    <dl>
+        <dt><b>FFT (Frequency Analysis)</b></dt>
+        <dd>Performs Fast Fourier Transform with configurable windowing.
+        <br><b>Window Functions:</b> Hann (default), Hamming, Blackman, Rectangular
+        <br><b>Overlap:</b> 0-90% for continuous spectral analysis
+        <br><b>Outputs:</b> Frequency peaks, dominant frequency, spectral centroid
+        <br><b>Use case:</b> Detect rotating machinery faults (imbalance, misalignment, bearing defects)</dd>
+        
+        <dt><b>Vibration Features</b></dt>
+        <dd>Calculates ISO 10816-compliant vibration metrics.
+        <br><b>Outputs:</b> RMS, Peak-to-Peak, Crest Factor, Kurtosis, Skewness
+        <br><b>Use case:</b> Machine health monitoring, predictive maintenance</dd>
+        
+        <dt><b>Peak Detection</b></dt>
+        <dd>Identifies local maxima and minima with configurable thresholds.
+        <br><b>Outputs:</b> Peak locations, values, and statistics
+        <br><b>Use case:</b> Detect spikes, impacts, or cyclic patterns</dd>
+    </dl>
+    
+    <h3>FFT Configuration</h3>
+    <ul>
+        <li><b>FFT Size:</b> Number of samples (power of 2: 64, 128, 256, 512, 1024, 2048)</li>
+        <li><b>Sample Rate:</b> Samples per second (Hz) for frequency calculation</li>
+        <li><b>Window Function:</b>
+            <ul>
+                <li><b>Hann:</b> Good general-purpose, reduced spectral leakage</li>
+                <li><b>Hamming:</b> Similar to Hann, slightly narrower main lobe</li>
+                <li><b>Blackman:</b> Best sidelobe suppression, wider main lobe</li>
+                <li><b>Rectangular:</b> No windowing, best frequency resolution but more leakage</li>
+            </ul>
+        </li>
+        <li><b>Overlap:</b> Percentage of overlap between consecutive FFT frames (0-90%). Higher overlap = smoother spectral changes but more CPU usage.</li>
+    </ul>
+    
+    <h3>Inputs</h3>
+    <dl>
+        <dt>msg.payload <span class="property-type">number | array</span></dt>
+        <dd>Single sample value (streaming) or array of samples (batch)
+        <br>Values are accumulated until window size is reached</dd>
+        
+        <dt>msg.timestamp <span class="property-type">number</span></dt>
+        <dd>Optional timestamp for peak detection (ms)</dd>
+        
+        <dt>msg.reset <span class="property-type">boolean</span></dt>
+        <dd>Set to <code>true</code> to clear the sample buffer</dd>
+    </dl>
+    
+    <h3>Outputs</h3>
+    <ol>
+        <li><b>Output 1 (Normal)</b> - Regular analysis results</li>
+        <li><b>Output 2 (Anomaly/Peak)</b> - Anomalous vibration or detected peaks</li>
+    </ol>
+    
+    <h3>FFT Mode Output</h3>
+    <dl>
+        <dt>msg.peaks <span class="property-type">array</span></dt>
+        <dd>Detected frequency peaks:
+        <pre>[{
+  "frequency": 50.0,
+  "magnitude": 0.85,
+  "normalized": 1.0
+}, ...]</pre></dd>
+        
+        <dt>msg.dominantFrequency <span class="property-type">number</span></dt>
+        <dd>Frequency with highest magnitude (Hz)</dd>
+        
+        <dt>msg.features <span class="property-type">object</span></dt>
+        <dd>Spectral features:
+        <br>• <code>spectralCentroid</code>: "Center of mass" of spectrum (Hz)
+        <br>• <code>spectralSpread</code>: Frequency distribution width
+        <br>• <code>rms</code>: Overall spectrum energy
+        <br>• <code>crestFactor</code>: Spectral peakedness
+        <br>• <code>totalEnergy</code>: Sum of squared magnitudes</dd>
+        
+        <dt>msg.frequencies, msg.magnitudes <span class="property-type">array</span></dt>
+        <dd>Full spectrum (only if Output Format = "Full")</dd>
+    </dl>
+    
+    <h3>Vibration Mode Output</h3>
+    <p>All features in <code>msg.payload</code> object:</p>
+    <dl>
+        <dt>rms <span class="property-type">number</span></dt>
+        <dd>Root Mean Square - overall vibration level (ISO 10816)</dd>
+        
+        <dt>peakToPeak <span class="property-type">number</span></dt>
+        <dd>Maximum range of vibration</dd>
+        
+        <dt>crestFactor <span class="property-type">number</span></dt>
+        <dd>Peak/RMS ratio. High values (>6) indicate impulsive events.
+        <br><b>Normal:</b> 3-4 | <b>Warning:</b> 5-6 | <b>Critical:</b> >6</dd>
+        
+        <dt>kurtosis <span class="property-type">number</span></dt>
+        <dd>Distribution "peakedness". High values indicate bearing faults.
+        <br><b>Normal:</b> ~3 | <b>Warning:</b> >4 | <b>Critical:</b> >6</dd>
+        
+        <dt>skewness <span class="property-type">number</span></dt>
+        <dd>Distribution asymmetry. Non-zero indicates asymmetric faults.</dd>
+        
+        <dt>formFactor, impulseFactor <span class="property-type">number</span></dt>
+        <dd>Additional shape metrics for advanced analysis</dd>
+        
+        <dt>healthScore <span class="property-type">number</span></dt>
+        <dd>Simplified 0-100 health indicator based on all metrics</dd>
+    </dl>
+    
+    <h3>Peak Detection Output</h3>
+    <dl>
+        <dt>msg.isPeak <span class="property-type">boolean</span></dt>
+        <dd>True if current sample is a detected peak</dd>
+        
+        <dt>msg.peaks <span class="property-type">array</span></dt>
+        <dd>All detected peaks in window:
+        <pre>[{
+  "index": 42,
+  "value": 3.5,
+  "timestamp": 1704067200000,
+  "direction": "positive"
+}, ...]</pre></dd>
+        
+        <dt>msg.stats <span class="property-type">object</span></dt>
+        <dd>Peak statistics:
+        <br>• <code>averagePeakHeight</code>: Mean peak value
+        <br>• <code>maxPeakHeight</code>, <code>minPeakHeight</code>
+        <br>• <code>peakFrequency</code>: Peaks per sample</dd>
+    </dl>
+    
+    <h3>Frequency Analysis Guidelines</h3>
+    <table>
+        <tr><th>Fault Type</th><th>Typical Frequency</th></tr>
+        <tr><td>Imbalance</td><td>1× RPM</td></tr>
+        <tr><td>Misalignment</td><td>2× RPM</td></tr>
+        <tr><td>Looseness</td><td>0.5×, 1×, 2×, 3× RPM</td></tr>
+        <tr><td>Bearing Inner Race</td><td>BPFI × RPM</td></tr>
+        <tr><td>Bearing Outer Race</td><td>BPFO × RPM</td></tr>
+    </table>
+    
+    <h3>Use Cases</h3>
+    <ul>
+        <li><b>Rotating Machinery:</b> FFT to detect bearing, gear, or motor faults</li>
+        <li><b>Pump Monitoring:</b> Vibration features for cavitation detection</li>
+        <li><b>Impact Detection:</b> Peak detection for mechanical impacts</li>
+        <li><b>Predictive Maintenance:</b> Track RMS trend over time</li>
+    </ul>
+</script>

@@ -1,0 +1,13 @@
+{
+  "name": "defect-detector",
+  "version": "2.0.0",
+  "type": "onnx",
+  "description": "Simple defect classification from feature vectors",
+  "inputShape": [
+    1,
+    64
+  ],
+  "trainedOn": "Realistic synthetic industrial data",
+  "createdAt": "2026-01-01T00:29:22.881382",
+  "framework": "onnx"
+}
