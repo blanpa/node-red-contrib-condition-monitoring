@@ -11,14 +11,15 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## Project Status: v0.3.0 Beta
+## Project Status: v0.2.0 Beta
 
-**Major release - Streamlined architecture with 8 powerful nodes**
+**Major Consolidation Release - Streamlined architecture with 8 powerful nodes**
 
 - **8 Unified Nodes** - PCA and enhanced core nodes
-- **Advanced Diagnostics** - Envelope spectrum, motor current analysis, gearbox cepstrum
+- **Advanced Diagnostics** - Envelope spectrum, cepstrum analysis for gearbox faults
 - **Reliability Analysis** - Weibull distribution with B-life (B1, B5, B10, B50) integrated in Trend Predictor
-- **Consolidated Design** - All functionality accessible through unified nodes (no redundant standalone nodes)
+- **ML Inference** - ONNX, TensorFlow.js, Keras, scikit-learn, TFLite, Google Coral support
+- **Comprehensive Testing** - 83 unit tests with Jest framework
 
 ---
 
@@ -169,6 +170,12 @@ All nodes are in the **`condition-monitoring`** category.
 - Status: healthy/warning/critical/failed
 - **Degradation models:** Linear, Exponential, Weibull (reliability-based)
 
+**Weibull Analysis:**
+- Automatic Weibull parameter estimation (β, η)
+- **B-Life calculation** (B1, B5, B10, B50) - time when X% have failed
+- Failure mode classification (infant_mortality, useful_life, wear_out, rapid_wear_out)
+- MTTF calculation
+
 **Example:**
 ```
 [Temperature] → [Trend Predictor (RUL)] → "RUL: 48.5h (95% confidence)"
@@ -268,7 +275,7 @@ What do you want to detect?
 ```
 [Vibration] → [Signal Analyzer (Vibration)] → Features
             → [Signal Analyzer (FFT)] → Frequencies
-            → [Signal Analyzer (Peaks)] → Impacts
+            → [Signal Analyzer (Envelope)] → Bearing Faults
             → [Anomaly Detector (IQR)] → Outliers
 ```
 
@@ -280,7 +287,7 @@ What do you want to detect?
 
 ---
 
-## Migration Guide (v0.x → v1.0)
+## Migration Guide (v0.1.x → v0.2.0)
 
 ### Node Mapping
 
@@ -481,7 +488,6 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - [x] Google Coral / Edge TPU support
 - [x] PCA Anomaly Detection
 - [x] Bearing fault detection via Signal Analyzer (Envelope Mode)
-- [x] Motor current analysis via Signal Analyzer (FFT Mode)
 - [x] Weibull reliability analysis
 - [x] Cepstrum analysis for gearbox diagnostics
 - [x] Mahalanobis distance for multivariate anomalies

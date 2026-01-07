@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.3.0] - 2026-01-01 - Advanced Diagnostics Release
+## [0.2.0] - 2026-01-07 - Major Consolidation Release
+
+### 🚀 Breaking Changes
+
+**18 nodes consolidated into 8 powerful nodes:**
+
+| Old Nodes | New Node | Selection |
+|-----------|----------|-----------|
+| zscore-anomaly, iqr-anomaly, threshold-anomaly, percentile-anomaly, ema-anomaly, cusum-anomaly, moving-average-anomaly | **anomaly-detector** | `method` dropdown |
+| multi-value-splitter, multi-value-anomaly, correlation-anomaly | **multi-value-processor** | `mode` dropdown |
+| fft-analysis, vibration-features, peak-detection | **signal-analyzer** | `mode` dropdown |
+| trend-prediction, rate-of-change | **trend-predictor** | `mode` dropdown |
+| isolation-forest-anomaly | **isolation-forest** | (unchanged) |
+| health-index | **health-index** | (unchanged) |
+| ml-inference | **ml-inference** | (unchanged) |
+| (new) | **pca-anomaly** | Principal Component Analysis |
 
 ### 🚀 New Nodes
 
@@ -17,113 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Contribution analysis identifies which sensors cause anomalies
 - SPE (Squared Prediction Error) and T² (Hotelling's) statistics
 - Ideal for correlated multi-sensor data (5+ sensors)
-
-### ✨ Enhanced Existing Nodes
-
-#### Signal Analyzer
-- **Cepstrum Mode** - Gearbox fault detection using cepstrum (quefrency domain)
-  - Detects gear mesh frequencies and sidebands
-  - Rahmonic (cepstrum peak) detection
-- **Vibration Mode Enhancements:**
-  - **Autocorrelation (ACF)** - Detects periodicity in signals
-  - **Sample Entropy** - Measures signal complexity/regularity
-  - **Periodicity Detection** - Identifies periodic patterns with strength metric
-
-#### Trend Predictor - Weibull Model
-- **Weibull reliability analysis** for RUL prediction
-- New degradation model option: Linear, Exponential, Weibull
-- Automatic Weibull parameter estimation (β, η)
-- **B-Life calculation** (B1, B5, B10, B50) - time when X% have failed
-- Failure mode classification with interpretation (infant_mortality, useful_life, wear_out, rapid_wear_out)
-- MTTF calculation
-
-#### Multi-Value Processor
-- **Mahalanobis Distance** - Multivariate anomaly detection accounting for sensor correlations
-  - New method in Analyze mode
-  - **Severity levels** (normal, warning, critical) with dual thresholds
-  - Covariance-aware anomaly threshold
-- **Cross-Correlation** - Time lag detection between two sensors
-  - Finds optimal lag and correlation strength
-  - Detects propagation delays (e.g., temperature waves through pipes)
-  - Interpretation of lag direction (which sensor leads/lags)
-
-### 📝 Summary
-- **1 new specialized node** (PCA Anomaly Detection)
-- **5 major enhancements** to existing nodes:
-  - Signal Analyzer: Autocorrelation, Sample Entropy, Periodicity, Cepstrum
-  - Trend Predictor: Weibull B-Life
-  - Multi-Value Processor: Mahalanobis with severity, Cross-Correlation
-- **Consolidated architecture** - All functionality integrated into core nodes
-- Total nodes in package: **8**
-- **83 unit tests** - Comprehensive test coverage
-- Comprehensive help documentation for all features
-
----
-
-## [0.2.1] - 2026-01-01 - Feature Enhancement Release
-
-### ✨ New Features
-
-#### Signal Analyzer
-- **Envelope Analysis Mode** - Bearing fault detection using envelope spectrum
-  - Bandpass filtering with configurable frequency range
-  - Automatic detection of BPFO, BPFI, BSF, FTF fault frequencies
-  - Harmonic analysis (up to 3x fundamental)
-  - Configurable shaft speed and bearing parameters
-
-#### Trend Predictor  
-- **Dedicated RUL Mode** - Remaining Useful Life calculation with confidence intervals
-  - Configurable failure and warning thresholds
-  - Multiple time units (hours, minutes, days, cycles)
-  - Confidence intervals based on R-squared
-  - Status output: healthy/warning/critical/failed
-  - Degradation rate and percentage tracking
-
-#### Health Index
-- **Visual Threshold Configuration** - Slider-based sensor weight editor
-  - Interactive add/remove sensor controls
-  - Visual threshold bar showing status zones
-  - Configurable healthy/warning/degraded/critical thresholds
-  - All thresholds now output in msg.thresholds
-
-#### Multi-Value Processor
-- **Aggregate Mode** - Reduce multiple values to single statistic
-  - Methods: Mean, Median, Min, Max, Sum, Range, StdDev
-  - Optional output of all statistics
-  - Preserves original values when needed
-
-#### Isolation Forest
-- **Online Learning Modes** - Adaptive anomaly detection
-  - Batch mode (original behavior)
-  - Incremental mode with configurable retrain interval
-  - Adaptive mode with threshold auto-adjustment
-  - Extended output with sample count and retrain info
-
-### 🐛 Bug Fixes
-- Fixed Health Index not routing "degraded" status to anomaly output
-- Fixed test case for anomaly detection with high zScore
-
-### 🧪 Testing
-- All 59 unit tests passing
-- Plausibility check of industrial test data values
-
----
-
-## [0.2.0] - 2026-01-01 - Major Consolidation Release
-
-### 🚀 Breaking Changes
-
-**18 nodes consolidated into 7 powerful nodes:**
-
-| Old Nodes | New Node | Selection |
-|-----------|----------|-----------|
-| zscore-anomaly, iqr-anomaly, threshold-anomaly, percentile-anomaly, ema-anomaly, cusum-anomaly, moving-average-anomaly | **anomaly-detector** | `method` dropdown |
-| multi-value-splitter, multi-value-anomaly, correlation-anomaly | **multi-value-processor** | `mode` dropdown |
-| fft-analysis, vibration-features, peak-detection | **signal-analyzer** | `mode` dropdown |
-| trend-prediction, rate-of-change | **trend-predictor** | `method` dropdown |
-| isolation-forest-anomaly | **isolation-forest** | (unchanged) |
-| health-index | **health-index** | (unchanged) |
-| ml-inference | **ml-inference** | (unchanged) |
 
 ### ✨ New Features
 
@@ -142,17 +50,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - URL-based loading with Bearer/Basic auth
 - **Python Bridge** for Keras, sklearn, TFLite inference
 
-#### All Nodes
-- **`outputTopic`** - Set custom msg.topic on output
-- **`debug` mode** - Detailed logging to Node-RED debug
+#### Signal Analyzer
+- **Envelope Analysis Mode** - Bearing fault detection using envelope spectrum
+  - Bandpass filtering with configurable frequency range
+  - Automatic detection of BPFO, BPFI, BSF, FTF fault frequencies
+  - Harmonic analysis (up to 3x fundamental)
+  - Configurable shaft speed and bearing parameters
+- **Cepstrum Mode** - Gearbox fault detection using cepstrum (quefrency domain)
+  - Detects gear mesh frequencies and sidebands
+  - Rahmonic (cepstrum peak) detection
+- **Vibration Mode Enhancements:**
+  - **Autocorrelation (ACF)** - Detects periodicity in signals
+  - **Sample Entropy** - Measures signal complexity/regularity
+  - **Periodicity Detection** - Identifies periodic patterns with strength metric
+- **`windowFunction`** - Hann, Hamming, Blackman, Rectangular
+- **`overlapPercent`** - 0-90% overlap for continuous analysis
+
+#### Trend Predictor
+- **Dedicated RUL Mode** - Remaining Useful Life calculation with confidence intervals
+  - Configurable failure and warning thresholds
+  - Multiple time units (hours, minutes, days, cycles)
+  - Confidence intervals based on R-squared
+  - Status output: healthy/warning/critical/failed
+  - Degradation rate and percentage tracking
+- **Weibull reliability analysis** for RUL prediction
+  - New degradation model option: Linear, Exponential, Weibull
+  - Automatic Weibull parameter estimation (β, η)
+  - **B-Life calculation** (B1, B5, B10, B50) - time when X% have failed
+  - Failure mode classification with interpretation (infant_mortality, useful_life, wear_out, rapid_wear_out)
+  - MTTF calculation
+
+#### Multi-Value Processor
+- **Aggregate Mode** - Reduce multiple values to single statistic
+  - Methods: Mean, Median, Min, Max, Sum, Range, StdDev
+  - Optional output of all statistics
+  - Preserves original values when needed
+- **Mahalanobis Distance** - Multivariate anomaly detection accounting for sensor correlations
+  - New method in Analyze mode
+  - **Severity levels** (normal, warning, critical) with dual thresholds
+  - Covariance-aware anomaly threshold
+- **Cross-Correlation** - Time lag detection between two sensors
+  - Finds optimal lag and correlation strength
+  - Detects propagation delays (e.g., temperature waves through pipes)
+  - Interpretation of lag direction (which sensor leads/lags)
 
 #### Isolation Forest
+- **Online Learning Modes** - Adaptive anomaly detection
+  - Batch mode (original behavior)
+  - Incremental mode with configurable retrain interval
+  - Adaptive mode with threshold auto-adjustment
+  - Extended output with sample count and retrain info
 - **`numEstimators`** - Number of isolation trees (default: 100)
 - **`maxSamples`** - Samples per tree (default: 256)
 
-#### Signal Analyzer (FFT)
-- **`windowFunction`** - Hann, Hamming, Blackman, Rectangular
-- **`overlapPercent`** - 0-90% overlap for continuous analysis
+#### Health Index
+- **Visual Threshold Configuration** - Slider-based sensor weight editor
+  - Interactive add/remove sensor controls
+  - Visual threshold bar showing status zones
+  - Configurable healthy/warning/degraded/critical thresholds
+  - All thresholds now output in msg.thresholds
+
+#### All Nodes
+- **`outputTopic`** - Set custom msg.topic on output
+- **`debug` mode** - Detailed logging to Node-RED debug
 
 ### 📦 Pre-trained Models
 
@@ -177,13 +137,13 @@ All models trained on realistic synthetic industrial data:
 
 ### 🧪 Testing
 
-- **7 Test Suites** - One per consolidated node
-- **59 Tests** - All passing
+- **8 Test Suites** - One per node
+- **83 Tests** - All passing
 - **Jest Framework** with node-red-node-test-helper
 
 ### 📝 Documentation
 
-- Updated README for 7-node architecture
+- Updated README for 8-node architecture
 - Comprehensive models/README.md
 - Example flows in flows.json with 12 tabs
 
@@ -349,10 +309,13 @@ All features are working and ready for real-world testing. API may change before
 
 ## Version Numbering
 
-- **0.1.0** - Initial beta release (current) ✅
-- **0.2.0 - 0.8.0** - Beta updates with bug fixes and improvements
+- **0.1.0** - Initial beta release ✅
+- **0.1.1** - Bug fix release ✅
+- **0.1.2** - Quality & Testing release ✅
+- **0.2.0** - Major Consolidation release (current) ✅
+- **0.3.0 - 0.8.0** - Beta updates with bug fixes and improvements
 - **0.9.0** - Release candidate (feature freeze)
-- **1.0.0** - First stable release (target: Q2 2025)
+- **1.0.0** - First stable release (target: Q2 2026)
 - **1.x.x** - Stable releases with backward compatibility
 - **2.0.0+** - Major releases (may include breaking changes)
 
@@ -369,4 +332,3 @@ During the testing phase, feedback is highly appreciated:
 ---
 
 **Note:** This project is under active development. Use in production with caution and proper testing.
-
