@@ -11,11 +11,14 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## Project Status: v0.2.0 Beta
+## Project Status: v0.2.1 Beta
 
-**Major Consolidation Release - Streamlined architecture with 8 powerful nodes**
+**Performance & Reliability Update**
 
 - **8 Unified Nodes** - PCA and enhanced core nodes
+- **High-Performance FFT** - Radix-4 Cooley-Tukey algorithm via fft.js (O(n log n) instead of O(n²))
+- **Persistent Python Bridge** - 10-100x faster ML inference for Python models (Keras, sklearn, TFLite)
+- **State Persistence** - Optional context-based state saving across Node-RED restarts
 - **Advanced Diagnostics** - Envelope spectrum, cepstrum analysis for gearbox faults
 - **Reliability Analysis** - Weibull distribution with B-life (B1, B5, B10, B50) integrated in Trend Predictor
 - **ML Inference** - ONNX, TensorFlow.js, Keras, scikit-learn, TFLite, Google Coral support
@@ -39,13 +42,14 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 - **8 Powerful Nodes** - Complete condition monitoring toolkit
 - **10 Anomaly Detection Methods** - Z-Score, IQR, Moving Average, Threshold, Percentile, EMA, CUSUM, Isolation Forest, PCA, Mahalanobis
-- **Signal Analysis** - FFT, Vibration Features (RMS, Crest Factor, Kurtosis), Peak Detection, Envelope Analysis, Cepstrum, Autocorrelation (ACF), Sample Entropy, Periodicity Detection
+- **Signal Analysis** - High-performance FFT (Radix-4), Vibration Features (RMS, Crest Factor, Kurtosis), Peak Detection, Envelope Analysis, Cepstrum, Autocorrelation (ACF), Sample Entropy, Periodicity Detection
 - **Correlation Analysis** - Pearson, Spearman, Cross-Correlation with time lag detection
 - **Gearbox Diagnostics** - Cepstrum analysis for gear mesh faults
 - **Reliability Analysis** - Weibull distribution, B-life, MTTF, RUL
 - **Trend Prediction** - Linear Regression, Exponential Smoothing, Rate of Change
 - **Multi-Value Processing** - Split, Analyze, Correlate, Aggregate multiple sensors
-- **ML Inference** - TensorFlow.js, ONNX, Keras, scikit-learn, TFLite, Google Coral
+- **ML Inference** - TensorFlow.js, ONNX, Keras, scikit-learn, TFLite, Google Coral (with persistent Python bridge)
+- **State Persistence** - Optional buffer/statistics persistence across restarts
 
 ## Installation
 
@@ -438,6 +442,7 @@ docker-compose -f docker-compose.dev.yml up
 - Node.js >= 14.0.0
 
 ### Core Dependencies
+- `fft.js` - High-performance FFT (Radix-4 Cooley-Tukey algorithm)
 - `ml-isolation-forest` - For Isolation Forest node
 - `simple-statistics` - For statistical functions
 
@@ -451,6 +456,42 @@ For TFLite, Keras, and scikit-learn models:
 pip install numpy tensorflow scikit-learn joblib tflite-runtime
 # Use numpy<2 for tflite-runtime compatibility
 pip install "numpy<2"
+```
+
+---
+
+## Performance Features
+
+### High-Performance FFT
+
+The Signal Analyzer uses `fft.js` with the Radix-4 Cooley-Tukey algorithm:
+- **O(n log n)** complexity vs O(n²) for naive DFT
+- **10-100x faster** for large signal buffers (2048+ samples)
+- Automatic power-of-2 sizing and windowing (Hann, Hamming, Blackman)
+
+### Persistent Python Bridge
+
+For Python-based ML models (Keras, scikit-learn, TFLite), a persistent subprocess is maintained:
+- **Single Python process** shared across all ML Inference nodes
+- **Model caching** - models stay loaded in memory between inferences
+- **10-100x faster** compared to spawning a new process per inference
+- **Automatic restart** if the bridge crashes
+
+Check bridge status via API: `GET /ml-inference/python-bridge`
+
+### State Persistence
+
+Enable **Persist State** in node configuration to save:
+- Data buffers and training history
+- Calculated statistics (mean, std, thresholds)
+- Trained model states (PCA, Isolation Forest)
+
+States survive Node-RED restarts when using file-based context storage:
+```javascript
+// settings.js
+contextStorage: {
+    default: { module: "localfilesystem" }
+}
 ```
 Or use the provided Docker image which includes all dependencies.
 

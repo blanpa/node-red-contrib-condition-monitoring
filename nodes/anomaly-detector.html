@@ -35,7 +35,8 @@
             maMethod: { value: "stddev" },
             // Advanced
             outputTopic: { value: "" },
-            debug: { value: false }
+            debug: { value: false },
+            persistState: { value: false }
         },
         inputs: 1,
         outputs: 2,
@@ -382,6 +383,14 @@
                     </label>
                     <input type="checkbox" id="node-input-debug" style="width: auto; margin-top: 8px;">
                     <div class="cm-help-text">Log detailed info to Node-RED debug</div>
+                </div>
+                
+                <div class="cm-config-item">
+                    <label for="node-input-persistState">
+                        <i class="fa fa-save"></i> Persist State
+                    </label>
+                    <input type="checkbox" id="node-input-persistState" style="width: auto; margin-top: 8px;">
+                    <div class="cm-help-text">Save buffer/statistics across Node-RED restarts</div>
                 </div>
             </div>
         </div>

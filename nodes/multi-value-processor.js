@@ -1,6 +1,14 @@
 module.exports = function(RED) {
     "use strict";
     
+    // Import ml-matrix for robust matrix operations (Mahalanobis distance)
+    var Matrix = null;
+    try {
+        Matrix = require('ml-matrix').Matrix;
+    } catch (err) {
+        // ml-matrix not available - will use fallback implementation
+    }
+    
     function MultiValueProcessorNode(config) {
         RED.nodes.createNode(this, config);
         var node = this;
@@ -184,7 +192,7 @@ module.exports = function(RED) {
             };
         }
         
-        // Mahalanobis distance calculation
+        // Mahalanobis distance calculation using ml-matrix (numerically stable)
         function calculateMahalanobisDistance(sample, mean, covMatrix) {
             var n = sample.length;
             
@@ -194,8 +202,35 @@ module.exports = function(RED) {
                 diff.push(sample[i] - mean[i]);
             }
             
-            // Invert covariance matrix (simple 2x2 or use regularization)
-            var invCov = invertMatrix(covMatrix);
+            // Use ml-matrix for robust matrix inversion if available
+            if (Matrix) {
+                try {
+                    // Create Matrix objects
+                    var covMat = new Matrix(covMatrix);
+                    var diffVec = Matrix.columnVector(diff);
+                    
+                    // Add regularization to avoid singular matrix issues
+                    var regularization = 1e-6;
+                    for (var i = 0; i < n; i++) {
+                        covMat.set(i, i, covMat.get(i, i) + regularization);
+                    }
+                    
+                    // Use pseudoInverse for better numerical stability
+                    var invCov = covMat.pseudoInverse();
+                    
+                    // Calculate (x-μ)' * Σ^-1 * (x-μ)
+                    var temp = invCov.mmul(diffVec);
+                    var d2 = diffVec.transpose().mmul(temp).get(0, 0);
+                    
+                    return Math.sqrt(Math.max(0, d2));
+                } catch (err) {
+                    // Fall back to manual implementation
+                    debugLog("ml-matrix failed, using fallback: " + err.message);
+                }
+            }
+            
+            // Fallback: Manual implementation
+            var invCov = invertMatrixFallback(covMatrix);
             if (!invCov) return null;
             
             // Calculate (x-μ)' * Σ^-1 * (x-μ)
@@ -216,8 +251,8 @@ module.exports = function(RED) {
             return Math.sqrt(Math.max(0, d2));
         }
         
-        // Simple matrix inversion using Gauss-Jordan for small matrices
-        function invertMatrix(matrix) {
+        // Fallback matrix inversion using Gauss-Jordan (for when ml-matrix is not available)
+        function invertMatrixFallback(matrix) {
             var n = matrix.length;
             
             // Create augmented matrix [A|I]
@@ -232,7 +267,7 @@ module.exports = function(RED) {
                 }
             }
             
-            // Gauss-Jordan elimination
+            // Gauss-Jordan elimination with partial pivoting
             for (var col = 0; col < n; col++) {
                 // Find pivot
                 var maxRow = col;

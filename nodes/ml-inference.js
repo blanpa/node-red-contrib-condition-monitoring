@@ -7,8 +7,77 @@ module.exports = function(RED) {
     const https = require('https');
     const http = require('http');
     
+    // Import persistent Python bridge
+    const { getGlobalBridge, shutdownGlobalBridge } = require('./python-bridge-manager');
+    
     // Model storage directory
     const MODELS_DIR = path.join(RED.settings.userDir || os.homedir(), 'ml-models');
+    
+    // Global Python bridge instance (shared across all ml-inference nodes)
+    let pythonBridge = null;
+    let pythonBridgeReady = false;
+    let pythonBridgeError = null;
+    
+    // Initialize Python bridge on first node creation
+    async function ensurePythonBridge() {
+        if (pythonBridge && pythonBridgeReady) {
+            return pythonBridge;
+        }
+        
+        if (pythonBridgeError) {
+            throw pythonBridgeError;
+        }
+        
+        if (!pythonBridge) {
+            pythonBridge = getGlobalBridge();
+            
+            pythonBridge.on('stderr', (msg) => {
+                // Log Python stderr for debugging
+                if (msg && !msg.includes('FutureWarning') && !msg.includes('DeprecationWarning')) {
+                    RED.log.debug('[PythonBridge] ' + msg);
+                }
+            });
+            
+            pythonBridge.on('exit', (info) => {
+                RED.log.warn('[PythonBridge] Exited: ' + JSON.stringify(info));
+                pythonBridgeReady = false;
+                // Will auto-restart on next request
+            });
+            
+            try {
+                await pythonBridge.start();
+                pythonBridgeReady = true;
+                RED.log.info('[PythonBridge] Started successfully');
+            } catch (err) {
+                pythonBridgeError = err;
+                pythonBridge = null;
+                throw err;
+            }
+        }
+        
+        return pythonBridge;
+    }
+    
+    // Shutdown bridge on Node-RED close
+    // Use once() to prevent multiple registrations across test runs
+    // Store handler reference for proper cleanup
+    if (!RED._pythonBridgeShutdownHandler) {
+        RED._pythonBridgeShutdownHandler = async function() {
+            if (pythonBridge) {
+                try {
+                    await shutdownGlobalBridge();
+                    RED.log.info('[PythonBridge] Shutdown complete');
+                } catch (err) {
+                    RED.log.warn('[PythonBridge] Shutdown error: ' + err.message);
+                }
+                pythonBridge = null;
+                pythonBridgeReady = false;
+            }
+            // Reset handler reference after execution
+            RED._pythonBridgeShutdownHandler = null;
+        };
+        RED.events.once('flows:stopped', RED._pythonBridgeShutdownHandler);
+    }
     
     // Model Metadata Management
     function getModelMetadataPath(modelPath) {
@@ -450,7 +519,7 @@ module.exports = function(RED) {
             return session;
         }
         
-        // Load TFLite/Coral model using Python bridge
+        // Load TFLite/Coral model using persistent Python bridge
         async function loadCoralModel(modelPath) {
             const fullPath = path.isAbsolute(modelPath) ? modelPath : path.join(process.cwd(), modelPath);
             
@@ -458,101 +527,36 @@ module.exports = function(RED) {
                 throw new Error("TFLite model file not found: " + fullPath);
             }
             
-            // Check for Python and tflite-runtime
-            const { spawn } = require('child_process');
+            // Get or start the persistent Python bridge
+            const bridge = await ensurePythonBridge();
             
-            return new Promise((resolve, reject) => {
-                // Try to find Python
-                const pythonCandidates = ['python3', 'python'];
-                let pythonPath = null;
-                
-                const checkPython = (cmd, callback) => {
-                    const proc = spawn(cmd, ['--version'], { stdio: 'pipe' });
-                    proc.on('close', (code) => callback(code === 0));
-                    proc.on('error', () => callback(false));
-                };
-                
-                const tryNextPython = (index) => {
-                    if (index >= pythonCandidates.length) {
-                        reject(new Error("TFLite requires Python with tflite-runtime. Install: pip install tflite-runtime"));
-                        return;
+            // Generate a unique model ID for this node
+            const modelId = 'tflite_' + path.basename(fullPath) + '_' + node.id;
+            
+            // Load model into the persistent bridge
+            await bridge.loadModel(fullPath, modelId);
+            
+            return {
+                type: 'tflite',
+                modelPath: fullPath,
+                modelId: modelId,
+                usePersistentBridge: true,
+                predict: async function(inputData) {
+                    const bridge = await ensurePythonBridge();
+                    return bridge.predict(modelId, inputData);
+                },
+                unload: async function() {
+                    try {
+                        const bridge = await ensurePythonBridge();
+                        await bridge.unloadModel(modelId);
+                    } catch (err) {
+                        // Ignore unload errors
                     }
-                    
-                    checkPython(pythonCandidates[index], (found) => {
-                        if (found) {
-                            pythonPath = pythonCandidates[index];
-                            
-                            // Return a proxy object that can run inference via Python
-                            resolve({
-                                type: 'tflite',
-                                modelPath: fullPath,
-                                pythonPath: pythonPath,
-                                predict: async function(inputData) {
-                                    return new Promise((resolvePredict, rejectPredict) => {
-                                        const pythonCode = `
-import sys
-import json
-import numpy as np
-try:
-    import tflite_runtime.interpreter as tflite
-except ImportError:
-    import tensorflow.lite as tflite
-
-interpreter = tflite.Interpreter(model_path="${fullPath.replace(/\\/g, '/')}")
-interpreter.allocate_tensors()
-
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
-
-input_data = np.array(json.loads(sys.argv[1]), dtype=np.float32)
-if len(input_data.shape) == 1:
-    input_data = input_data.reshape(1, -1)
-
-interpreter.set_tensor(input_details[0]['index'], input_data)
-interpreter.invoke()
-
-output_data = interpreter.get_tensor(output_details[0]['index'])
-print(json.dumps(output_data.tolist()))
-`;
-                                        const proc = spawn(pythonPath, ['-c', pythonCode, JSON.stringify(inputData)], {
-                                            stdio: ['pipe', 'pipe', 'pipe']
-                                        });
-                                        
-                                        let stdout = '';
-                                        let stderr = '';
-                                        
-                                        proc.stdout.on('data', (data) => { stdout += data.toString(); });
-                                        proc.stderr.on('data', (data) => { stderr += data.toString(); });
-                                        
-                                        proc.on('close', (code) => {
-                                            if (code === 0 && stdout.trim()) {
-                                                try {
-                                                    resolvePredict(JSON.parse(stdout.trim()));
-                                                } catch (e) {
-                                                    rejectPredict(new Error("Failed to parse TFLite output: " + stdout));
-                                                }
-                                            } else {
-                                                rejectPredict(new Error("TFLite inference failed: " + stderr));
-                                            }
-                                        });
-                                        
-                                        proc.on('error', (err) => {
-                                            rejectPredict(new Error("Failed to run TFLite inference: " + err.message));
-                                        });
-                                    });
-                                }
-                            });
-                        } else {
-                            tryNextPython(index + 1);
-                        }
-                    });
-                };
-                
-                tryNextPython(0);
-            });
+                }
+            };
         }
         
-        // Load Keras model (.keras, .h5) using Python bridge
+        // Load Keras model (.keras, .h5) using persistent Python bridge
         async function loadKerasModel(modelPath) {
             const fullPath = path.isAbsolute(modelPath) ? modelPath : path.join(process.cwd(), modelPath);
             
@@ -560,93 +564,36 @@ print(json.dumps(output_data.tolist()))
                 throw new Error("Keras model file not found: " + fullPath);
             }
             
-            const { spawn } = require('child_process');
+            // Get or start the persistent Python bridge
+            const bridge = await ensurePythonBridge();
             
-            return new Promise((resolve, reject) => {
-                const pythonCandidates = ['python3', 'python'];
-                
-                const checkPython = (cmd, callback) => {
-                    const proc = spawn(cmd, ['--version'], { stdio: 'pipe' });
-                    proc.on('close', (code) => callback(code === 0));
-                    proc.on('error', () => callback(false));
-                };
-                
-                const tryNextPython = (index) => {
-                    if (index >= pythonCandidates.length) {
-                        reject(new Error("Keras requires Python with tensorflow/keras. Install: pip install tensorflow"));
-                        return;
+            // Generate a unique model ID for this node
+            const modelId = 'keras_' + path.basename(fullPath) + '_' + node.id;
+            
+            // Load model into the persistent bridge
+            await bridge.loadModel(fullPath, modelId);
+            
+            return {
+                type: 'keras',
+                modelPath: fullPath,
+                modelId: modelId,
+                usePersistentBridge: true,
+                predict: async function(inputData) {
+                    const bridge = await ensurePythonBridge();
+                    return bridge.predict(modelId, inputData);
+                },
+                unload: async function() {
+                    try {
+                        const bridge = await ensurePythonBridge();
+                        await bridge.unloadModel(modelId);
+                    } catch (err) {
+                        // Ignore unload errors
                     }
-                    
-                    checkPython(pythonCandidates[index], (found) => {
-                        if (found) {
-                            const pythonPath = pythonCandidates[index];
-                            
-                            resolve({
-                                type: 'keras',
-                                modelPath: fullPath,
-                                pythonPath: pythonPath,
-                                predict: async function(inputData) {
-                                    return new Promise((resolvePredict, rejectPredict) => {
-                                        const pythonCode = `
-import sys
-import json
-import numpy as np
-import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
-try:
-    from tensorflow import keras
-except ImportError:
-    import keras
-
-model = keras.models.load_model("${fullPath.replace(/\\/g, '/')}")
-
-input_data = np.array(json.loads(sys.argv[1]), dtype=np.float32)
-if len(input_data.shape) == 1:
-    input_data = input_data.reshape(1, -1)
-
-prediction = model.predict(input_data, verbose=0)
-print(json.dumps(prediction.tolist()))
-`;
-                                        const proc = spawn(pythonPath, ['-c', pythonCode, JSON.stringify(inputData)], {
-                                            stdio: ['pipe', 'pipe', 'pipe']
-                                        });
-                                        
-                                        let stdout = '';
-                                        let stderr = '';
-                                        
-                                        proc.stdout.on('data', (data) => { stdout += data.toString(); });
-                                        proc.stderr.on('data', (data) => { stderr += data.toString(); });
-                                        
-                                        proc.on('close', (code) => {
-                                            if (code === 0 && stdout.trim()) {
-                                                try {
-                                                    resolvePredict(JSON.parse(stdout.trim()));
-                                                } catch (e) {
-                                                    rejectPredict(new Error("Failed to parse Keras output: " + stdout));
-                                                }
-                                            } else {
-                                                rejectPredict(new Error("Keras inference failed: " + stderr));
-                                            }
-                                        });
-                                        
-                                        proc.on('error', (err) => {
-                                            rejectPredict(new Error("Failed to run Keras inference: " + err.message));
-                                        });
-                                    });
-                                }
-                            });
-                        } else {
-                            tryNextPython(index + 1);
-                        }
-                    });
-                };
-                
-                tryNextPython(0);
-            });
+                }
+            };
         }
         
-        // Load scikit-learn model (.pkl, .joblib) using Python bridge
+        // Load scikit-learn model (.pkl, .joblib) using persistent Python bridge
         async function loadSklearnModel(modelPath) {
             const fullPath = path.isAbsolute(modelPath) ? modelPath : path.join(process.cwd(), modelPath);
             
@@ -654,97 +601,33 @@ print(json.dumps(prediction.tolist()))
                 throw new Error("scikit-learn model file not found: " + fullPath);
             }
             
-            const { spawn } = require('child_process');
-            const ext = path.extname(fullPath).toLowerCase();
+            // Get or start the persistent Python bridge
+            const bridge = await ensurePythonBridge();
             
-            return new Promise((resolve, reject) => {
-                const pythonCandidates = ['python3', 'python'];
-                
-                const checkPython = (cmd, callback) => {
-                    const proc = spawn(cmd, ['--version'], { stdio: 'pipe' });
-                    proc.on('close', (code) => callback(code === 0));
-                    proc.on('error', () => callback(false));
-                };
-                
-                const tryNextPython = (index) => {
-                    if (index >= pythonCandidates.length) {
-                        reject(new Error("scikit-learn requires Python with sklearn. Install: pip install scikit-learn joblib"));
-                        return;
+            // Generate a unique model ID for this node
+            const modelId = 'sklearn_' + path.basename(fullPath) + '_' + node.id;
+            
+            // Load model into the persistent bridge
+            await bridge.loadModel(fullPath, modelId);
+            
+            return {
+                type: 'sklearn',
+                modelPath: fullPath,
+                modelId: modelId,
+                usePersistentBridge: true,
+                predict: async function(inputData) {
+                    const bridge = await ensurePythonBridge();
+                    return bridge.predict(modelId, inputData);
+                },
+                unload: async function() {
+                    try {
+                        const bridge = await ensurePythonBridge();
+                        await bridge.unloadModel(modelId);
+                    } catch (err) {
+                        // Ignore unload errors
                     }
-                    
-                    checkPython(pythonCandidates[index], (found) => {
-                        if (found) {
-                            const pythonPath = pythonCandidates[index];
-                            const loaderModule = ext === '.joblib' ? 'joblib' : 'pickle';
-                            
-                            resolve({
-                                type: 'sklearn',
-                                modelPath: fullPath,
-                                pythonPath: pythonPath,
-                                predict: async function(inputData) {
-                                    return new Promise((resolvePredict, rejectPredict) => {
-                                        const pythonCode = `
-import sys
-import json
-import numpy as np
-${ext === '.joblib' ? 'import joblib' : 'import pickle'}
-
-# Load model
-${ext === '.joblib' 
-    ? `model = joblib.load("${fullPath.replace(/\\/g, '/')}")` 
-    : `with open("${fullPath.replace(/\\/g, '/')}", 'rb') as f:
-    model = pickle.load(f)`}
-
-input_data = np.array(json.loads(sys.argv[1]), dtype=np.float32)
-if len(input_data.shape) == 1:
-    input_data = input_data.reshape(1, -1)
-
-# Check if model has predict_proba (classifiers)
-if hasattr(model, 'predict_proba'):
-    prediction = model.predict_proba(input_data)
-else:
-    prediction = model.predict(input_data)
-    if len(prediction.shape) == 1:
-        prediction = prediction.reshape(-1, 1)
-
-print(json.dumps(prediction.tolist()))
-`;
-                                        const proc = spawn(pythonPath, ['-c', pythonCode, JSON.stringify(inputData)], {
-                                            stdio: ['pipe', 'pipe', 'pipe']
-                                        });
-                                        
-                                        let stdout = '';
-                                        let stderr = '';
-                                        
-                                        proc.stdout.on('data', (data) => { stdout += data.toString(); });
-                                        proc.stderr.on('data', (data) => { stderr += data.toString(); });
-                                        
-                                        proc.on('close', (code) => {
-                                            if (code === 0 && stdout.trim()) {
-                                                try {
-                                                    resolvePredict(JSON.parse(stdout.trim()));
-                                                } catch (e) {
-                                                    rejectPredict(new Error("Failed to parse sklearn output: " + stdout));
-                                                }
-                                            } else {
-                                                rejectPredict(new Error("sklearn inference failed: " + stderr));
-                                            }
-                                        });
-                                        
-                                        proc.on('error', (err) => {
-                                            rejectPredict(new Error("Failed to run sklearn inference: " + err.message));
-                                        });
-                                    });
-                                }
-                            });
-                        } else {
-                            tryNextPython(index + 1);
-                        }
-                    });
-                };
-                
-                tryNextPython(0);
-            });
+                }
+            };
         }
         
         // Initialize model
@@ -1196,6 +1079,15 @@ print(json.dumps(prediction.tolist()))
             }
             
             if (node.model) {
+                // Unload from persistent Python bridge if applicable
+                if (node.model.usePersistentBridge && node.model.unload) {
+                    try {
+                        await node.model.unload();
+                    } catch (err) {
+                        // Ignore unload errors during shutdown
+                    }
+                }
+                
                 if (node.modelFormat === 'tfjs' && node.model.dispose) {
                     node.model.dispose();
                 }
@@ -1223,6 +1115,34 @@ print(json.dumps(prediction.tolist()))
             onnx: loadONNXRuntime() !== null
         };
         res.json(runtimes);
+    });
+    
+    // API endpoint to check Python bridge status
+    RED.httpAdmin.get("/ml-inference/python-bridge", async function(req, res) {
+        try {
+            if (pythonBridge && pythonBridgeReady) {
+                const status = await pythonBridge.getStatus();
+                const stats = pythonBridge.getStats();
+                res.json({
+                    available: true,
+                    mode: 'persistent',
+                    ...status,
+                    stats: stats
+                });
+            } else {
+                res.json({
+                    available: false,
+                    mode: 'none',
+                    reason: pythonBridgeError ? pythonBridgeError.message : 'Not started'
+                });
+            }
+        } catch (err) {
+            res.json({
+                available: false,
+                mode: 'none',
+                error: err.message
+            });
+        }
     });
     
     // API endpoint to check Python availability

@@ -12,7 +12,7 @@
             learningMode: { value: "batch" },
             retrainInterval: { value: 50, validate: RED.validators.number() },
             adaptRate: { value: 0.1, validate: RED.validators.number() },
-            persistModel: { value: false },
+            persistState: { value: false },
             outputTopic: { value: "" },
             debug: { value: false }
         },
@@ -267,6 +267,14 @@
                     </label>
                     <input type="checkbox" id="node-input-debug" style="width: auto; margin-top: 8px;">
                     <div class="cm-help-text">Log detailed info to Node-RED debug</div>
+                </div>
+                
+                <div class="cm-config-item">
+                    <label for="node-input-persistState">
+                        <i class="fa fa-save"></i> Persist State
+                    </label>
+                    <input type="checkbox" id="node-input-persistState" style="width: auto; margin-top: 8px;">
+                    <div class="cm-help-text">Save training data across restarts</div>
                 </div>
             </div>
         </div>

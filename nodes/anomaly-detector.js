@@ -1,6 +1,14 @@
 module.exports = function(RED) {
     "use strict";
     
+    // Import state persistence
+    var StatePersistence = null;
+    try {
+        StatePersistence = require('./state-persistence');
+    } catch (err) {
+        // State persistence not available
+    }
+    
     function AnomalyDetectorNode(config) {
         RED.nodes.createNode(this, config);
         var node = this;
@@ -46,6 +54,7 @@ module.exports = function(RED) {
         // Advanced settings
         this.outputTopic = config.outputTopic || "";
         this.debug = config.debug === true;
+        this.persistState = config.persistState === true; // New: enable state persistence
         
         // State
         this.dataBuffer = [];
@@ -60,6 +69,56 @@ module.exports = function(RED) {
         this.cusumPos = 0;
         this.cusumNeg = 0;
         this.initialized = false;
+        
+        // State persistence manager
+        this.stateManager = null;
+        
+        // Initialize state persistence if enabled
+        if (node.persistState && StatePersistence) {
+            node.stateManager = new StatePersistence.NodeStateManager(node, {
+                stateKey: 'anomalyDetectorState',
+                saveInterval: 30000 // Save every 30 seconds
+            });
+            
+            // Load persisted state on startup
+            node.stateManager.load().then(function(state) {
+                if (state.dataBuffer && Array.isArray(state.dataBuffer)) {
+                    node.dataBuffer = state.dataBuffer;
+                }
+                if (state.ema !== undefined) {
+                    node.ema = state.ema;
+                }
+                if (state.cusumPos !== undefined) {
+                    node.cusumPos = state.cusumPos;
+                }
+                if (state.cusumNeg !== undefined) {
+                    node.cusumNeg = state.cusumNeg;
+                }
+                if (state.initialized !== undefined) {
+                    node.initialized = state.initialized;
+                }
+                
+                if (node.dataBuffer.length > 0) {
+                    debugLog("Restored " + node.dataBuffer.length + " buffered values from persistence");
+                    node.status({fill: "green", shape: "dot", text: node.method + " - restored (" + node.dataBuffer.length + ")"});
+                }
+            }).catch(function(err) {
+                debugLog("Failed to load persisted state: " + err.message);
+            });
+        }
+        
+        // Helper to persist current state
+        function persistCurrentState() {
+            if (node.stateManager) {
+                node.stateManager.setMultiple({
+                    dataBuffer: node.dataBuffer,
+                    ema: node.ema,
+                    cusumPos: node.cusumPos,
+                    cusumNeg: node.cusumNeg,
+                    initialized: node.initialized
+                });
+            }
+        }
         
         // Initial status
         node.status({fill: "blue", shape: "ring", text: node.method + " - waiting"});
@@ -395,6 +454,11 @@ module.exports = function(RED) {
                     node.dataBuffer.shift();
                 }
                 
+                // Persist state periodically (every 10th sample to reduce overhead)
+                if (node.stateManager && node.dataBuffer.length % 10 === 0) {
+                    persistCurrentState();
+                }
+                
                 var values = node.dataBuffer.map(d => d.value);
                 
                 // Minimum data check
@@ -482,13 +546,25 @@ module.exports = function(RED) {
             }
         });
         
-        node.on('close', function() {
+        node.on('close', async function(done) {
+            // Save state before closing if persistence enabled
+            if (node.stateManager) {
+                try {
+                    persistCurrentState();
+                    await node.stateManager.close();
+                } catch (err) {
+                    // Ignore persistence errors during shutdown
+                }
+            }
+            
             node.dataBuffer = [];
             node.ema = null;
             node.cusumPos = 0;
             node.cusumNeg = 0;
             node.initialized = false;
             node.status({});
+            
+            if (done) done();
         });
     }
     

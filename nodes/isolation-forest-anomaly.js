@@ -1,6 +1,14 @@
 module.exports = function(RED) {
     "use strict";
     
+    // Import state persistence
+    var StatePersistence = null;
+    try {
+        StatePersistence = require('./state-persistence');
+    } catch (err) {
+        // State persistence not available
+    }
+    
     function IsolationForestAnomalyNode(config) {
         RED.nodes.createNode(this, config);
         var node = this;
@@ -24,7 +32,7 @@ module.exports = function(RED) {
         this.learningMode = config.learningMode || "batch"; // batch, incremental, adaptive
         this.retrainInterval = parseInt(config.retrainInterval) || 50; // Retrain every N samples
         this.adaptRate = parseFloat(config.adaptRate) || 0.1; // Adaptation rate for adaptive mode
-        this.persistModel = config.persistModel === true;
+        this.persistState = config.persistState === true;
         
         this.dataBuffer = [];
         this.scoreBuffer = []; // Store prediction scores for threshold calculation
@@ -40,6 +48,50 @@ module.exports = function(RED) {
                 node.warn("[DEBUG] " + message);
             }
         };
+        
+        // State persistence manager
+        this.stateManager = null;
+        
+        // Helper to persist current state (note: model itself can't be serialized, but buffer can)
+        function persistCurrentState() {
+            if (node.stateManager) {
+                node.stateManager.setMultiple({
+                    dataBuffer: node.dataBuffer,
+                    scoreBuffer: node.scoreBuffer,
+                    anomalyThreshold: node.anomalyThreshold,
+                    sampleCount: node.sampleCount,
+                    lastRetrainCount: node.lastRetrainCount,
+                    isTrained: node.isTrained
+                });
+            }
+        }
+        
+        // Initialize state persistence if enabled
+        if (node.persistState && StatePersistence) {
+            node.stateManager = new StatePersistence.NodeStateManager(node, {
+                stateKey: 'isolationForestState',
+                saveInterval: 60000
+            });
+            
+            // Load persisted state on startup
+            node.stateManager.load().then(function(state) {
+                if (state.dataBuffer && state.dataBuffer.length > 0) {
+                    node.dataBuffer = state.dataBuffer;
+                    node.scoreBuffer = state.scoreBuffer || [];
+                    node.anomalyThreshold = state.anomalyThreshold || 0.5;
+                    node.sampleCount = state.sampleCount || 0;
+                    node.lastRetrainCount = state.lastRetrainCount || 0;
+                    
+                    // Re-train model from restored buffer
+                    if (node.dataBuffer.length >= 10 && IsolationForest) {
+                        trainModel(false);
+                        debugLog("Restored and retrained Isolation Forest from " + node.dataBuffer.length + " buffered samples");
+                    }
+                }
+            }).catch(function(err) {
+                debugLog("Failed to load persisted state: " + err.message);
+            });
+        }
         
         function trainModel(isIncremental) {
             if (!IsolationForest || node.dataBuffer.length < 10) {
@@ -89,6 +141,9 @@ module.exports = function(RED) {
                     shape: "dot",
                     text: "Trained (" + modeLabel + ") | n=" + node.dataBuffer.length
                 });
+                
+                // Persist after training
+                persistCurrentState();
                 
             } catch (err) {
                 node.error("Error training Isolation Forest: " + err.message);
@@ -255,11 +310,23 @@ module.exports = function(RED) {
             }
         });
         
-        node.on('close', function() {
+        node.on('close', async function(done) {
+            // Save state before closing if persistence enabled
+            if (node.stateManager) {
+                try {
+                    persistCurrentState();
+                    await node.stateManager.close();
+                } catch (err) {
+                    // Ignore persistence errors during shutdown
+                }
+            }
+            
             node.dataBuffer = [];
             node.scoreBuffer = [];
             node.model = null;
             node.isTrained = false;
+            
+            if (done) done();
         });
     }
     

@@ -1,9 +1,34 @@
 module.exports = function(RED) {
     "use strict";
     
+    // Import ml-pca and ml-matrix for robust PCA implementation
+    var PCA = null;
+    var Matrix = null;
+    try {
+        PCA = require('ml-pca').PCA;
+        Matrix = require('ml-matrix').Matrix;
+    } catch (err) {
+        // Libraries not available - will show error on node creation
+    }
+    
+    // Import state persistence
+    var StatePersistence = null;
+    try {
+        StatePersistence = require('./state-persistence');
+    } catch (err) {
+        // State persistence not available
+    }
+    
     function PcaAnomalyNode(config) {
         RED.nodes.createNode(this, config);
         var node = this;
+        
+        // Check if required libraries are available
+        if (!PCA || !Matrix) {
+            node.error("Required libraries not found. Please install: npm install ml-pca ml-matrix");
+            node.status({fill: "red", shape: "ring", text: "Missing ml-pca/ml-matrix"});
+            return;
+        }
         
         // Configuration
         this.nComponents = parseInt(config.nComponents) || 2;
@@ -16,17 +41,19 @@ module.exports = function(RED) {
         this.showTopContributors = parseInt(config.showTopContributors) || 3; // Max contributors to show
         this.outputTopic = config.outputTopic || "";
         this.debug = config.debug === true;
+        this.persistState = config.persistState === true;
         
         // State
         this.dataBuffer = [];
-        this.mean = null;
-        this.eigenVectors = null;
-        this.eigenValues = null;
+        this.pcaModel = null;       // ml-pca model instance
+        this.mean = null;           // For standardization
+        this.stdDev = null;         // For standardization
         this.isTrained = false;
         this.t2Threshold = null;
         this.speThreshold = null;
         
-        node.status({fill: "blue", shape: "ring", text: "PCA - waiting for data"});
+        // State persistence manager
+        this.stateManager = null;
         
         // Debug logging helper
         var debugLog = function(message) {
@@ -35,195 +62,116 @@ module.exports = function(RED) {
             }
         };
         
+        // Helper to persist current state
+        // Note: ml-pca model can be serialized via toJSON()
+        function persistCurrentState() {
+            if (node.stateManager && node.isTrained && node.pcaModel) {
+                node.stateManager.setMultiple({
+                    dataBuffer: node.dataBuffer,
+                    mean: node.mean,
+                    stdDev: node.stdDev,
+                    pcaModelJSON: node.pcaModel.toJSON(),
+                    isTrained: node.isTrained,
+                    t2Threshold: node.t2Threshold,
+                    speThreshold: node.speThreshold,
+                    nComponents: node.nComponents
+                });
+            }
+        }
+        
+        // Initialize state persistence if enabled
+        if (node.persistState && StatePersistence) {
+            node.stateManager = new StatePersistence.NodeStateManager(node, {
+                stateKey: 'pcaAnomalyState',
+                saveInterval: 60000 // Save every 60 seconds
+            });
+            
+            // Load persisted state on startup
+            node.stateManager.load().then(function(state) {
+                if (state.isTrained && state.pcaModelJSON) {
+                    try {
+                        node.dataBuffer = state.dataBuffer || [];
+                        node.mean = state.mean;
+                        node.stdDev = state.stdDev;
+                        node.pcaModel = PCA.load(state.pcaModelJSON);
+                        node.isTrained = true;
+                        node.t2Threshold = state.t2Threshold;
+                        node.speThreshold = state.speThreshold;
+                        node.nComponents = state.nComponents || node.nComponents;
+                        
+                        node.status({fill: "green", shape: "dot", text: "PCA - restored (trained)"});
+                        debugLog("Restored trained PCA model from persistence");
+                    } catch (err) {
+                        debugLog("Failed to restore PCA model: " + err.message);
+                    }
+                }
+            }).catch(function(err) {
+                debugLog("Failed to load persisted state: " + err.message);
+            });
+        }
+        
+        node.status({fill: "blue", shape: "ring", text: "PCA - waiting for data"});
+        
         // Helper: Calculate mean of each column
-        function calculateColumnMeans(matrix) {
-            var nCols = matrix[0].length;
+        function calculateColumnMeans(data) {
+            var nCols = data[0].length;
             var means = new Array(nCols).fill(0);
             
-            for (var i = 0; i < matrix.length; i++) {
+            for (var i = 0; i < data.length; i++) {
                 for (var j = 0; j < nCols; j++) {
-                    means[j] += matrix[i][j];
+                    means[j] += data[i][j];
                 }
             }
             
             for (var j = 0; j < nCols; j++) {
-                means[j] /= matrix.length;
+                means[j] /= data.length;
             }
             
             return means;
         }
         
         // Helper: Calculate standard deviation of each column
-        function calculateColumnStdDevs(matrix, means) {
-            var nCols = matrix[0].length;
+        function calculateColumnStdDevs(data, means) {
+            var nCols = data[0].length;
             var stdDevs = new Array(nCols).fill(0);
             
-            for (var i = 0; i < matrix.length; i++) {
+            for (var i = 0; i < data.length; i++) {
                 for (var j = 0; j < nCols; j++) {
-                    stdDevs[j] += Math.pow(matrix[i][j] - means[j], 2);
+                    stdDevs[j] += Math.pow(data[i][j] - means[j], 2);
                 }
             }
             
             for (var j = 0; j < nCols; j++) {
-                stdDevs[j] = Math.sqrt(stdDevs[j] / matrix.length);
+                stdDevs[j] = Math.sqrt(stdDevs[j] / data.length);
                 if (stdDevs[j] === 0) stdDevs[j] = 1; // Avoid division by zero
             }
             
             return stdDevs;
         }
         
-        // Helper: Center and scale matrix
-        function standardize(matrix, means, stdDevs) {
-            var result = [];
-            for (var i = 0; i < matrix.length; i++) {
-                var row = [];
-                for (var j = 0; j < matrix[i].length; j++) {
-                    row.push((matrix[i][j] - means[j]) / stdDevs[j]);
-                }
-                result.push(row);
-            }
-            return result;
+        // Helper: Standardize data (z-score normalization)
+        function standardize(data, means, stdDevs) {
+            return data.map(function(row) {
+                return row.map(function(val, j) {
+                    return (val - means[j]) / stdDevs[j];
+                });
+            });
         }
         
-        // Helper: Matrix transpose
-        function transpose(matrix) {
-            var rows = matrix.length;
-            var cols = matrix[0].length;
-            var result = [];
-            
-            for (var j = 0; j < cols; j++) {
-                var row = [];
-                for (var i = 0; i < rows; i++) {
-                    row.push(matrix[i][j]);
-                }
-                result.push(row);
-            }
-            
-            return result;
+        // Helper: Standardize single sample
+        function standardizeSample(sample, means, stdDevs) {
+            return sample.map(function(val, j) {
+                return (val - means[j]) / stdDevs[j];
+            });
         }
         
-        // Helper: Matrix multiplication
-        function matMul(A, B) {
-            var rowsA = A.length;
-            var colsA = A[0].length;
-            var colsB = B[0].length;
-            var result = [];
-            
-            for (var i = 0; i < rowsA; i++) {
-                var row = [];
-                for (var j = 0; j < colsB; j++) {
-                    var sum = 0;
-                    for (var k = 0; k < colsA; k++) {
-                        sum += A[i][k] * B[k][j];
-                    }
-                    row.push(sum);
-                }
-                result.push(row);
-            }
-            
-            return result;
-        }
-        
-        // Helper: Covariance matrix
-        function covarianceMatrix(matrix) {
-            var n = matrix.length;
-            var means = calculateColumnMeans(matrix);
-            var nCols = matrix[0].length;
-            var cov = [];
-            
-            for (var i = 0; i < nCols; i++) {
-                var row = [];
-                for (var j = 0; j < nCols; j++) {
-                    var sum = 0;
-                    for (var k = 0; k < n; k++) {
-                        sum += (matrix[k][i] - means[i]) * (matrix[k][j] - means[j]);
-                    }
-                    row.push(sum / (n - 1));
-                }
-                cov.push(row);
-            }
-            
-            return cov;
-        }
-        
-        // Power iteration for eigenvalue/eigenvector calculation
-        function powerIteration(matrix, numIterations) {
-            var n = matrix.length;
-            var eigenVectors = [];
-            var eigenValues = [];
-            var workMatrix = JSON.parse(JSON.stringify(matrix));
-            
-            for (var comp = 0; comp < n; comp++) {
-                // Initialize random vector
-                var v = [];
-                for (var i = 0; i < n; i++) {
-                    v.push(Math.random() - 0.5);
-                }
-                
-                // Normalize
-                var norm = Math.sqrt(v.reduce((sum, val) => sum + val * val, 0));
-                v = v.map(val => val / norm);
-                
-                // Power iteration
-                for (var iter = 0; iter < numIterations; iter++) {
-                    // Multiply matrix by vector
-                    var newV = [];
-                    for (var i = 0; i < n; i++) {
-                        var sum = 0;
-                        for (var j = 0; j < n; j++) {
-                            sum += workMatrix[i][j] * v[j];
-                        }
-                        newV.push(sum);
-                    }
-                    
-                    // Calculate eigenvalue (Rayleigh quotient)
-                    var eigenValue = 0;
-                    for (var i = 0; i < n; i++) {
-                        eigenValue += v[i] * newV[i];
-                    }
-                    
-                    // Normalize
-                    norm = Math.sqrt(newV.reduce((sum, val) => sum + val * val, 0));
-                    if (norm > 0) {
-                        v = newV.map(val => val / norm);
-                    }
-                }
-                
-                // Calculate final eigenvalue
-                var Av = [];
-                for (var i = 0; i < n; i++) {
-                    var sum = 0;
-                    for (var j = 0; j < n; j++) {
-                        sum += workMatrix[i][j] * v[j];
-                    }
-                    Av.push(sum);
-                }
-                var eigenValue = 0;
-                for (var i = 0; i < n; i++) {
-                    eigenValue += v[i] * Av[i];
-                }
-                
-                eigenVectors.push(v);
-                eigenValues.push(eigenValue);
-                
-                // Deflate matrix
-                for (var i = 0; i < n; i++) {
-                    for (var j = 0; j < n; j++) {
-                        workMatrix[i][j] -= eigenValue * v[i] * v[j];
-                    }
-                }
-            }
-            
-            return { eigenValues: eigenValues, eigenVectors: eigenVectors };
-        }
-        
-        // Train PCA model
+        // Train PCA model using ml-pca (SVD-based, numerically stable)
         function trainPCA() {
             if (node.dataBuffer.length < node.windowSize * 0.5) {
                 return false;
             }
             
-            var data = node.dataBuffer.map(d => d.values);
+            var data = node.dataBuffer.map(function(d) { return d.values; });
             var nFeatures = data[0].length;
             
             // Calculate means and std devs for standardization
@@ -233,37 +181,38 @@ module.exports = function(RED) {
             // Standardize data
             var standardizedData = standardize(data, node.mean, node.stdDev);
             
-            // Calculate covariance matrix
-            var cov = covarianceMatrix(standardizedData);
+            // Train PCA using ml-pca (uses SVD internally - much more stable than power iteration)
+            try {
+                node.pcaModel = new PCA(standardizedData, {
+                    center: false,  // Already centered via standardization
+                    scale: false    // Already scaled via standardization
+                });
+            } catch (err) {
+                node.error("PCA training failed: " + err.message);
+                return false;
+            }
             
-            // Calculate eigenvalues and eigenvectors
-            var eigen = powerIteration(cov, 100);
+            // Get explained variance ratios
+            var explainedVariance = node.pcaModel.getExplainedVariance();
+            var cumulativeVariance = node.pcaModel.getCumulativeVariance();
             
-            // Sort by eigenvalue (descending)
-            var indices = eigen.eigenValues.map((val, idx) => ({val, idx}));
-            indices.sort((a, b) => b.val - a.val);
+            debugLog("Explained variance per component: " + explainedVariance.map(function(v) { return (v * 100).toFixed(1) + "%"; }).join(", "));
             
-            node.eigenValues = indices.map(i => eigen.eigenValues[i.idx]);
-            node.eigenVectors = indices.map(i => eigen.eigenVectors[i.idx]);
-            
-            // Determine number of components
+            // Determine number of components based on variance threshold
             if (node.autoComponents) {
-                var totalVariance = node.eigenValues.reduce((a, b) => a + Math.max(0, b), 0);
-                var cumulativeVariance = 0;
-                node.nComponents = 0;
-                
-                for (var i = 0; i < node.eigenValues.length; i++) {
-                    cumulativeVariance += Math.max(0, node.eigenValues[i]);
-                    node.nComponents = i + 1;
-                    if (cumulativeVariance / totalVariance >= node.varianceThreshold) {
+                node.nComponents = 1;
+                for (var i = 0; i < cumulativeVariance.length; i++) {
+                    if (cumulativeVariance[i] >= node.varianceThreshold) {
+                        node.nComponents = i + 1;
                         break;
                     }
+                    node.nComponents = i + 1;
                 }
             }
             
             node.nComponents = Math.min(node.nComponents, nFeatures);
             
-            // Mark as trained so calculateStatistics works
+            // Mark as trained
             node.isTrained = true;
             
             // Calculate T² and SPE thresholds from training data
@@ -278,52 +227,57 @@ module.exports = function(RED) {
                 }
             });
             
-            // Set thresholds at specified percentile (based on threshold config)
+            // Set thresholds at specified percentile
             if (t2Values.length > 0) {
-                t2Values.sort((a, b) => a - b);
-                speValues.sort((a, b) => a - b);
+                t2Values.sort(function(a, b) { return a - b; });
+                speValues.sort(function(a, b) { return a - b; });
                 
-                var percentileIndex = Math.floor(t2Values.length * (1 - 1/node.threshold/10));
-                node.t2Threshold = t2Values[percentileIndex] || t2Values[t2Values.length - 1];
-                node.speThreshold = speValues[percentileIndex] || speValues[speValues.length - 1];
+                var percentileIndex = Math.floor(t2Values.length * (1 - 1 / node.threshold / 10));
+                percentileIndex = Math.min(percentileIndex, t2Values.length - 1);
+                
+                node.t2Threshold = t2Values[percentileIndex];
+                node.speThreshold = speValues[percentileIndex];
             } else {
-                // Default thresholds if no valid statistics
                 node.t2Threshold = node.threshold * node.threshold;
                 node.speThreshold = node.threshold;
             }
             
-            debugLog("PCA trained: " + node.nComponents + " components, T² threshold: " + node.t2Threshold.toFixed(4) + ", SPE threshold: " + node.speThreshold.toFixed(4));
+            var totalExplained = (cumulativeVariance[node.nComponents - 1] * 100).toFixed(1);
+            debugLog("PCA trained: " + node.nComponents + " components (" + totalExplained + "% variance), T² threshold: " + node.t2Threshold.toFixed(4) + ", SPE threshold: " + node.speThreshold.toFixed(4));
+            
+            // Persist trained model
+            persistCurrentState();
             
             return true;
         }
         
         // Calculate T² and SPE statistics for a sample
         function calculateStatistics(standardizedSample) {
-            if (!node.isTrained) return null;
+            if (!node.isTrained || !node.pcaModel) return null;
             
-            // Project onto principal components
-            var scores = [];
-            for (var i = 0; i < node.nComponents; i++) {
-                var score = 0;
-                for (var j = 0; j < standardizedSample.length; j++) {
-                    score += standardizedSample[j] * node.eigenVectors[i][j];
-                }
-                scores.push(score);
-            }
+            // Project onto principal components using ml-pca
+            var allScores = node.pcaModel.predict([standardizedSample]).to2DArray()[0];
+            var scores = allScores.slice(0, node.nComponents);
+            
+            // Get eigenvalues from ml-pca
+            var eigenvalues = node.pcaModel.getEigenvalues();
             
             // Calculate T² (Hotelling's T-squared)
             var t2 = 0;
             for (var i = 0; i < node.nComponents; i++) {
-                if (node.eigenValues[i] > 0) {
-                    t2 += (scores[i] * scores[i]) / node.eigenValues[i];
+                if (eigenvalues[i] > 1e-10) {
+                    t2 += (scores[i] * scores[i]) / eigenvalues[i];
                 }
             }
+            
+            // Get loading matrix for reconstruction
+            var loadings = node.pcaModel.getLoadings().to2DArray();
             
             // Reconstruct sample from principal components
             var reconstructed = new Array(standardizedSample.length).fill(0);
             for (var i = 0; i < node.nComponents; i++) {
                 for (var j = 0; j < standardizedSample.length; j++) {
-                    reconstructed[j] += scores[i] * node.eigenVectors[i][j];
+                    reconstructed[j] += scores[i] * loadings[j][i];
                 }
             }
             
@@ -335,6 +289,7 @@ module.exports = function(RED) {
             
             return {
                 scores: scores,
+                allScores: allScores,
                 t2: t2,
                 spe: spe,
                 reconstructed: reconstructed
@@ -347,9 +302,9 @@ module.exports = function(RED) {
                 if (msg.reset === true) {
                     node.dataBuffer = [];
                     node.isTrained = false;
+                    node.pcaModel = null;
                     node.mean = null;
-                    node.eigenVectors = null;
-                    node.eigenValues = null;
+                    node.stdDev = null;
                     node.status({fill: "blue", shape: "ring", text: "PCA - reset"});
                     return;
                 }
@@ -359,8 +314,8 @@ module.exports = function(RED) {
                 var valueNames = [];
                 
                 if (Array.isArray(msg.payload)) {
-                    values = msg.payload.filter(v => typeof v === 'number' && !isNaN(v));
-                    valueNames = values.map((v, i) => "sensor" + i);
+                    values = msg.payload.filter(function(v) { return typeof v === 'number' && !isNaN(v); });
+                    valueNames = values.map(function(v, i) { return "sensor" + i; });
                 } else if (typeof msg.payload === 'object' && msg.payload !== null) {
                     Object.keys(msg.payload).forEach(function(key) {
                         var val = msg.payload[key];
@@ -406,10 +361,7 @@ module.exports = function(RED) {
                 }
                 
                 // Standardize current sample
-                var standardizedSample = [];
-                for (var i = 0; i < values.length; i++) {
-                    standardizedSample.push((values[i] - node.mean[i]) / node.stdDev[i]);
-                }
+                var standardizedSample = standardizeSample(values, node.mean, node.stdDev);
                 
                 // Calculate statistics
                 var stats = calculateStatistics(standardizedSample);
@@ -440,7 +392,6 @@ module.exports = function(RED) {
                 var contributions = [];
                 var totalContribution = 0;
                 
-                // Always calculate contributions for analysis
                 for (var i = 0; i < values.length; i++) {
                     var contrib = Math.abs(standardizedSample[i] - stats.reconstructed[i]);
                     totalContribution += contrib;
@@ -458,12 +409,16 @@ module.exports = function(RED) {
                     c.percentContribution = (c.normalizedContribution * 100).toFixed(1) + "%";
                     return c;
                 });
-                contributions.sort((a, b) => b.contribution - a.contribution);
+                contributions.sort(function(a, b) { return b.contribution - a.contribution; });
                 
                 // Filter by threshold and limit to top N
                 var filteredContributions = contributions
                     .filter(function(c) { return c.normalizedContribution >= node.contributionThreshold; })
                     .slice(0, node.showTopContributors);
+                
+                // Get explained variance info from ml-pca
+                var cumulativeVariance = node.pcaModel.getCumulativeVariance();
+                var explainedVarianceRatio = cumulativeVariance[node.nComponents - 1];
                 
                 // Build output message
                 var outputMsg = {
@@ -479,11 +434,11 @@ module.exports = function(RED) {
                         speThreshold: node.speThreshold,
                         speAnomaly: isSPEAnomaly,
                         nComponents: node.nComponents,
-                        explainedVariance: node.eigenValues.slice(0, node.nComponents).reduce((a, b) => a + b, 0) / 
-                                          node.eigenValues.reduce((a, b) => a + Math.max(0, b), 0)
+                        explainedVariance: explainedVarianceRatio,
+                        eigenvalues: node.pcaModel.getEigenvalues().slice(0, node.nComponents)
                     },
                     contributions: filteredContributions.length > 0 ? filteredContributions : undefined,
-                    allContributions: isAnomaly ? contributions : undefined, // Full list only for anomalies
+                    allContributions: isAnomaly ? contributions : undefined,
                     topContributor: contributions.length > 0 ? contributions[0].sensor : null,
                     sensorNames: valueNames,
                     bufferSize: node.dataBuffer.length,
@@ -522,13 +477,25 @@ module.exports = function(RED) {
             }
         });
         
-        node.on('close', function() {
+        node.on('close', async function(done) {
+            // Save state before closing if persistence enabled
+            if (node.stateManager) {
+                try {
+                    persistCurrentState();
+                    await node.stateManager.close();
+                } catch (err) {
+                    // Ignore persistence errors during shutdown
+                }
+            }
+            
             node.dataBuffer = [];
             node.isTrained = false;
+            node.pcaModel = null;
             node.mean = null;
-            node.eigenVectors = null;
-            node.eigenValues = null;
+            node.stdDev = null;
             node.status({});
+            
+            if (done) done();
         });
     }
     

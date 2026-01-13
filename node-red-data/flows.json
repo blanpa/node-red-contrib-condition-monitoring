@@ -98,6 +98,34 @@
         "info": "PCA-based multi-sensor anomaly detection with contribution analysis"
     },
     {
+        "id": "weibull-rul-tab",
+        "type": "tab",
+        "label": "Example 15: Weibull RUL Analysis",
+        "disabled": false,
+        "info": "Weibull-based Remaining Useful Life prediction using Trend Predictor"
+    },
+    {
+        "id": "cepstrum-tab",
+        "type": "tab",
+        "label": "Example 17: Cepstrum Gearbox Analysis",
+        "disabled": false,
+        "info": "Cepstrum analysis for gearbox fault detection using Signal Analyzer"
+    },
+    {
+        "id": "mahalanobis-tab",
+        "type": "tab",
+        "label": "Example 18: Mahalanobis Anomaly Detection",
+        "disabled": false,
+        "info": "Multivariate anomaly detection with Mahalanobis distance using Multi-Value Processor"
+    },
+    {
+        "id": "battery-rul-tab",
+        "type": "tab",
+        "label": "Example 19: Battery Runtime (RUL)",
+        "disabled": false,
+        "info": "Batterie-Restlaufzeit berechnen mit Trend Predictor RUL Mode.\n\nSimuliert einen Batterie-Shunt mit:\n- Spannung (voltage)\n- Strom (current)\n- State of Charge (soc)\n- Verbrauchte Ah (consumedAh)\n\nDie Restlaufzeit wird basierend auf dem aktuellen Stromverbrauch und SOC berechnet."
+    },
+    {
         "id": "comment-overview",
         "type": "comment",
         "z": "overview-tab",
@@ -155,7 +183,6 @@
         "learningMode": "batch",
         "retrainInterval": 50,
         "adaptRate": 0.1,
-        "persistModel": false,
         "outputTopic": "",
         "debug": false,
         "x": 270,
@@ -582,7 +609,7 @@
         "id": "comment-bearing-header",
         "type": "comment",
         "z": "bearing-analysis-tab",
-        "name": "\ud83d\udd0a Bearing Vibration Analysis",
+        "name": "Bearing Vibration Analysis",
         "info": "Demonstrates signal analysis using the consolidated Signal Analyzer node.",
         "x": 170,
         "y": 40,
@@ -1045,7 +1072,7 @@
         "id": "comment-ml-header",
         "type": "comment",
         "z": "isolation-forest-tab",
-        "name": "\ud83e\udd16 Machine Learning Anomaly Detection",
+        "name": "Machine Learning Anomaly Detection",
         "info": "Demonstrates the Isolation Forest node for complex pattern detection without manual thresholds.",
         "x": 200,
         "y": 40,
@@ -1145,7 +1172,7 @@
         "id": "comment-ml-info",
         "type": "comment",
         "z": "isolation-forest-tab",
-        "name": "\u2139 Isolation Forest automatically adapts to multi-modal data",
+        "name": "Isolation Forest automatically adapts to multi-modal data",
         "info": "Unlike threshold-based methods, Isolation Forest learns what 'normal' looks like from the data itself.\n\nIt handles:\n- Multiple operating modes\n- Changing patterns over time\n- Complex, non-linear relationships\n\nNo manual threshold tuning required!",
         "x": 250,
         "y": 200,
@@ -1155,7 +1182,7 @@
         "id": "comment-vib-header",
         "type": "comment",
         "z": "vibration-features-tab",
-        "name": "\ud83d\udd0a Vibration Feature Extraction",
+        "name": "Vibration Feature Extraction",
         "info": "Demonstrates the Signal Analyzer node in vibration mode for comprehensive feature extraction.",
         "x": 180,
         "y": 40,
@@ -1302,7 +1329,7 @@
         "id": "comment-vib-info",
         "type": "comment",
         "z": "vibration-features-tab",
-        "name": "\u2139 Features: RMS, Peak-to-Peak, Crest Factor, Kurtosis, Skewness, Health Score",
+        "name": "Features: RMS, Peak-to-Peak, Crest Factor, Kurtosis, Skewness, Health Score",
         "info": "The Signal Analyzer (Vibration mode) extracts all common vibration features:\n\n- **RMS**: Overall energy level\n- **Peak-to-Peak**: Total amplitude range\n- **Crest Factor**: Peak/RMS ratio (>6 = impulsive)\n- **Kurtosis**: Peakedness (>3 = impacts present)\n- **Skewness**: Asymmetry\n- **Health Score**: 0-100% condition indicator",
         "x": 290,
         "y": 200,
@@ -1448,7 +1475,7 @@
         "id": "comment-ml-sensor-info",
         "type": "comment",
         "z": "ml-sensor-tab",
-        "name": "\u2139 To use: Place your TensorFlow.js model in /data/models/sensor-anomaly/",
+        "name": "To use: Place your TensorFlow.js model in /data/models/sensor-anomaly/",
         "info": "**Model Requirements:**\n\n1. Place your TensorFlow.js model files in:\n   - `/data/models/sensor-anomaly/model.json`\n   - `/data/models/sensor-anomaly/weights.bin`\n\n2. Expected input: Array of 5 normalized sensor values\n3. Expected output: Single value (anomaly probability 0-1)\n\n**Training your own model:**\n```python\nimport tensorflow as tf\n\nmodel = tf.keras.Sequential([\n    tf.keras.layers.Dense(16, activation='relu', input_shape=(5,)),\n    tf.keras.layers.Dense(8, activation='relu'),\n    tf.keras.layers.Dense(1, activation='sigmoid')\n])\n\nmodel.compile(optimizer='adam', loss='binary_crossentropy')\nmodel.fit(X_train, y_train, epochs=50)\n\n# Convert to TensorFlow.js\nimport tensorflowjs as tfjs\ntfjs.converters.save_keras_model(model, 'sensor-anomaly')\n```",
         "x": 270,
         "y": 200,
@@ -1458,7 +1485,7 @@
         "id": "comment-ml-image-header",
         "type": "comment",
         "z": "ml-image-tab",
-        "name": "\ud83d\udcf7 ML Image Classification (Defect Detection)",
+        "name": "ML Image Classification (Defect Detection)",
         "info": "This example demonstrates using a trained image classification model for visual defect detection.\n\nUse cases:\n- Surface defect detection\n- Product quality inspection\n- Crack detection\n- Corrosion detection",
         "x": 220,
         "y": 40,
@@ -1618,7 +1645,7 @@
         "id": "comment-ml-image-info",
         "type": "comment",
         "z": "ml-image-tab",
-        "name": "\u2139 For real images: Use node-red-contrib-image-tools to load and preprocess",
+        "name": "For real images: Use node-red-contrib-image-tools to load and preprocess",
         "info": "**Image Preprocessing Pipeline:**\n\n1. **Load Image:**\n   - Use `node-red-contrib-image-tools` to read image files\n   - Or receive base64 encoded images via HTTP\n\n2. **Resize:**\n   - Most models expect 224x224 or 256x256 pixels\n   - Use `image-tools` resize node\n\n3. **Normalize:**\n   - Convert pixel values to 0-1 range\n   - Some models need mean subtraction\n\n4. **Format:**\n   - Convert to flat array or tensor format\n   - Shape: [1, height, width, 3] for batch\n\n**Example Models:**\n- MobileNet (general classification)\n- Custom trained defect detection\n- YOLO for object detection (ONNX)\n\n**Training Tips:**\n- Collect 100+ images per defect class\n- Use data augmentation\n- Consider transfer learning from MobileNet",
         "x": 280,
         "y": 200,
@@ -1718,7 +1745,7 @@
         "id": "comment-http-api",
         "type": "comment",
         "z": "ml-image-tab",
-        "name": "\ud83c\udf10 HTTP API: POST /api/classify (multipart/form-data with 'image' field)",
+        "name": "HTTP API: POST /api/classify (multipart/form-data with 'image' field)",
         "info": "**HTTP API for Image Classification:**\n\nEndpoint: POST http://localhost:1880/api/classify\n\n**Option 1: File Upload**\n```bash\ncurl -X POST http://localhost:1880/api/classify \\\n  -F 'image=@/path/to/image.jpg'\n```\n\n**Option 2: Base64 JSON**\n```bash\ncurl -X POST http://localhost:1880/api/classify \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"image\": \"<base64_encoded_image>\"}'\n```\n\n**Response:**\n```json\n{\n  \"success\": true,\n  \"filename\": \"image.jpg\",\n  \"prediction\": {\n    \"class\": \"good\",\n    \"confidence\": \"95.2%\",\n    \"isDefect\": false\n  }\n}\n```",
         "x": 280,
         "y": 400,
@@ -1728,7 +1755,7 @@
         "id": "comment-onnx-header",
         "type": "comment",
         "z": "onnx-example-tab",
-        "name": "\ud83d\udd37 ONNX Multi-Sensor Anomaly Detection (PyTorch Model)",
+        "name": "ONNX Multi-Sensor Anomaly Detection (PyTorch Model)",
         "info": "This example uses an ONNX model trained with PyTorch for anomaly detection.\n\n**Model Details:**\n- Input: 10 sensor values (normalized 0-1)\n- Output: Anomaly probability (0-1)\n- Threshold: 0.5 for anomaly classification\n- Accuracy: ~98% on test data\n\n**Features detected:**\n- Cascade failures (multiple sensors drift)\n- Sensor dropouts\n- Oscillation patterns\n- Single extreme outliers\n- Gradual drift\n- Correlation breaks",
         "x": 250,
         "y": 40,
@@ -1906,7 +1933,7 @@
         "id": "comment-onnx-info",
         "type": "comment",
         "z": "onnx-example-tab",
-        "name": "\u2139 ONNX supports PyTorch, scikit-learn, and other ML frameworks",
+        "name": "ONNX supports PyTorch, scikit-learn, and other ML frameworks",
         "info": "**ONNX (Open Neural Network Exchange):**\n\nONNX is an open format for representing ML models, enabling interoperability between frameworks.\n\n**Supported Sources:**\n- PyTorch: `torch.onnx.export()`\n- scikit-learn: `skl2onnx`\n- XGBoost, LightGBM, CatBoost\n- TensorFlow (via tf2onnx)\n\n**Advantages:**\n- Framework-agnostic\n- Optimized inference with ONNX Runtime\n- Supports GPU acceleration\n- Wide ecosystem support\n\n**This Model:**\n- Trained with PyTorch\n- 3-layer neural network\n- BatchNorm + Dropout for regularization\n- Binary classification (anomaly/normal)",
         "x": 260,
         "y": 340,
@@ -1926,7 +1953,7 @@
         "id": "comment-tflite-header",
         "type": "comment",
         "z": "tflite-example-tab",
-        "name": "\ud83d\udd36 TFLite Model (.tflite) - Optimized for Edge Devices",
+        "name": "TFLite Model (.tflite) - Optimized for Edge Devices",
         "info": "This example uses a TensorFlow Lite model optimized for edge deployment.\n\n**TFLite Advantages:**\n- Smaller model size\n- Faster inference\n- Low power consumption\n- Mobile & IoT compatible\n- Google Coral Edge TPU support\n\n**Model Details:**\n- Input: 5 sensor values (normalized 0-1)\n- Output: Anomaly probability (0-1)\n- Optimizations: DEFAULT (quantization aware)",
         "x": 250,
         "y": 40,
@@ -2079,7 +2106,7 @@
         "id": "comment-tflite-coral",
         "type": "comment",
         "z": "tflite-example-tab",
-        "name": "\ud83d\udc1a For Google Coral: Enable Edge TPU delegation in ml-inference settings",
+        "name": "For Google Coral: Enable Edge TPU delegation in ml-inference settings",
         "info": "**Google Coral Edge TPU:**\n\nThe Coral Edge TPU accelerates TFLite model inference.\n\n**Requirements:**\n1. Google Coral USB Accelerator or Dev Board\n2. Edge TPU runtime installed\n3. Model compiled for Edge TPU\n\n**Setup:**\n1. Install Edge TPU runtime\n2. Connect Coral device\n3. Enable 'Use Edge TPU' in ml-inference node\n\n**Performance:**\n- Up to 100x faster inference\n- 4 TOPS (trillion operations per second)\n- Low power consumption (2W)\n\nSee `CORAL_INTEGRATION.md` for detailed setup instructions.",
         "x": 270,
         "y": 280,
@@ -2089,7 +2116,7 @@
         "id": "comment-tflite-formats",
         "type": "comment",
         "z": "tflite-example-tab",
-        "name": "\ud83d\udcc1 Model Format: .tflite (TensorFlow Lite FlatBuffer)",
+        "name": "Model Format: .tflite (TensorFlow Lite FlatBuffer)",
         "info": "**TFLite Model Format:**\n\nTFLite uses FlatBuffer serialization for efficient model loading.\n\n**File Extension:** `.tflite`\n\n**Advantages:**\n- Single file (no separate weights)\n- Memory-mapped loading\n- Minimal dependencies\n- Platform independent\n\n**Creating TFLite Models:**\n```python\nimport tensorflow as tf\n\nconverter = tf.lite.TFLiteConverter.from_keras_model(model)\nconverter.optimizations = [tf.lite.Optimize.DEFAULT]\ntflite_model = converter.convert()\n\nwith open('model.tflite', 'wb') as f:\n    f.write(tflite_model)\n```",
         "x": 230,
         "y": 340,
@@ -2233,7 +2260,7 @@
         "type": "function",
         "z": "pytorch-example-tab",
         "name": "Interpret Vibration Result",
-        "func": "// Interpret PyTorch vibration model output\nvar prediction = msg.prediction;\nvar probability = 0;\n\n// Handle different output formats\nif (Array.isArray(prediction)) {\n    probability = prediction[0];\n    if (Array.isArray(probability)) {\n        probability = probability[0];\n    }\n} else if (typeof prediction === 'number') {\n    probability = prediction;\n}\n\nvar isAnomaly = probability > 0.5;\n\n// Feature names for reference\nvar featureNames = [\n    'RMS', 'Peak', 'Crest Factor', 'Kurtosis',\n    'Skewness', 'Dom. Freq', 'Spectral Centroid', 'Band Energy'\n];\n\n// Build feature map\nvar features = {};\nif (Array.isArray(msg.payload)) {\n    msg.payload.forEach((val, idx) => {\n        features[featureNames[idx]] = val.toFixed(3);\n    });\n}\n\nmsg.payload = {\n    anomalyProbability: (probability * 100).toFixed(1) + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? ' FAULT DETECTED' : ' Normal',\n    diagnosis: isAnomaly ? getDiagnosis(msg.payload) : 'Machine operating normally',\n    features: features,\n    modelType: 'PyTorch \u2192 ONNX',\n    timestamp: new Date().toISOString()\n};\n\n// Simple diagnosis based on feature patterns\nfunction getDiagnosis(f) {\n    if (!Array.isArray(f)) return 'Unknown fault';\n    \n    // High kurtosis + crest factor = bearing\n    if (f[3] > 0.7 && f[2] > 0.7) return '\ud83d\udd34 Bearing fault suspected';\n    \n    // High RMS + low freq = imbalance\n    if (f[0] > 0.7 && f[5] < 0.3) return '\ud83d\udfe0 Rotor imbalance suspected';\n    \n    // Broadband + high crest = looseness\n    if (f[6] > 0.5 && f[2] > 0.6) return '\ud83d\udfe1 Mechanical looseness suspected';\n    \n    return ' Anomaly detected - check machine';\n}\n\nreturn msg;",
+        "func": "// Interpret PyTorch vibration model output\nvar prediction = msg.prediction;\nvar probability = 0;\n\n// Handle different output formats\nif (Array.isArray(prediction)) {\n    probability = prediction[0];\n    if (Array.isArray(probability)) {\n        probability = probability[0];\n    }\n} else if (typeof prediction === 'number') {\n    probability = prediction;\n}\n\nvar isAnomaly = probability > 0.5;\n\n// Feature names for reference\nvar featureNames = [\n    'RMS', 'Peak', 'Crest Factor', 'Kurtosis',\n    'Skewness', 'Dom. Freq', 'Spectral Centroid', 'Band Energy'\n];\n\n// Build feature map\nvar features = {};\nif (Array.isArray(msg.payload)) {\n    msg.payload.forEach((val, idx) => {\n        features[featureNames[idx]] = val.toFixed(3);\n    });\n}\n\nmsg.payload = {\n    anomalyProbability: (probability * 100).toFixed(1) + '%',\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? 'FAULT DETECTED' : 'Normal',\n    diagnosis: isAnomaly ? getDiagnosis(msg.payload) : 'Machine operating normally',\n    features: features,\n    modelType: 'PyTorch - ONNX',\n    timestamp: new Date().toISOString()\n};\n\n// Simple diagnosis based on feature patterns\nfunction getDiagnosis(f) {\n    if (!Array.isArray(f)) return 'Unknown fault';\n    \n    // High kurtosis + crest factor = bearing\n    if (f[3] > 0.7 && f[2] > 0.7) return '[CRITICAL] Bearing fault suspected';\n    \n    // High RMS + low freq = imbalance\n    if (f[0] > 0.7 && f[5] < 0.3) return '[WARNING] Rotor imbalance suspected';\n    \n    // Broadband + high crest = looseness\n    if (f[6] > 0.5 && f[2] > 0.6) return '[CAUTION] Mechanical looseness suspected';\n    \n    return 'Anomaly detected - check machine';\n}\n\nreturn msg;",
         "outputs": 1,
         "x": 710,
         "y": 160,
@@ -2277,7 +2304,7 @@
         "id": "comment-pytorch-workflow",
         "type": "comment",
         "z": "pytorch-example-tab",
-        "name": "\ud83d\udd04 Workflow: PyTorch \u2192 train \u2192 torch.onnx.export() \u2192 ONNX \u2192 Node-RED",
+        "name": "Workflow: PyTorch - train - torch.onnx.export() - ONNX - Node-RED",
         "info": "**PyTorch to Node-RED Workflow:**\n\n1. **Train in PyTorch:**\n```python\nimport torch\nimport torch.nn as nn\n\nmodel = YourModel()\nmodel.train()\n# ... training loop ...\n```\n\n2. **Export to ONNX:**\n```python\nmodel.eval()\ndummy_input = torch.randn(1, input_size)\n\ntorch.onnx.export(\n    model,\n    dummy_input,\n    'model.onnx',\n    input_names=['input'],\n    output_names=['output'],\n    dynamic_axes={\n        'input': {0: 'batch'},\n        'output': {0: 'batch'}\n    }\n)\n```\n\n3. **Use in Node-RED:**\n   - Model Type: ONNX\n   - Model Path: /data/models/your-model/model.onnx\n\n**Advantages:**\n- PyTorch flexibility for training\n- ONNX Runtime for fast inference\n- Cross-platform deployment",
         "x": 290,
         "y": 360,
@@ -2298,7 +2325,7 @@
         "type": "comment",
         "z": "keras-example-tab",
         "name": "Keras Models (.keras, .h5) - TensorFlow Neural Networks",
-        "info": "This example uses native Keras models.\n\n**Supported Formats:**\n- `.keras` - Keras 3 native format (recommended)\n- `.h5` - HDF5 legacy format\n\n**Model:**\n- Input: 5 sensor values\n- Architecture: Dense(32) \u2192 Dense(16) \u2192 Dense(1)\n- Output: Anomaly probability\n\n**Note:** Keras models require Python with TensorFlow installed in the Docker container.",
+        "info": "This example uses native Keras models.\n\n**Supported Formats:**\n- `.keras` - Keras 3 native format (recommended)\n- `.h5` - HDF5 legacy format\n\n**Model:**\n- Input: 5 sensor values\n- Architecture: Dense(32) - Dense(16) - Dense(1)\n- Output: Anomaly probability\n\n**Note:** Keras models require Python with TensorFlow installed in the Docker container.",
         "x": 270,
         "y": 40,
         "wires": []
@@ -2780,13 +2807,6 @@
         "wires": []
     },
     {
-        "id": "weibull-rul-tab",
-        "type": "tab",
-        "label": "Example 15: Weibull RUL Analysis",
-        "disabled": false,
-        "info": "Weibull-based Remaining Useful Life prediction using Trend Predictor"
-    },
-    {
         "id": "weibull-inject-1",
         "type": "inject",
         "z": "weibull-rul-tab",
@@ -2842,12 +2862,10 @@
         "z": "weibull-rul-tab",
         "name": "Weibull RUL",
         "mode": "rul",
-        "rulMethod": "weibull",
+        "windowSize": 50,
+        "warningThreshold": 80,
         "weibullBeta": 3.5,
         "weibullEta": 1350,
-        "warningThreshold": 80,
-        "criticalThreshold": 95,
-        "windowSize": 50,
         "x": 430,
         "y": 140,
         "wires": [
@@ -2880,13 +2898,6 @@
         "x": 630,
         "y": 180,
         "wires": []
-    },
-    {
-        "id": "cepstrum-tab",
-        "type": "tab",
-        "label": "Example 17: Cepstrum Gearbox Analysis",
-        "disabled": false,
-        "info": "Cepstrum analysis for gearbox fault detection using Signal Analyzer"
     },
     {
         "id": "cepstrum-inject",
@@ -2934,13 +2945,9 @@
         "z": "cepstrum-tab",
         "name": "Cepstrum Analysis",
         "mode": "cepstrum",
-        "samplingRate": 10000,
         "fftSize": 2048,
+        "samplingRate": 10000,
         "shaftSpeed": 1500,
-        "gearTeethCount": 20,
-        "quefrencyRangeMin": 0.001,
-        "quefrencyRangeMax": 0.1,
-        "cepstrumPeakThreshold": 0.1,
         "x": 630,
         "y": 100,
         "wires": [
@@ -2973,13 +2980,6 @@
         "x": 840,
         "y": 120,
         "wires": []
-    },
-    {
-        "id": "mahalanobis-tab",
-        "type": "tab",
-        "label": "Example 18: Mahalanobis Anomaly Detection",
-        "disabled": false,
-        "info": "Multivariate anomaly detection with Mahalanobis distance using Multi-Value Processor"
     },
     {
         "id": "mahal-inject-normal",
@@ -3038,8 +3038,8 @@
         "name": "Mahalanobis Distance",
         "mode": "analyze",
         "anomalyMethod": "mahalanobis",
-        "threshold": 3.0,
-        "warningThreshold": 2.0,
+        "threshold": 3,
+        "warningThreshold": 2,
         "windowSize": 50,
         "x": 400,
         "y": 140,
@@ -3073,5 +3073,303 @@
         "x": 620,
         "y": 180,
         "wires": []
+    },
+    {
+        "id": "battery-comment-header",
+        "type": "comment",
+        "z": "battery-rul-tab",
+        "name": "Batterie Restlaufzeit (RUL) - 300Ah Batterie",
+        "info": "Dieser Flow simuliert einen Batterie-Shunt und berechnet die verbleibende Laufzeit.\n\n**Eingangsdaten vom Shunt:**\n- voltage: Batteriespannung (V)\n- current: Entladestrom (A)\n- soc: State of Charge (%)\n- consumedAh: Verbrauchte Ah\n\n**Berechnung:**\n- Verfügbare Ah = (SOC / 100) × Kapazität\n- Restlaufzeit = Verfügbare Ah / Strom",
+        "x": 230,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "battery-inject-start",
+        "type": "inject",
+        "z": "battery-rul-tab",
+        "name": "Start Batterie Simulation",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 180,
+        "y": 120,
+        "wires": [
+            [
+                "battery-simulate-shunt"
+            ]
+        ]
+    },
+    {
+        "id": "battery-inject-manual",
+        "type": "inject",
+        "z": "battery-rul-tab",
+        "name": "Joerns Shunt Daten (Beispiel)",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "{\"modelId\":41859,\"voltage\":13.64,\"alarm\":\"NO_ALARM\",\"auxMode\":\"STARTER_VOLTAGE\",\"current\":0,\"consumedAh\":-0.5,\"soc\":99.8,\"starterVoltage\":13.61}",
+        "payloadType": "json",
+        "x": 190,
+        "y": 180,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "battery-simulate-shunt",
+        "type": "function",
+        "z": "battery-rul-tab",
+        "name": "Simuliere Batterie-Shunt",
+        "func": "// Batterie Simulation mit Entladung\n// Kapazität: 300 Ah\n// ZEITRAFFER: x60 (1 Zyklus = 2 Minuten simuliert statt 2 Sekunden)\n\nflow.cycle = (flow.cycle || 0) + 1;\nflow.soc = flow.soc || 100;\nflow.consumedAh = flow.consumedAh || 0;\n\n// Simulierter Stromverbrauch (variiert zwischen 10A und 25A)\nvar baseLoad = 15; // Grundlast 15A\nvar variation = (Math.sin(flow.cycle * 0.1) + 1) * 5; // 0-10A Variation\nvar spikes = Math.random() < 0.1 ? Math.random() * 10 : 0; // Gelegentliche Lastspitzen\nvar current = baseLoad + variation + spikes;\n\n// SOC reduzieren - ZEITRAFFER x60\n// Bei 300Ah: 100% = 300Ah\n// 2 Sek * 60 = 2 Min pro Zyklus simuliert\nvar SPEEDUP = 60;\nvar ahPerCycle = current * (2 * SPEEDUP / 3600); // 2 Minuten simulierte Zeit\nflow.consumedAh += ahPerCycle;\nflow.soc = Math.max(0, 100 - (flow.consumedAh / 3)); // 300Ah = 100%\n\n// Spannung basierend auf SOC (11.8V-14.4V Bereich für 12V LiFePO4)\nvar voltage = 11.8 + (flow.soc / 100) * 2.6;\n\n// Shunt-Daten Format (wie vom echten Gerät)\nmsg.payload = {\n    modelId: 41859,\n    voltage: Math.round(voltage * 100) / 100,\n    alarm: flow.soc < 20 ? \"LOW_BATTERY\" : \"NO_ALARM\",\n    auxMode: \"STARTER_VOLTAGE\",\n    current: Math.round(current * 10) / 10,\n    consumedAh: Math.round(flow.consumedAh * 10) / 10,\n    soc: Math.round(flow.soc * 10) / 10,\n    starterVoltage: Math.round((voltage - 0.03) * 100) / 100\n};\n\nmsg.timestamp = Date.now();\n\n// Reset nach 200 Zyklen (~6.6h simuliert) oder wenn Batterie leer\nif (flow.cycle > 200 || flow.soc <= 0) {\n    flow.cycle = 0;\n    flow.soc = 100;\n    flow.consumedAh = 0;\n    node.warn(\"Batterie Simulation zurueckgesetzt auf 100%\");\n}\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 470,
+        "y": 120,
+        "wires": [
+            [
+                "battery-extract-values",
+                "battery-debug-raw"
+            ]
+        ]
+    },
+    {
+        "id": "battery-extract-values",
+        "type": "function",
+        "z": "battery-rul-tab",
+        "name": "SOC - Degradation",
+        "func": "// Batterie Kapazität in Ah\nconst BATTERY_CAPACITY = 300;\n\n// Shunt-Daten auslesen\nconst data = msg.payload;\nconst soc = data.soc;\nconst current = Math.abs(data.current);\nconst voltage = data.voltage;\nconst consumedAh = Math.abs(data.consumedAh);\n\n// Für RUL-Node: Degradation = 100 - SOC\n// (Wert steigt Richtung 100 = \"Failure\" = Batterie leer)\nmsg.payload = 100 - soc;\nmsg.timestamp = Date.now();\n\n// Batterie-Info für spätere Verwendung\nmsg.battery = {\n    capacity: BATTERY_CAPACITY,\n    soc: soc,\n    current: current,\n    voltage: voltage,\n    consumedAh: consumedAh,\n    availableAh: Math.round((soc / 100) * BATTERY_CAPACITY * 10) / 10\n};\n\n// Einfache Restlaufzeit-Berechnung (falls kein Trend verfügbar)\nif (current > 0) {\n    msg.battery.simpleRuntimeHours = Math.round(msg.battery.availableAh / current * 10) / 10;\n} else {\n    msg.battery.simpleRuntimeHours = Infinity;\n}\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 750,
+        "y": 180,
+        "wires": [
+            [
+                "battery-trend-predictor"
+            ]
+        ]
+    },
+    {
+        "id": "battery-trend-predictor",
+        "type": "trend-predictor",
+        "z": "battery-rul-tab",
+        "name": "Batterie RUL",
+        "mode": "rul",
+        "method": "linear",
+        "predictionSteps": 100,
+        "windowSize": 30,
+        "threshold": "",
+        "rocMethod": "absolute",
+        "timeWindow": 1,
+        "rocThreshold": "",
+        "failureThreshold": "100",
+        "warningThreshold": "80",
+        "rulUnit": "hours",
+        "degradationModel": "linear",
+        "confidenceLevel": "0.95",
+        "weibullBeta": "2.0",
+        "weibullEta": "1000",
+        "outputTopic": "battery/rul",
+        "debug": false,
+        "x": 990,
+        "y": 180,
+        "wires": [
+            [
+                "battery-format-status"
+            ],
+            [
+                "battery-format-warning"
+            ]
+        ]
+    },
+    {
+        "id": "battery-format-status",
+        "type": "function",
+        "z": "battery-rul-tab",
+        "name": "Status formatieren",
+        "func": "const battery = msg.battery || {};\nconst rul = msg.rul || {};\n\n// Restlaufzeit formatieren\nlet runtimeText = \"\";\nlet runtimeHours = 0;\n\nif (rul.value === Infinity || rul.status === 'stable') {\n    runtimeText = \"∞ (keine Entladung / stabil)\";\n} else if (typeof rul.value === 'number' && isFinite(rul.value)) {\n    runtimeHours = rul.value;\n    const hours = Math.floor(runtimeHours);\n    const mins = Math.round((runtimeHours - hours) * 60);\n    runtimeText = hours + \"h \" + mins + \"min\";\n} else {\n    // Fallback auf einfache Berechnung\n    if (battery.simpleRuntimeHours && isFinite(battery.simpleRuntimeHours)) {\n        runtimeHours = battery.simpleRuntimeHours;\n        const hours = Math.floor(runtimeHours);\n        const mins = Math.round((runtimeHours - hours) * 60);\n        runtimeText = hours + \"h \" + mins + \"min (geschätzt)\";\n    } else {\n        runtimeText = \"Berechnung läuft...\";\n    }\n}\nmsg.topic = \"Batterie Status\";\nmsg.payload = {\n    \"Ladezustand (SOC)\": battery.soc + \" %\",\n    \"Spannung\": battery.voltage + \" V\",\n    \"Strom\": battery.current + \" A\",\n    \"Verfügbar\": battery.availableAh + \" Ah\",\n    \"Verbraucht\": battery.consumedAh + \" Ah\",\n    \"Restlaufzeit\": runtimeText,\n    \"Konfidenz\": rul.confidence ? (rul.confidence * 100).toFixed(0) + \"%\" : \"n/a\",\n    \"Zustand\": rul.status || \"berechne...\"\n};\n\n// Node-Status setzen\nvar statusColor = \"green\";\nif (battery.soc < 20) statusColor = \"red\";\nelse if (battery.soc < 50) statusColor = \"yellow\";\n\nnode.status({\n    fill: statusColor,\n    shape: \"dot\",\n    text: battery.soc + \"% | \" + runtimeText\n});\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1210,
+        "y": 100,
+        "wires": [
+            [
+                "battery-debug-status"
+            ]
+        ]
+    },
+    {
+        "id": "battery-format-warning",
+        "type": "function",
+        "z": "battery-rul-tab",
+        "name": "Warnung formatieren",
+        "func": "const battery = msg.battery || {};\nconst rul = msg.rul || {};\nconst degradation = msg.degradation || {};\n\nmsg.topic = \"BATTERIE WARNUNG\";\n\nmsg.payload = {\n    \"Ladezustand\": battery.soc + \" %\",\n    \"Status\": rul.status || \"kritisch\",\n    \"Restlaufzeit\": rul.value ? rul.value.toFixed(1) + \" Stunden\" : \"sehr gering\",\n    \"Degradation\": degradation.percent ? degradation.percent.toFixed(1) + \"%\" : \"hoch\",\n    \"Trend\": degradation.trend || \"steigend\",\n    \"Empfehlung\": battery.soc < 20 ? \"SOFORT LADEN!\" : \"Bald laden\"\n};\n\nnode.status({\n    fill: \"red\",\n    shape: \"ring\",\n    text: \"WARNUNG SOC: \" + battery.soc + \"%\"\n});\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1220,
+        "y": 180,
+        "wires": [
+            [
+                "battery-debug-warning"
+            ]
+        ]
+    },
+    {
+        "id": "battery-debug-raw",
+        "type": "debug",
+        "z": "battery-rul-tab",
+        "name": "Shunt Rohdaten",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "payload.soc",
+        "statusType": "auto",
+        "x": 720,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "battery-debug-status",
+        "type": "debug",
+        "z": "battery-rul-tab",
+        "name": "Batterie Status",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1520,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "battery-debug-warning",
+        "type": "debug",
+        "z": "battery-rul-tab",
+        "name": "Batterie Warnung",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1510,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "battery-comment-usage",
+        "type": "comment",
+        "z": "battery-rul-tab",
+        "name": "Anleitung: Ersetze den Inject-Node durch deinen MQTT/Modbus Shunt-Input",
+        "info": "**So verwendest du diesen Flow mit deinem echten Shunt:**\n\n1. Lösche oder deaktiviere den \"Start Batterie Simulation\" Inject-Node\n2. Füge deinen MQTT-In oder Modbus-Node hinzu\n3. Verbinde ihn mit dem \"SOC - Degradation\" Function-Node\n\n**Erwartetes Datenformat:**\n```json\n{\n  \"voltage\": 13.64,\n  \"current\": 15.5,\n  \"soc\": 85.2,\n  \"consumedAh\": 44.4\n}\n```\n\n**Kapazität anpassen:**\nÄndere `BATTERY_CAPACITY` im \"SOC - Degradation\" Node auf deine Batteriekapazität.",
+        "x": 310,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "battery-reset-inject",
+        "type": "inject",
+        "z": "battery-rul-tab",
+        "name": "Reset Simulation",
+        "props": [
+            {
+                "p": "reset",
+                "v": "true",
+                "vt": "bool"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 700,
+        "y": 300,
+        "wires": [
+            [
+                "battery-trend-predictor",
+                "7cf0aa19ad1baa94"
+            ]
+        ]
+    },
+    {
+        "id": "7cf0aa19ad1baa94",
+        "type": "change",
+        "z": "battery-rul-tab",
+        "name": "",
+        "rules": [
+            {
+                "t": "set",
+                "p": "cycle",
+                "pt": "flow",
+                "to": "0",
+                "tot": "num"
+            },
+            {
+                "t": "set",
+                "p": "soc",
+                "pt": "flow",
+                "to": "100",
+                "tot": "num"
+            },
+            {
+                "t": "set",
+                "p": "consumedAh",
+                "pt": "flow",
+                "to": "0",
+                "tot": "num"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 980,
+        "y": 300,
+        "wires": [
+            []
+        ]
     }
 ]

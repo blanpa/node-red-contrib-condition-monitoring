@@ -13,7 +13,8 @@
             contributionThreshold: { value: 0.1, validate: RED.validators.number() },
             showTopContributors: { value: 3, validate: RED.validators.number() },
             outputTopic: { value: "" },
-            debug: { value: false }
+            debug: { value: false },
+            persistState: { value: false }
         },
         inputs: 1,
         outputs: 2,
@@ -194,6 +195,13 @@
                 <label for="node-input-debug" style="width: auto;">
                     <input type="checkbox" id="node-input-debug" style="width: auto; margin-right: 5px;">
                     Enable debug logging
+                </label>
+            </div>
+            
+            <div class="form-row">
+                <label for="node-input-persistState" style="width: auto;">
+                    <input type="checkbox" id="node-input-persistState" style="width: auto; margin-right: 5px;">
+                    <i class="fa fa-save"></i> Persist trained model across restarts
                 </label>
             </div>
         </div>

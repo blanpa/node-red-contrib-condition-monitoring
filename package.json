@@ -1,6 +1,6 @@
 {
   "name": "node-red-contrib-condition-monitoring",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Node-RED Nodes for anomaly detection, predictive maintenance, and time series analysis",
   "scripts": {
     "test": "jest --testTimeout=10000"
@@ -62,7 +62,10 @@
   },
   "homepage": "https://github.com/blanpa/node-red-contrib-condition-monitoring#readme",
   "dependencies": {
+    "fft.js": "^4.0.4",
     "ml-isolation-forest": "^0.1.0",
+    "ml-matrix": "^6.12.1",
+    "ml-pca": "^4.1.1",
     "simple-statistics": "^7.8.8"
   },
   "optionalDependencies": {

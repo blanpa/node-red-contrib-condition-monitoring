@@ -1,9 +1,28 @@
 module.exports = function(RED) {
     "use strict";
     
+    // Load high-performance FFT library (Radix-4 Cooley-Tukey algorithm)
+    var FFT = null;
+    try {
+        FFT = require('fft.js');
+    } catch (err) {
+        // Fallback to naive implementation if fft.js not available
+    }
+    
+    // Import state persistence
+    var StatePersistence = null;
+    try {
+        StatePersistence = require('./state-persistence');
+    } catch (err) {
+        // State persistence not available
+    }
+    
     function SignalAnalyzerNode(config) {
         RED.nodes.createNode(this, config);
         var node = this;
+        
+        // FFT instance cache for performance
+        this.fftInstances = {};
         
         // Configuration
         this.mode = config.mode || "fft"; // fft, vibration, peaks, envelope, cepstrum
@@ -51,12 +70,51 @@ module.exports = function(RED) {
         // Advanced settings
         this.outputTopic = config.outputTopic || "";
         this.debug = config.debug === true;
+        this.persistState = config.persistState === true;
         
         // State
         this.buffer = [];
         this.timestamps = [];
         this.sampleCount = 0;
         this.lastProcessedIndex = 0;
+        
+        // State persistence manager
+        this.stateManager = null;
+        
+        // Helper to persist current state
+        function persistCurrentState() {
+            if (node.stateManager && node.buffer.length > 0) {
+                node.stateManager.setMultiple({
+                    buffer: node.buffer,
+                    timestamps: node.timestamps,
+                    sampleCount: node.sampleCount,
+                    lastProcessedIndex: node.lastProcessedIndex
+                });
+            }
+        }
+        
+        // Initialize state persistence if enabled
+        if (node.persistState && StatePersistence) {
+            node.stateManager = new StatePersistence.NodeStateManager(node, {
+                stateKey: 'signalAnalyzerState',
+                saveInterval: 30000 // Save every 30 seconds
+            });
+            
+            // Load persisted state on startup
+            node.stateManager.load().then(function(state) {
+                if (state.buffer && state.buffer.length > 0) {
+                    node.buffer = state.buffer;
+                    node.timestamps = state.timestamps || [];
+                    node.sampleCount = state.sampleCount || 0;
+                    node.lastProcessedIndex = state.lastProcessedIndex || 0;
+                    
+                    node.status({fill: "green", shape: "dot", text: node.mode + " - restored (" + node.buffer.length + " samples)"});
+                    node.debug && node.warn("[DEBUG] Restored signal buffer from persistence: " + node.buffer.length + " samples");
+                }
+            }).catch(function(err) {
+                node.debug && node.warn("[DEBUG] Failed to load persisted state: " + err.message);
+            });
+        }
         
         node.status({fill: "blue", shape: "ring", text: node.mode + " mode"});
         
@@ -104,45 +162,74 @@ module.exports = function(RED) {
             return windowed;
         }
         
-        // FFT Implementation
+        // FFT Implementation - uses fft.js (Radix-4 Cooley-Tukey) when available
+        // Performance: O(n log n) vs O(n²) for naive DFT
         function performFFT(signal, fftSize, samplingRate, windowType) {
             var n = fftSize;
-            var paddedSignal = new Array(n);
+            
+            // Ensure n is power of 2 (required by fft.js)
+            if ((n & (n - 1)) !== 0) {
+                // Find next power of 2
+                n = Math.pow(2, Math.ceil(Math.log2(n)));
+            }
             
             // Apply window function
             var windowedSignal = applyWindow(signal.slice(0, Math.min(signal.length, n)), windowType || node.windowFunction);
             
+            // Pad to FFT size
+            var paddedSignal = new Array(n);
             for (var i = 0; i < n; i++) {
-                if (i < windowedSignal.length) {
-                    paddedSignal[i] = windowedSignal[i];
-                } else {
-                    paddedSignal[i] = 0;
-                }
+                paddedSignal[i] = i < windowedSignal.length ? windowedSignal[i] : 0;
             }
             
-            var real = new Array(n / 2);
-            var imag = new Array(n / 2);
+            var magnitudes, frequencies;
             
-            for (var k = 0; k < n / 2; k++) {
-                var sumReal = 0;
-                var sumImag = 0;
-                
-                for (var t = 0; t < n; t++) {
-                    var angle = -2 * Math.PI * k * t / n;
-                    sumReal += paddedSignal[t] * Math.cos(angle);
-                    sumImag += paddedSignal[t] * Math.sin(angle);
+            if (FFT) {
+                // Use high-performance fft.js library (Radix-4 algorithm)
+                // Cache FFT instances for different sizes
+                if (!node.fftInstances[n]) {
+                    node.fftInstances[n] = new FFT(n);
                 }
+                var fft = node.fftInstances[n];
                 
-                real[k] = sumReal;
-                imag[k] = sumImag;
-            }
-            
-            var magnitudes = new Array(n / 2);
-            var frequencies = new Array(n / 2);
-            
-            for (var k = 0; k < n / 2; k++) {
-                magnitudes[k] = Math.sqrt(real[k] * real[k] + imag[k] * imag[k]) / n;
-                frequencies[k] = k * samplingRate / n;
+                // fft.js requires interleaved complex format [re0, im0, re1, im1, ...]
+                var complexInput = fft.toComplexArray(paddedSignal, null);
+                var complexOutput = fft.createComplexArray();
+                
+                // Perform FFT
+                fft.realTransform(complexOutput, paddedSignal);
+                fft.completeSpectrum(complexOutput);
+                
+                // Extract magnitudes (only positive frequencies: 0 to n/2)
+                magnitudes = new Array(n / 2);
+                frequencies = new Array(n / 2);
+                
+                for (var k = 0; k < n / 2; k++) {
+                    var re = complexOutput[2 * k];
+                    var im = complexOutput[2 * k + 1];
+                    magnitudes[k] = Math.sqrt(re * re + im * im) / n;
+                    frequencies[k] = k * samplingRate / n;
+                }
+            } else {
+                // Fallback to naive DFT (O(n²) - slow for large signals)
+                debugLog("Using fallback DFT - install fft.js for better performance");
+                
+                magnitudes = new Array(n / 2);
+                frequencies = new Array(n / 2);
+                
+                for (var k = 0; k < n / 2; k++) {
+                    var sumReal = 0;
+                    var sumImag = 0;
+                    
+                    for (var t = 0; t < n; t++) {
+                        var angle = -2 * Math.PI * k * t / n;
+                        sumReal += paddedSignal[t] * Math.cos(angle);
+                        sumImag += paddedSignal[t] * Math.sin(angle);
+                    }
+                    
+                    magnitudes[k] = Math.sqrt(sumReal * sumReal + sumImag * sumImag) / n;
+                    frequencies[k] = k * samplingRate / n;
+                }
             }
             
             return { frequencies: frequencies, magnitudes: magnitudes };
@@ -957,13 +1044,35 @@ module.exports = function(RED) {
             }
         });
         
-        node.on('close', function() {
+        node.on('close', async function(done) {
+            // Save state before closing if persistence enabled
+            if (node.stateManager) {
+                try {
+                    persistCurrentState();
+                    await node.stateManager.close();
+                } catch (err) {
+                    // Ignore persistence errors during shutdown
+                }
+            }
+            
             node.buffer = [];
             node.timestamps = [];
             node.sampleCount = 0;
+            node.fftInstances = {}; // Clear FFT instance cache
             node.status({});
+            
+            if (done) done();
         });
     }
     
     RED.nodes.registerType("signal-analyzer", SignalAnalyzerNode);
+    
+    // API endpoint to check FFT library availability
+    RED.httpAdmin.get('/signal-analyzer/fft-status', function(req, res) {
+        res.json({ 
+            available: FFT !== null,
+            library: FFT ? 'fft.js (Radix-4)' : 'fallback DFT',
+            performance: FFT ? 'O(n log n)' : 'O(n²)'
+        });
+    });
 };
