@@ -263,4 +263,240 @@ describe('health-index Node', function() {
             }, 100);
         });
     });
+
+    // ============================================
+    // Dynamic Weighting Tests
+    // ============================================
+
+    describe('Dynamic Weighting', function() {
+        
+        it('should use dynamic aggregation method', function(done) {
+            const flow = [
+                { 
+                    id: "n1", 
+                    type: "health-index", 
+                    name: "test",
+                    aggregationMethod: "dynamic",
+                    wires: [["n2"], ["n3"]] 
+                },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            
+            helper.load(healthIndexNode, flow, function() {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                const n3 = helper.getNode("n3");
+                
+                let received = false;
+                const handleMessage = function(msg) {
+                    if (received) return;
+                    received = true;
+                    try {
+                        expect(msg.method).toBe("dynamic");
+                        expect(msg).toHaveProperty('dynamicWeights');
+                        done();
+                    } catch(err) {
+                        done(err);
+                    }
+                };
+                
+                n2.on("input", handleMessage);
+                n3.on("input", handleMessage);
+                
+                n1.receive({ 
+                    payload: { 
+                        sensor1: { value: 50, isAnomaly: false },
+                        sensor2: { value: 50, isAnomaly: false }
+                    } 
+                });
+            });
+        });
+
+        it('should include dynamic weight info for each sensor', function(done) {
+            const flow = [
+                { 
+                    id: "n1", 
+                    type: "health-index", 
+                    name: "test",
+                    aggregationMethod: "dynamic",
+                    wires: [["n2"], ["n3"]] 
+                },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            
+            helper.load(healthIndexNode, flow, function() {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                const n3 = helper.getNode("n3");
+                
+                let received = false;
+                const handleMessage = function(msg) {
+                    if (received) return;
+                    received = true;
+                    try {
+                        expect(msg.dynamicWeights).toHaveProperty('sensor1');
+                        expect(msg.dynamicWeights).toHaveProperty('sensor2');
+                        expect(msg.dynamicWeights.sensor1).toHaveProperty('effectiveWeight');
+                        expect(msg.dynamicWeights.sensor1).toHaveProperty('reliabilityFactor');
+                        expect(msg.dynamicWeights.sensor1).toHaveProperty('anomalyRate');
+                        done();
+                    } catch(err) {
+                        done(err);
+                    }
+                };
+                
+                n2.on("input", handleMessage);
+                n3.on("input", handleMessage);
+                
+                n1.receive({ 
+                    payload: { 
+                        sensor1: { value: 50, isAnomaly: false },
+                        sensor2: { value: 50, isAnomaly: false }
+                    } 
+                });
+            });
+        });
+
+        it('should reduce weight for sensors with high anomaly rate', function(done) {
+            const flow = [
+                { 
+                    id: "n1", 
+                    type: "health-index", 
+                    name: "test",
+                    aggregationMethod: "dynamic",
+                    wires: [["n2"], ["n3"]] 
+                },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            
+            helper.load(healthIndexNode, flow, function() {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                const n3 = helper.getNode("n3");
+                
+                let messageCount = 0;
+                const handleMessage = function(msg) {
+                    messageCount++;
+                    // After enough messages, sensor2 should have reduced weight
+                    if (messageCount >= 15) {
+                        try {
+                            // sensor2 has 50% anomaly rate, should have lower reliability
+                            expect(msg.dynamicWeights.sensor2.anomalyRate).toBeGreaterThan(0.3);
+                            expect(msg.dynamicWeights.sensor2.reliabilityFactor).toBeLessThan(1.0);
+                            // sensor1 has no anomalies, should have higher reliability
+                            expect(msg.dynamicWeights.sensor1.reliabilityFactor).toBeGreaterThanOrEqual(
+                                msg.dynamicWeights.sensor2.reliabilityFactor
+                            );
+                            done();
+                        } catch(err) {
+                            done(err);
+                        }
+                    }
+                };
+                
+                n2.on("input", handleMessage);
+                n3.on("input", handleMessage);
+                
+                // Send mixed data - sensor1 always normal, sensor2 alternates
+                for (let i = 0; i < 20; i++) {
+                    n1.receive({ 
+                        payload: { 
+                            sensor1: { value: 50, isAnomaly: false },
+                            sensor2: { value: 50, isAnomaly: i % 2 === 0 } // 50% anomaly rate
+                        } 
+                    });
+                }
+            });
+        });
+
+        it('should consider confidence in dynamic weighting', function(done) {
+            const flow = [
+                { 
+                    id: "n1", 
+                    type: "health-index", 
+                    name: "test",
+                    aggregationMethod: "dynamic",
+                    wires: [["n2"], ["n3"]] 
+                },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            
+            helper.load(healthIndexNode, flow, function() {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                const n3 = helper.getNode("n3");
+                
+                let received = false;
+                const handleMessage = function(msg) {
+                    if (received) return;
+                    received = true;
+                    try {
+                        // Low confidence sensor should have lower effective weight
+                        expect(msg.dynamicWeights.lowConfSensor.effectiveWeight).toBeLessThan(
+                            msg.dynamicWeights.highConfSensor.effectiveWeight
+                        );
+                        done();
+                    } catch(err) {
+                        done(err);
+                    }
+                };
+                
+                n2.on("input", handleMessage);
+                n3.on("input", handleMessage);
+                
+                n1.receive({ 
+                    payload: { 
+                        highConfSensor: { value: 50, isAnomaly: false, confidence: 0.95 },
+                        lowConfSensor: { value: 50, isAnomaly: false, confidence: 0.3 }
+                    } 
+                });
+            });
+        });
+
+        it('should include reliability info in worst sensor output', function(done) {
+            const flow = [
+                { 
+                    id: "n1", 
+                    type: "health-index", 
+                    name: "test",
+                    aggregationMethod: "dynamic",
+                    wires: [["n2"], ["n3"]] 
+                },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            
+            helper.load(healthIndexNode, flow, function() {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                const n3 = helper.getNode("n3");
+                
+                let received = false;
+                const handleMessage = function(msg) {
+                    if (received) return;
+                    received = true;
+                    try {
+                        expect(msg.worstSensor).toHaveProperty('reliability');
+                        done();
+                    } catch(err) {
+                        done(err);
+                    }
+                };
+                
+                n2.on("input", handleMessage);
+                n3.on("input", handleMessage);
+                
+                n1.receive({ 
+                    payload: { 
+                        sensor1: { value: 50, isAnomaly: false },
+                        sensor2: { value: 50, isAnomaly: true }
+                    } 
+                });
+            });
+        });
+    });
 });

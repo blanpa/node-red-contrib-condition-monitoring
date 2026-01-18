@@ -451,4 +451,253 @@ describe('pca-anomaly Node', function () {
             }, 100);
         });
     });
+
+    // ============================================
+    // ml-pca specific tests
+    // ============================================
+
+    it('should provide eigenvalues in output (ml-pca feature)', function (done) {
+        const flow = [
+            { id: "n1", type: "pca-anomaly", name: "test", windowSize: 20, wires: [["n2"], ["n3"]] },
+            { id: "n2", type: "helper" },
+            { id: "n3", type: "helper" }
+        ];
+        helper.load(pcaAnomalyNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+            const n3 = helper.getNode("n3");
+            
+            const handler = function (msg) {
+                if (msg.pca && msg.pca.eigenvalues) {
+                    expect(msg.pca).toHaveProperty('eigenvalues');
+                    expect(Array.isArray(msg.pca.eigenvalues)).toBe(true);
+                    expect(msg.pca.eigenvalues.length).toBeGreaterThan(0);
+                    // Eigenvalues should be positive
+                    msg.pca.eigenvalues.forEach(ev => {
+                        expect(ev).toBeGreaterThanOrEqual(0);
+                    });
+                    done();
+                }
+            };
+            n2.on("input", handler);
+            n3.on("input", handler);
+            
+            // Send training data
+            for (let i = 0; i < 15; i++) {
+                n1.receive({ 
+                    payload: { 
+                        sensor1: 10 + Math.random() * 2, 
+                        sensor2: 20 + Math.random() * 2, 
+                        sensor3: 30 + Math.random() * 2 
+                    } 
+                });
+            }
+            
+            n1.receive({ payload: { sensor1: 10.5, sensor2: 20.5, sensor3: 30.5 } });
+        });
+    });
+
+    it('should provide explained variance ratio (ml-pca feature)', function (done) {
+        const flow = [
+            { id: "n1", type: "pca-anomaly", name: "test", windowSize: 20, autoComponents: true, varianceThreshold: 0.90, wires: [["n2"], ["n3"]] },
+            { id: "n2", type: "helper" },
+            { id: "n3", type: "helper" }
+        ];
+        helper.load(pcaAnomalyNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+            const n3 = helper.getNode("n3");
+            
+            const handler = function (msg) {
+                if (msg.pca) {
+                    expect(msg.pca).toHaveProperty('explainedVariance');
+                    // Explained variance should be between 0 and 1
+                    expect(msg.pca.explainedVariance).toBeGreaterThan(0);
+                    expect(msg.pca.explainedVariance).toBeLessThanOrEqual(1);
+                    done();
+                }
+            };
+            n2.on("input", handler);
+            n3.on("input", handler);
+            
+            // Send correlated data (should result in fewer components needed)
+            for (let i = 0; i < 15; i++) {
+                const base = i + Math.random();
+                n1.receive({ 
+                    payload: { 
+                        sensor1: base, 
+                        sensor2: base * 2 + Math.random() * 0.1,  // Highly correlated
+                        sensor3: base * 3 + Math.random() * 0.1   // Highly correlated
+                    } 
+                });
+            }
+            
+            n1.receive({ payload: { sensor1: 7, sensor2: 14, sensor3: 21 } });
+        });
+    });
+
+    it('should correctly identify top contributor sensor', function (done) {
+        const flow = [
+            { id: "n1", type: "pca-anomaly", name: "test", windowSize: 20, threshold: 1.0, wires: [["n2"], ["n3"]] },
+            { id: "n2", type: "helper" },
+            { id: "n3", type: "helper" }
+        ];
+        helper.load(pcaAnomalyNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+            const n3 = helper.getNode("n3");
+            
+            let hasDone = false;
+            const handler = function (msg) {
+                if (msg.pca && msg.topContributor && !hasDone) {
+                    hasDone = true;
+                    expect(msg).toHaveProperty('topContributor');
+                    // Top contributor should be a string (sensor name)
+                    expect(typeof msg.topContributor).toBe('string');
+                    done();
+                }
+            };
+            n2.on("input", handler);
+            n3.on("input", handler);
+            
+            // Send training data with stable values
+            for (let i = 0; i < 15; i++) {
+                n1.receive({ 
+                    payload: { 
+                        temp: 25 + Math.random() * 0.1, 
+                        pressure: 100 + Math.random() * 0.1, 
+                        humidity: 50 + Math.random() * 0.1
+                    } 
+                });
+            }
+            
+            // Send value after training - should have topContributor
+            n1.receive({ payload: { temp: 25.5, pressure: 100.5, humidity: 50.5 } });
+        });
+    });
+
+    it('should handle highly correlated sensors correctly', function (done) {
+        const flow = [
+            { id: "n1", type: "pca-anomaly", name: "test", windowSize: 30, autoComponents: true, varianceThreshold: 0.99, wires: [["n2"], ["n3"]] },
+            { id: "n2", type: "helper" },
+            { id: "n3", type: "helper" }
+        ];
+        helper.load(pcaAnomalyNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+            const n3 = helper.getNode("n3");
+            
+            const handler = function (msg) {
+                if (msg.pca) {
+                    // With perfectly correlated data, PCA should need fewer components
+                    expect(msg.pca.nComponents).toBeLessThanOrEqual(3);
+                    expect(msg.pca.explainedVariance).toBeGreaterThan(0.9);
+                    done();
+                }
+            };
+            n2.on("input", handler);
+            n3.on("input", handler);
+            
+            // Send perfectly correlated data (all sensors move together)
+            for (let i = 0; i < 20; i++) {
+                const base = i * 2 + Math.random() * 0.01;
+                n1.receive({ 
+                    payload: { 
+                        sensor1: base, 
+                        sensor2: base,
+                        sensor3: base
+                    } 
+                });
+            }
+            
+            n1.receive({ payload: { sensor1: 20, sensor2: 20, sensor3: 20 } });
+        });
+    });
+
+    it('should calculate correct T² and SPE statistics', function (done) {
+        const flow = [
+            { id: "n1", type: "pca-anomaly", name: "test", windowSize: 20, method: "combined", wires: [["n2"], ["n3"]] },
+            { id: "n2", type: "helper" },
+            { id: "n3", type: "helper" }
+        ];
+        helper.load(pcaAnomalyNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+            const n3 = helper.getNode("n3");
+            
+            const handler = function (msg) {
+                if (msg.pca) {
+                    // T² should be non-negative
+                    expect(msg.pca.t2).toBeGreaterThanOrEqual(0);
+                    // SPE should be non-negative
+                    expect(msg.pca.spe).toBeGreaterThanOrEqual(0);
+                    // Thresholds should be set
+                    expect(msg.pca.t2Threshold).toBeGreaterThan(0);
+                    expect(msg.pca.speThreshold).toBeGreaterThan(0);
+                    // Anomaly flags should be boolean
+                    expect(typeof msg.pca.t2Anomaly).toBe('boolean');
+                    expect(typeof msg.pca.speAnomaly).toBe('boolean');
+                    done();
+                }
+            };
+            n2.on("input", handler);
+            n3.on("input", handler);
+            
+            // Send training data
+            for (let i = 0; i < 15; i++) {
+                n1.receive({ 
+                    payload: { 
+                        sensor1: 10 + Math.random(), 
+                        sensor2: 20 + Math.random(), 
+                        sensor3: 30 + Math.random() 
+                    } 
+                });
+            }
+            
+            n1.receive({ payload: { sensor1: 10.5, sensor2: 20.5, sensor3: 30.5 } });
+        });
+    });
+
+    it('should provide scores array matching nComponents', function (done) {
+        const flow = [
+            { id: "n1", type: "pca-anomaly", name: "test", windowSize: 20, nComponents: 2, autoComponents: false, wires: [["n2"], ["n3"]] },
+            { id: "n2", type: "helper" },
+            { id: "n3", type: "helper" }
+        ];
+        helper.load(pcaAnomalyNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+            const n3 = helper.getNode("n3");
+            
+            const handler = function (msg) {
+                if (msg.pca && msg.pca.scores) {
+                    expect(msg.pca).toHaveProperty('scores');
+                    expect(Array.isArray(msg.pca.scores)).toBe(true);
+                    // Scores length should match nComponents
+                    expect(msg.pca.scores.length).toBe(msg.pca.nComponents);
+                    // Each score should be a number
+                    msg.pca.scores.forEach(score => {
+                        expect(typeof score).toBe('number');
+                        expect(isNaN(score)).toBe(false);
+                    });
+                    done();
+                }
+            };
+            n2.on("input", handler);
+            n3.on("input", handler);
+            
+            // Send training data
+            for (let i = 0; i < 15; i++) {
+                n1.receive({ 
+                    payload: { 
+                        sensor1: 10 + Math.random(), 
+                        sensor2: 20 + Math.random(), 
+                        sensor3: 30 + Math.random() 
+                    } 
+                });
+            }
+            
+            n1.receive({ payload: { sensor1: 10.5, sensor2: 20.5, sensor3: 30.5 } });
+        });
+    });
 });

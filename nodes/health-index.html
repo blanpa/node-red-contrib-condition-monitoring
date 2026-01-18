@@ -13,7 +13,8 @@
             degradedThreshold: { value: 40 },
             criticalThreshold: { value: 20 },
             outputTopic: { value: "" },
-            debug: { value: false }
+            debug: { value: false },
+            persistState: { value: false }
         },
         inputs: 1,
         outputs: 2,
@@ -377,13 +378,14 @@
                 </label>
         <select id="node-input-aggregationMethod">
             <option value="weighted">Weighted Average</option>
+            <option value="dynamic">Dynamic Weighted (Auto-Reliability)</option>
             <option value="minimum">Minimum (Worst Case)</option>
             <option value="average">Simple Average</option>
             <option value="geometric">Geometric Mean</option>
         </select>
                 <div class="cm-help-text">
-                    Weighted: Uses sensor weights | Minimum: Conservative (worst sensor) | 
-                    Average: Equal importance | Geometric: Emphasizes poor sensors
+                    Weighted: Uses sensor weights | Dynamic: Auto-adjusts weights by reliability |
+                    Minimum: Conservative (worst sensor) | Average: Equal importance | Geometric: Emphasizes poor sensors
                 </div>
             </div>
         </div>
@@ -432,6 +434,14 @@
                     </label>
                     <input type="checkbox" id="node-input-debug" style="width: auto; margin-top: 8px;">
                     <div class="cm-help-text">Log detailed info to Node-RED debug</div>
+                </div>
+                
+                <div class="cm-config-item">
+                    <label for="node-input-persistState">
+                        <i class="fa fa-save"></i> Persist State
+                    </label>
+                    <input type="checkbox" id="node-input-persistState" style="width: auto; margin-top: 8px;">
+                    <div class="cm-help-text">Save health history across Node-RED restarts</div>
                 </div>
             </div>
         </div>
@@ -512,10 +522,33 @@
     <p><b>Aggregation Methods:</b></p>
     <ul>
         <li><b>Weighted Average:</b> Different sensors have different importance (configure weights)</li>
+        <li><b>Dynamic Weighted:</b> Automatically adjusts weights based on sensor reliability (see below)</li>
         <li><b>Minimum (Worst Case):</b> Health equals worst sensor (conservative)</li>
         <li><b>Simple Average:</b> All sensors equally important</li>
         <li><b>Geometric Mean:</b> Emphasizes poor sensors more than average</li>
     </ul>
+    
+    <h3>Dynamic Weighting</h3>
+    <p>The <b>Dynamic Weighted</b> method automatically adjusts sensor weights based on:</p>
+    <ul>
+        <li><b>Anomaly Rate:</b> Sensors with high anomaly rates (>30%) have reduced influence</li>
+        <li><b>Signal Variance:</b> Very noisy sensors (high coefficient of variation) are weighted lower</li>
+        <li><b>Confidence:</b> If sensor provides a confidence value, it affects the weight</li>
+    </ul>
+    <p><b>Output (msg.dynamicWeights):</b></p>
+    <pre>{
+  "sensor1": {
+    "effectiveWeight": 1.2,
+    "reliabilityFactor": 0.95,
+    "anomalyRate": 0.05
+  },
+  "sensor2": {
+    "effectiveWeight": 0.6,
+    "reliabilityFactor": 0.4,
+    "anomalyRate": 0.45
+  }
+}</pre>
+    <p>This helps automatically downweight sensors that are unreliable or produce noisy data.</p>
     <p><b>Health Status Thresholds:</b></p>
     <ul>
         <li><b>Healthy:</b> 80-100 - Normal operation</li>

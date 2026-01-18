@@ -20,9 +20,41 @@ services:
       - NODE_OPTIONS=--max_old_space_size=4096
       - NODE_ENV=development
       - TZ=Europe/Berlin
+      # MLflow Server URL für Integration (interner Container-Name)
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      # Von Node-RED aus erreichbar als http://mlflow:5000
+    restart: unless-stopped
+    depends_on:
+      - mlflow
+    networks:
+      - node-red-network
+
+  # MLflow Server für Model Registry und Experiment Tracking
+  # UI: http://localhost:5050
+  # API: http://localhost:5050/api/2.0/mlflow/
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.2
+    container_name: mlflow-server
+    ports:
+      - "5050:5000"
+    volumes:
+      - mlflow-data:/mlflow
+      - ./models:/mlflow/models:ro
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=sqlite:///mlflow/mlflow.db
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:///mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
     restart: unless-stopped
     networks:
       - node-red-network
+
+volumes:
+  mlflow-data:
 
 networks:
   node-red-network:

@@ -1,6 +1,14 @@
 module.exports = function(RED) {
     "use strict";
     
+    // Import state persistence
+    var StatePersistence = null;
+    try {
+        StatePersistence = require('./state-persistence');
+    } catch (err) {
+        // State persistence not available
+    }
+    
     function TrendPredictorNode(config) {
         RED.nodes.createNode(this, config);
         var node = this;
@@ -31,6 +39,7 @@ module.exports = function(RED) {
         // Advanced settings
         this.outputTopic = config.outputTopic || "";
         this.debug = config.debug === true;
+        this.persistState = config.persistState === true;
         
         // State
         this.buffer = [];
@@ -45,6 +54,46 @@ module.exports = function(RED) {
         this.previousValue = null;
         this.previousTimestamp = null;
         this.rocHistory = [];
+        
+        // State persistence manager
+        this.stateManager = null;
+        
+        // Helper to persist current state
+        function persistCurrentState() {
+            if (node.stateManager) {
+                node.stateManager.setMultiple({
+                    buffer: node.buffer,
+                    timestamps: node.timestamps,
+                    previousValue: node.previousValue,
+                    previousTimestamp: node.previousTimestamp,
+                    rocHistory: node.rocHistory
+                });
+            }
+        }
+        
+        // Initialize state persistence if enabled
+        if (node.persistState && StatePersistence) {
+            node.stateManager = new StatePersistence.NodeStateManager(node, {
+                stateKey: 'trendPredictorState',
+                saveInterval: 30000 // Save every 30 seconds
+            });
+            
+            // Load persisted state on startup
+            node.stateManager.load().then(function(state) {
+                if (state.buffer && state.buffer.length > 0) {
+                    node.buffer = state.buffer;
+                    node.timestamps = state.timestamps || [];
+                    node.previousValue = state.previousValue;
+                    node.previousTimestamp = state.previousTimestamp;
+                    node.rocHistory = state.rocHistory || [];
+                    
+                    debugLog("Restored " + node.buffer.length + " buffered values from persistence");
+                    node.status({fill: "green", shape: "dot", text: node.mode + " - restored (" + node.buffer.length + ")"});
+                }
+            }).catch(function(err) {
+                debugLog("Failed to load persisted state: " + err.message);
+            });
+        }
         
         node.status({fill: "blue", shape: "ring", text: node.mode + " mode"});
         
@@ -126,6 +175,69 @@ module.exports = function(RED) {
                 }
             }
             return null;
+        }
+        
+        // Moving Average Smoothing - reduces noise before RUL calculation
+        function smoothData(data, windowSize) {
+            if (data.length < windowSize) {
+                windowSize = data.length;
+            }
+            if (windowSize < 2) return data.slice();
+            
+            var smoothed = [];
+            var halfWindow = Math.floor(windowSize / 2);
+            
+            for (var i = 0; i < data.length; i++) {
+                var start = Math.max(0, i - halfWindow);
+                var end = Math.min(data.length, i + halfWindow + 1);
+                var sum = 0;
+                for (var j = start; j < end; j++) {
+                    sum += data[j];
+                }
+                smoothed.push(sum / (end - start));
+            }
+            return smoothed;
+        }
+        
+        // Median filter - removes outliers before trend calculation
+        function medianFilter(data, windowSize) {
+            if (data.length < windowSize) return data.slice();
+            if (windowSize < 3) windowSize = 3;
+            if (windowSize % 2 === 0) windowSize++; // Ensure odd window size
+            
+            var filtered = [];
+            var halfWindow = Math.floor(windowSize / 2);
+            
+            for (var i = 0; i < data.length; i++) {
+                var start = Math.max(0, i - halfWindow);
+                var end = Math.min(data.length, i + halfWindow + 1);
+                var window = data.slice(start, end).sort(function(a, b) { return a - b; });
+                filtered.push(window[Math.floor(window.length / 2)]);
+            }
+            return filtered;
+        }
+        
+        // Robust slope calculation using Theil-Sen estimator (median of slopes)
+        function robustSlope(data) {
+            if (data.length < 2) return 0;
+            
+            var slopes = [];
+            // For efficiency, sample pairs if data is large
+            var step = data.length > 50 ? Math.floor(data.length / 25) : 1;
+            
+            for (var i = 0; i < data.length; i += step) {
+                for (var j = i + 1; j < data.length; j += step) {
+                    if (j !== i) {
+                        slopes.push((data[j] - data[i]) / (j - i));
+                    }
+                }
+            }
+            
+            if (slopes.length === 0) return 0;
+            
+            // Return median slope
+            slopes.sort(function(a, b) { return a - b; });
+            return slopes[Math.floor(slopes.length / 2)];
         }
         
         // Weibull distribution functions
@@ -244,19 +356,45 @@ module.exports = function(RED) {
                 };
             }
             
-            // Calculate degradation rate using linear regression
-            var result = linearRegression(data, 1000);
-            var slope = result.slope;
+            // Step 1: Apply median filter to remove outliers
+            var filteredData = medianFilter(data, 5);
+            
+            // Step 2: Apply moving average smoothing to reduce noise
+            var smoothingWindow = Math.max(3, Math.floor(n / 10));
+            var smoothedData = smoothData(filteredData, smoothingWindow);
+            
+            // Step 3: Calculate robust slope using Theil-Sen estimator
+            var robustSlopeValue = robustSlope(smoothedData);
+            
+            // Step 4: Also calculate standard linear regression for comparison
+            var result = linearRegression(smoothedData, 1000);
+            var linearSlopeValue = result.slope;
+            
+            // Use weighted average of robust and linear slope
+            // Robust slope is more reliable but linear gives better R-squared
+            var slope = 0.7 * robustSlopeValue + 0.3 * linearSlopeValue;
+            
+            // Use smoothed current value for more stable estimate
+            var smoothedCurrentValue = smoothedData[n - 1];
+            
+            debugLog("RUL: raw_slope=" + linearSlopeValue.toFixed(4) + 
+                    ", robust_slope=" + robustSlopeValue.toFixed(4) + 
+                    ", combined=" + slope.toFixed(4));
             
             // No degradation or improving
-            if (slope <= 0) {
+            // Use a small positive threshold to avoid false "stable" with noisy data
+            var minSlope = 0.0001;
+            if (slope <= minSlope) {
                 return {
                     rul: Infinity,
                     confidence: 0.5,
                     status: 'stable',
-                    percentDegraded: (currentValue / failureThreshold) * 100,
-                    trend: 'stable',
-                    model: method
+                    percentDegraded: (smoothedCurrentValue / failureThreshold) * 100,
+                    trend: slope < -minSlope ? 'improving' : 'stable',
+                    model: method,
+                    smoothedValue: smoothedCurrentValue,
+                    rawSlope: linearSlopeValue,
+                    robustSlope: robustSlopeValue
                 };
             }
             
@@ -322,8 +460,8 @@ module.exports = function(RED) {
             }
             
             if (method !== 'weibull') {
-                // Linear or exponential method
-                var stepsToFailure = (failureThreshold - currentValue) / slope;
+                // Linear or exponential method - use smoothed value
+                var stepsToFailure = (failureThreshold - smoothedCurrentValue) / slope;
                 timeToFailure = stepsToFailure * avgInterval;
                 
                 // Calculate R-squared for confidence
@@ -355,11 +493,14 @@ module.exports = function(RED) {
                 rulUpper: rulUpper,
                 confidence: Math.max(0, Math.min(1, confidence)),
                 status: status,
-                percentDegraded: Math.min(100, (currentValue / failureThreshold) * 100),
+                percentDegraded: Math.min(100, (smoothedCurrentValue / failureThreshold) * 100),
                 degradationRate: slope,
                 trend: result.trend,
                 model: method,
-                weibull: weibullInfo
+                weibull: weibullInfo,
+                smoothedValue: smoothedCurrentValue,
+                rawSlope: linearSlopeValue,
+                robustSlope: robustSlopeValue
             };
         }
         
@@ -371,6 +512,11 @@ module.exports = function(RED) {
             if (node.buffer.length > node.windowSize) {
                 node.buffer.shift();
                 node.timestamps.shift();
+            }
+            
+            // Persist state periodically (every 10th sample to reduce overhead)
+            if (node.stateManager && node.buffer.length % 10 === 0) {
+                persistCurrentState();
             }
             
             if (node.buffer.length < 5) {
@@ -470,6 +616,11 @@ module.exports = function(RED) {
             if (node.buffer.length > node.windowSize) {
                 node.buffer.shift();
                 node.timestamps.shift();
+            }
+            
+            // Persist state periodically (every 10th sample to reduce overhead)
+            if (node.stateManager && node.buffer.length % 10 === 0) {
+                persistCurrentState();
             }
             
             if (node.buffer.length < 3) {
@@ -653,13 +804,25 @@ module.exports = function(RED) {
             }
         });
         
-        node.on('close', function() {
+        node.on('close', async function(done) {
+            // Save state before closing if persistence enabled
+            if (node.stateManager) {
+                try {
+                    persistCurrentState();
+                    await node.stateManager.close();
+                } catch (err) {
+                    // Ignore persistence errors during shutdown
+                }
+            }
+            
             node.buffer = [];
             node.timestamps = [];
             node.previousValue = null;
             node.previousTimestamp = null;
             node.rocHistory = [];
             node.status({});
+            
+            if (done) done();
         });
     }
     

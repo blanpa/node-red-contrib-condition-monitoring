@@ -16,6 +16,7 @@
             minPeakDistance: { value: 5 },
             peakType: { value: "both" },
             vibOutputMode: { value: "all" },
+            iso10816Class: { value: "class2" },
             // Envelope analysis settings
             envelopeBandLow: { value: 500 },
             envelopeBandHigh: { value: 5000 },
@@ -169,6 +170,21 @@
                         </select>
                         <div class="cm-help-text">How to output calculated features</div>
                     </div>
+                    <div class="cm-config-item">
+                        <label><i class="fa fa-industry"></i> ISO 10816 Machine Class</label>
+                        <select id="node-input-iso10816Class">
+                            <option value="class1">Class I: Small machines (≤15 kW)</option>
+                            <option value="class2" selected>Class II: Medium machines (15-75 kW)</option>
+                            <option value="class3">Class III: Large rigid foundation (&gt;75 kW)</option>
+                            <option value="class4">Class IV: Large soft foundation (turbines)</option>
+                        </select>
+                        <div class="cm-help-text">ISO 10816-3 classification for vibration severity</div>
+                    </div>
+                </div>
+                <div class="cm-info-box" style="margin-top: 10px;">
+                    <i class="fa fa-info-circle"></i>
+                    <b>ISO 10816-3:</b> Vibration severity evaluation. Output includes zone (A-D), 
+                    severity level, and maintenance recommendations based on RMS velocity.
                 </div>
             </div>
             
@@ -178,7 +194,7 @@
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
                         <label>Minimum Peak Height</label>
-                        <input type="number" id="node-input-minPeakHeight" step="any">
+                        <input type="number" id="node-input-minPeakHeight" step="any" placeholder="auto">
                         <div class="cm-help-text">Leave empty for auto-threshold</div>
                     </div>
                     <div class="cm-config-item">
@@ -216,7 +232,7 @@
                     </div>
                     <div class="cm-config-item">
                         <label>Shaft Speed (RPM)</label>
-                        <input type="number" id="node-input-shaftSpeed" min="0" step="any">
+                        <input type="number" id="node-input-shaftSpeed" min="0" step="any" placeholder="z.B. 1800">
                         <div class="cm-help-text">Rotation speed for fault frequency calc</div>
                     </div>
                 </div>
@@ -224,19 +240,19 @@
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
                         <label>BPFO (Outer Race)</label>
-                        <input type="number" id="node-input-bearingBPFO" min="0" step="any">
+                        <input type="number" id="node-input-bearingBPFO" min="0" step="any" placeholder="z.B. 89.2">
                     </div>
                     <div class="cm-config-item">
                         <label>BPFI (Inner Race)</label>
-                        <input type="number" id="node-input-bearingBPFI" min="0" step="any">
+                        <input type="number" id="node-input-bearingBPFI" min="0" step="any" placeholder="z.B. 130.8">
                     </div>
                     <div class="cm-config-item">
                         <label>BSF (Ball Spin)</label>
-                        <input type="number" id="node-input-bearingBSF" min="0" step="any">
+                        <input type="number" id="node-input-bearingBSF" min="0" step="any" placeholder="z.B. 58.3">
                     </div>
                     <div class="cm-config-item">
                         <label>FTF (Cage)</label>
-                        <input type="number" id="node-input-bearingFTF" min="0" step="any">
+                        <input type="number" id="node-input-bearingFTF" min="0" step="any" placeholder="z.B. 11.5">
                     </div>
                 </div>
                 <div style="margin-top: 12px; padding: 10px; background: #e3f2fd; border-radius: 4px; font-size: 11px;">
@@ -466,7 +482,35 @@
         
         <dt>healthScore <span class="property-type">number</span></dt>
         <dd>Simplified 0-100 health indicator based on all metrics</dd>
+        
+        <dt>iso10816 <span class="property-type">object</span></dt>
+        <dd>ISO 10816-3 vibration severity assessment:
+        <pre>{
+  "zone": "A"|"B"|"C"|"D",
+  "severity": "good"|"acceptable"|"warning"|"critical",
+  "recommendation": "...",
+  "rmsVelocity": 2.5,
+  "machineClass": "class2",
+  "limits": { "ab": 1.12, "bc": 2.8, "cd": 7.1 },
+  "zoneProgress": 45,
+  "isAlarm": false,
+  "isWarning": false
+}</pre>
+        <br><b>Zones:</b>
+        <br>• <b>Zone A:</b> Newly commissioned machine condition
+        <br>• <b>Zone B:</b> Acceptable for unrestricted long-term operation
+        <br>• <b>Zone C:</b> Acceptable only for limited periods
+        <br>• <b>Zone D:</b> Vibration causes damage - immediate action required</dd>
     </dl>
+    
+    <h3>ISO 10816-3 Machine Classes</h3>
+    <table>
+        <tr><th>Class</th><th>Description</th><th>Zone A/B</th><th>Zone B/C</th><th>Zone C/D</th></tr>
+        <tr><td>I</td><td>Small machines ≤15 kW</td><td>0.71 mm/s</td><td>1.8 mm/s</td><td>4.5 mm/s</td></tr>
+        <tr><td>II</td><td>Medium 15-75 kW</td><td>1.12 mm/s</td><td>2.8 mm/s</td><td>7.1 mm/s</td></tr>
+        <tr><td>III</td><td>Large rigid foundation</td><td>1.8 mm/s</td><td>4.5 mm/s</td><td>11.2 mm/s</td></tr>
+        <tr><td>IV</td><td>Large soft foundation</td><td>2.8 mm/s</td><td>7.1 mm/s</td><td>18.0 mm/s</td></tr>
+    </table>
     
     <h3>Peak Detection Output</h3>
     <dl>

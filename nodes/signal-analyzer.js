@@ -43,6 +43,7 @@ module.exports = function(RED) {
         
         // Vibration settings
         this.vibOutputMode = config.vibOutputMode || "all";
+        this.iso10816Class = config.iso10816Class || "class2"; // ISO 10816 machine class
         
         // Envelope analysis settings (bearing fault detection)
         this.envelopeBandLow = parseFloat(config.envelopeBandLow) || 500;  // Hz
@@ -327,6 +328,10 @@ module.exports = function(RED) {
             // Detect periodicity from autocorrelation peaks
             var periodicity = detectPeriodicity(autocorrelation);
             
+            // ISO 10816-3 Vibration Severity Assessment
+            // RMS velocity in mm/s for machine classification
+            var iso10816 = evaluateISO10816(rms, node.iso10816Class || 'class2');
+            
             return {
                 rms: rms,
                 peakToPeak: peakToPeak,
@@ -341,7 +346,76 @@ module.exports = function(RED) {
                 sampleEntropy: sampleEntropy,
                 autocorrelation: autocorrelation,
                 periodicity: periodicity,
-                healthScore: healthScore
+                healthScore: healthScore,
+                iso10816: iso10816
+            };
+        }
+        
+        // ISO 10816-3 Vibration Severity Evaluation
+        // Based on ISO 10816-3:2009 for industrial machines with rated power > 15 kW
+        // RMS velocity in mm/s
+        function evaluateISO10816(rmsVelocity, machineClass) {
+            // ISO 10816-3 Zones (RMS velocity in mm/s)
+            // Zone A: Newly commissioned machines
+            // Zone B: Acceptable for unrestricted long-term operation
+            // Zone C: Acceptable only for limited periods
+            // Zone D: Vibration causes damage - immediate action required
+            
+            var thresholds = {
+                // Class I: Small machines up to 15 kW
+                'class1': { ab: 0.71, bc: 1.8, cd: 4.5 },
+                // Class II: Medium machines 15-75 kW, or up to 300 kW on special foundations
+                'class2': { ab: 1.12, bc: 2.8, cd: 7.1 },
+                // Class III: Large machines on rigid foundations, > 75 kW
+                'class3': { ab: 1.8, bc: 4.5, cd: 11.2 },
+                // Class IV: Large machines on soft foundations (e.g., turbines)
+                'class4': { ab: 2.8, bc: 7.1, cd: 18.0 }
+            };
+            
+            var limits = thresholds[machineClass] || thresholds['class2'];
+            
+            var zone, severity, recommendation;
+            
+            if (rmsVelocity <= limits.ab) {
+                zone = 'A';
+                severity = 'good';
+                recommendation = 'Newly commissioned machine condition - excellent';
+            } else if (rmsVelocity <= limits.bc) {
+                zone = 'B';
+                severity = 'acceptable';
+                recommendation = 'Acceptable for unrestricted long-term operation';
+            } else if (rmsVelocity <= limits.cd) {
+                zone = 'C';
+                severity = 'warning';
+                recommendation = 'Acceptable only for limited periods - schedule maintenance';
+            } else {
+                zone = 'D';
+                severity = 'critical';
+                recommendation = 'Vibration causes damage - immediate action required';
+            }
+            
+            // Calculate how far into the zone we are (0-100%)
+            var zoneProgress;
+            if (zone === 'A') {
+                zoneProgress = (rmsVelocity / limits.ab) * 100;
+            } else if (zone === 'B') {
+                zoneProgress = ((rmsVelocity - limits.ab) / (limits.bc - limits.ab)) * 100;
+            } else if (zone === 'C') {
+                zoneProgress = ((rmsVelocity - limits.bc) / (limits.cd - limits.bc)) * 100;
+            } else {
+                zoneProgress = Math.min(100, ((rmsVelocity - limits.cd) / limits.cd) * 100);
+            }
+            
+            return {
+                zone: zone,
+                severity: severity,
+                recommendation: recommendation,
+                rmsVelocity: rmsVelocity,
+                machineClass: machineClass,
+                limits: limits,
+                zoneProgress: Math.min(100, Math.max(0, zoneProgress)),
+                isAlarm: zone === 'D',
+                isWarning: zone === 'C' || zone === 'D'
             };
         }
         
@@ -520,8 +594,141 @@ module.exports = function(RED) {
             return envelope;
         }
         
-        // Simple bandpass filter using moving average difference
+        // Butterworth filter coefficient calculation
+        // Based on bilinear transform of analog Butterworth filter
+        function calculateButterworthCoefficients(cutoffFreq, samplingRate, order, filterType) {
+            // Normalize frequency (0 to 1, where 1 = Nyquist)
+            var nyquist = samplingRate / 2;
+            var normalizedCutoff = cutoffFreq / nyquist;
+            
+            // Clamp to valid range
+            normalizedCutoff = Math.max(0.001, Math.min(0.999, normalizedCutoff));
+            
+            // Pre-warp the cutoff frequency for bilinear transform
+            var warpedCutoff = Math.tan(Math.PI * normalizedCutoff / 2);
+            
+            // For 2nd order Butterworth (most common, good balance)
+            // Transfer function: H(s) = 1 / (s^2 + sqrt(2)*s + 1)
+            var sqrt2 = Math.sqrt(2);
+            
+            // Bilinear transform coefficients for 2nd order
+            var k = warpedCutoff;
+            var k2 = k * k;
+            var sqrt2k = sqrt2 * k;
+            
+            var a0, a1, a2, b0, b1, b2;
+            
+            if (filterType === 'lowpass') {
+                // Low-pass Butterworth
+                a0 = 1 + sqrt2k + k2;
+                b0 = k2 / a0;
+                b1 = 2 * k2 / a0;
+                b2 = k2 / a0;
+                a1 = 2 * (k2 - 1) / a0;
+                a2 = (1 - sqrt2k + k2) / a0;
+            } else {
+                // High-pass Butterworth
+                a0 = 1 + sqrt2k + k2;
+                b0 = 1 / a0;
+                b1 = -2 / a0;
+                b2 = 1 / a0;
+                a1 = 2 * (k2 - 1) / a0;
+                a2 = (1 - sqrt2k + k2) / a0;
+            }
+            
+            return {
+                b: [b0, b1, b2],  // Feedforward coefficients
+                a: [1, a1, a2]   // Feedback coefficients (a0 normalized to 1)
+            };
+        }
+        
+        // Apply IIR filter (Direct Form II Transposed)
+        function applyIIRFilter(signal, coeffs) {
+            var b = coeffs.b;
+            var a = coeffs.a;
+            var n = signal.length;
+            var output = new Array(n);
+            
+            // Filter state variables (for Direct Form II Transposed)
+            var z1 = 0, z2 = 0;
+            
+            for (var i = 0; i < n; i++) {
+                var x = signal[i];
+                
+                // Output
+                var y = b[0] * x + z1;
+                
+                // Update state
+                z1 = b[1] * x - a[1] * y + z2;
+                z2 = b[2] * x - a[2] * y;
+                
+                output[i] = y;
+            }
+            
+            return output;
+        }
+        
+        // Zero-phase filtering (forward-backward filtering)
+        // Eliminates phase distortion by filtering forward then backward
+        function filtfilt(signal, coeffs) {
+            // Forward pass
+            var forward = applyIIRFilter(signal, coeffs);
+            
+            // Reverse the signal
+            var reversed = forward.slice().reverse();
+            
+            // Backward pass
+            var backward = applyIIRFilter(reversed, coeffs);
+            
+            // Reverse again to get original order
+            return backward.reverse();
+        }
+        
+        // Butterworth bandpass filter
+        // Implemented as cascade of highpass and lowpass filters
+        function butterworthBandpass(signal, samplingRate, lowCut, highCut) {
+            // Calculate coefficients for high-pass (removes frequencies below lowCut)
+            var hpCoeffs = calculateButterworthCoefficients(lowCut, samplingRate, 2, 'highpass');
+            
+            // Calculate coefficients for low-pass (removes frequencies above highCut)
+            var lpCoeffs = calculateButterworthCoefficients(highCut, samplingRate, 2, 'lowpass');
+            
+            // Apply zero-phase high-pass filter first
+            var highPassed = filtfilt(signal, hpCoeffs);
+            
+            // Then apply zero-phase low-pass filter
+            var bandPassed = filtfilt(highPassed, lpCoeffs);
+            
+            return bandPassed;
+        }
+        
+        // Main bandpass filter function - uses Butterworth
         function bandpassFilter(signal, samplingRate, lowCut, highCut) {
+            var n = signal.length;
+            
+            // Validate frequency parameters
+            var nyquist = samplingRate / 2;
+            if (lowCut >= highCut || lowCut <= 0 || highCut >= nyquist) {
+                // Fall back to simple filter if parameters invalid
+                debugLog("Bandpass: Invalid frequencies, using simple filter. low=" + lowCut + ", high=" + highCut + ", nyquist=" + nyquist);
+                return simpleBandpassFilter(signal, samplingRate, lowCut, highCut);
+            }
+            
+            // Need minimum signal length for stable filtering
+            if (n < 12) {
+                return simpleBandpassFilter(signal, samplingRate, lowCut, highCut);
+            }
+            
+            try {
+                return butterworthBandpass(signal, samplingRate, lowCut, highCut);
+            } catch (err) {
+                debugLog("Butterworth filter failed, using simple filter: " + err.message);
+                return simpleBandpassFilter(signal, samplingRate, lowCut, highCut);
+            }
+        }
+        
+        // Simple bandpass filter (fallback)
+        function simpleBandpassFilter(signal, samplingRate, lowCut, highCut) {
             var n = signal.length;
             
             // High-pass: subtract low-frequency component

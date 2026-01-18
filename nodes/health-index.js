@@ -1,4 +1,14 @@
 module.exports = function(RED) {
+    "use strict";
+    
+    // Import state persistence
+    var StatePersistence = null;
+    try {
+        StatePersistence = require('./state-persistence');
+    } catch (err) {
+        // State persistence not available
+    }
+    
     function HealthIndexNode(config) {
         RED.nodes.createNode(this, config);
         const node = this;
@@ -16,6 +26,52 @@ module.exports = function(RED) {
         const outputScale = config.outputScale || "0-100";
         const outputTopic = config.outputTopic || "";
         const debug = config.debug === true;
+        const persistState = config.persistState === true;
+        
+        // State for tracking health history
+        node.healthHistory = [];
+        node.lastHealthIndex = null;
+        node.lastStatus = null;
+        
+        // State persistence manager
+        node.stateManager = null;
+        
+        // Helper to persist current state
+        function persistCurrentState() {
+            if (node.stateManager) {
+                node.stateManager.setMultiple({
+                    healthHistory: node.healthHistory,
+                    lastHealthIndex: node.lastHealthIndex,
+                    lastStatus: node.lastStatus
+                });
+            }
+        }
+        
+        // Initialize state persistence if enabled
+        if (persistState && StatePersistence) {
+            node.stateManager = new StatePersistence.NodeStateManager(node, {
+                stateKey: 'healthIndexState',
+                saveInterval: 30000 // Save every 30 seconds
+            });
+            
+            // Load persisted state on startup
+            node.stateManager.load().then(function(state) {
+                if (state.healthHistory && state.healthHistory.length > 0) {
+                    node.healthHistory = state.healthHistory;
+                    node.lastHealthIndex = state.lastHealthIndex;
+                    node.lastStatus = state.lastStatus;
+                    
+                    if (debug) {
+                        node.warn("[DEBUG] Restored " + node.healthHistory.length + " health history entries from persistence");
+                    }
+                    node.status({fill: "green", shape: "dot", text: "Restored (" + node.healthHistory.length + " entries)"});
+                }
+            }).catch(function(err) {
+                if (debug) {
+                    node.warn("[DEBUG] Failed to load persisted state: " + err.message);
+                }
+            });
+        }
         
         // Scale conversion helper
         const scaleOutput = function(value) {
@@ -108,7 +164,8 @@ module.exports = function(RED) {
                 sensorScores: scaledSensorScores,
                 worstSensor: healthResult.worstSensor ? {
                     name: healthResult.worstSensor.name,
-                    score: scaleOutput(healthResult.worstSensor.score)
+                    score: scaleOutput(healthResult.worstSensor.score),
+                    reliability: healthResult.worstSensor.reliability
                 } : null,
                 contributingFactors: healthResult.contributingFactors,
                 method: aggregationMethod,
@@ -117,7 +174,8 @@ module.exports = function(RED) {
                     warning: scaleThreshold(warningThreshold),
                     degraded: scaleThreshold(degradedThreshold),
                     critical: scaleThreshold(criticalThreshold)
-                }
+                },
+                dynamicWeights: healthResult.dynamicWeights
             };
             
             // Set topic if configured
@@ -146,6 +204,29 @@ module.exports = function(RED) {
                 text: statusText
             });
             
+            // Track health history
+            node.healthHistory.push({
+                timestamp: Date.now(),
+                index: scaledIndex,
+                status: status
+            });
+            
+            // Limit history to last 100 entries
+            if (node.healthHistory.length > 100) {
+                node.healthHistory.shift();
+            }
+            
+            node.lastHealthIndex = scaledIndex;
+            node.lastStatus = status;
+            
+            // Persist state periodically (every 10th sample)
+            if (node.stateManager && node.healthHistory.length % 10 === 0) {
+                persistCurrentState();
+            }
+            
+            // Add health trend to output
+            outputMsg.healthTrend = calculateHealthTrend();
+            
             // Send to different outputs based on status
             if (status === "critical" || status === "degraded" || status === "warning") {
                 node.send([null, outputMsg]); // Output 2: Degraded/Warning/Critical health
@@ -154,9 +235,136 @@ module.exports = function(RED) {
             }
         });
         
+        // Calculate health trend from history
+        function calculateHealthTrend() {
+            if (node.healthHistory.length < 3) {
+                return { trend: "unknown", samples: node.healthHistory.length };
+            }
+            
+            const recentHistory = node.healthHistory.slice(-10);
+            const firstHalf = recentHistory.slice(0, Math.floor(recentHistory.length / 2));
+            const secondHalf = recentHistory.slice(Math.floor(recentHistory.length / 2));
+            
+            const firstAvg = firstHalf.reduce((sum, h) => sum + h.index, 0) / firstHalf.length;
+            const secondAvg = secondHalf.reduce((sum, h) => sum + h.index, 0) / secondHalf.length;
+            
+            const diff = secondAvg - firstAvg;
+            let trend = "stable";
+            
+            if (diff > 2) {
+                trend = "improving";
+            } else if (diff < -2) {
+                trend = "degrading";
+            }
+            
+            return {
+                trend: trend,
+                recentAverage: secondAvg,
+                previousAverage: firstAvg,
+                change: diff,
+                samples: node.healthHistory.length
+            };
+        }
+        
+        // Handle node close
+        node.on('close', async function(done) {
+            // Save state before closing if persistence enabled
+            if (node.stateManager) {
+                try {
+                    persistCurrentState();
+                    await node.stateManager.close();
+                } catch (err) {
+                    // Ignore persistence errors during shutdown
+                }
+            }
+            
+            node.healthHistory = [];
+            node.lastHealthIndex = null;
+            node.lastStatus = null;
+            node.status({});
+            
+            if (done) done();
+        });
+        
+        // Track sensor reliability for dynamic weighting
+        if (!node.sensorReliability) {
+            node.sensorReliability = {};
+        }
+        
+        // Calculate dynamic weight based on sensor reliability
+        function calculateDynamicWeight(sensorName, sensorInfo, baseWeight) {
+            let reliabilityFactor = 1.0;
+            
+            // Initialize sensor reliability tracking
+            if (!node.sensorReliability[sensorName]) {
+                node.sensorReliability[sensorName] = {
+                    values: [],
+                    anomalyCount: 0,
+                    totalCount: 0,
+                    lastUpdate: Date.now()
+                };
+            }
+            
+            const reliability = node.sensorReliability[sensorName];
+            reliability.totalCount++;
+            
+            // Track anomalies
+            if (sensorInfo.isAnomaly) {
+                reliability.anomalyCount++;
+            }
+            
+            // Track values for variance calculation
+            const value = sensorInfo.value !== undefined ? sensorInfo.value : 
+                         (typeof sensorInfo === 'number' ? sensorInfo : null);
+            
+            if (value !== null && !isNaN(value)) {
+                reliability.values.push(value);
+                // Keep last 50 values
+                if (reliability.values.length > 50) {
+                    reliability.values.shift();
+                }
+            }
+            
+            // Factor 1: Reduce weight for sensors with high anomaly rate
+            if (reliability.totalCount >= 10) {
+                const anomalyRate = reliability.anomalyCount / reliability.totalCount;
+                // High anomaly rate (>30%) reduces reliability
+                if (anomalyRate > 0.3) {
+                    reliabilityFactor *= (1 - (anomalyRate - 0.3));
+                }
+            }
+            
+            // Factor 2: Reduce weight for sensors with very high variance (noisy)
+            if (reliability.values.length >= 10) {
+                const mean = reliability.values.reduce((a, b) => a + b, 0) / reliability.values.length;
+                const variance = reliability.values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / reliability.values.length;
+                const cv = mean !== 0 ? Math.sqrt(variance) / Math.abs(mean) : 0;
+                
+                // High coefficient of variation (>0.5) reduces reliability
+                if (cv > 0.5) {
+                    reliabilityFactor *= Math.max(0.5, 1 - (cv - 0.5));
+                }
+            }
+            
+            // Factor 3: Confidence from sensor data
+            if (sensorInfo.confidence !== undefined) {
+                reliabilityFactor *= sensorInfo.confidence;
+            }
+            
+            // Clamp reliability factor
+            reliabilityFactor = Math.max(0.1, Math.min(1.0, reliabilityFactor));
+            
+            return {
+                effectiveWeight: baseWeight * reliabilityFactor,
+                reliabilityFactor: reliabilityFactor,
+                anomalyRate: reliability.totalCount > 0 ? reliability.anomalyCount / reliability.totalCount : 0
+            };
+        }
+        
         function calculateHealthIndex(sensorData, weights, method) {
             const sensorScores = {};
             const contributingFactors = [];
+            const dynamicWeights = {};
             
             // Calculate individual sensor health scores
             for (const [sensorName, sensorInfo] of Object.entries(sensorData)) {
@@ -222,23 +430,44 @@ module.exports = function(RED) {
                     });
                 }
                 
+                // Check confidence (reduce impact if low confidence)
+                if (sensorInfo.confidence !== undefined && sensorInfo.confidence < 0.5) {
+                    // Low confidence sensor - reduce penalty impact
+                    const confidenceFactor = sensorInfo.confidence / 0.5;
+                    const adjustment = Math.round((100 - score) * (1 - confidenceFactor) * 0.5);
+                    score = Math.min(100, score + adjustment);
+                    contributingFactors.push({
+                        sensor: sensorName,
+                        reason: `low confidence (${(sensorInfo.confidence * 100).toFixed(0)}%)`,
+                        impact: adjustment
+                    });
+                }
+                
                 // Ensure score stays within 0-100
                 score = Math.max(0, Math.min(100, score));
                 sensorScores[sensorName] = score;
+                
+                // Calculate dynamic weight for this sensor
+                const baseWeight = weights[sensorName] || 1.0;
+                dynamicWeights[sensorName] = calculateDynamicWeight(sensorName, sensorInfo, baseWeight);
             }
             
             // Aggregate scores
             let healthIndex = 0;
             
-            if (method === "weighted") {
-                // Weighted average
+            if (method === "weighted" || method === "dynamic") {
+                // Dynamic weighted average - uses reliability-adjusted weights
                 let totalWeight = 0;
                 let weightedSum = 0;
                 
                 for (const [sensorName, score] of Object.entries(sensorScores)) {
-                    const weight = weights[sensorName] || 1.0;
-                    weightedSum += score * weight;
-                    totalWeight += weight;
+                    const dynamicWeight = dynamicWeights[sensorName];
+                    const effectiveWeight = method === "dynamic" ? 
+                        dynamicWeight.effectiveWeight : 
+                        (weights[sensorName] || 1.0);
+                    
+                    weightedSum += score * effectiveWeight;
+                    totalWeight += effectiveWeight;
                 }
                 
                 healthIndex = totalWeight > 0 ? weightedSum / totalWeight : 100;
@@ -268,7 +497,8 @@ module.exports = function(RED) {
                     worstScore = score;
                     worstSensor = {
                         name: sensorName,
-                        score: score
+                        score: score,
+                        reliability: dynamicWeights[sensorName] ? dynamicWeights[sensorName].reliabilityFactor : 1.0
                     };
                 }
             }
@@ -276,6 +506,7 @@ module.exports = function(RED) {
             return {
                 index: healthIndex,
                 sensorScores: sensorScores,
+                dynamicWeights: dynamicWeights,
                 worstSensor: worstSensor,
                 contributingFactors: contributingFactors
             };

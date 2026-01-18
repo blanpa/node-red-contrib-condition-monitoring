@@ -218,4 +218,131 @@ describe('anomaly-detector Node', function () {
             }, 100);
         });
     });
+
+    describe('Hysteresis (Anti-Flicker)', function () {
+        
+        it('should include hysteresis info in output', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "threshold", 
+                  maxThreshold: 100, warningMargin: 0, hysteresisEnabled: true, consecutiveCount: 1,
+                  wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                
+                // Need to fill warmup buffer first (minRequired = 2)
+                n1.receive({ payload: 40 }); // warmup 1
+                
+                n2.on("input", function (msg) {
+                    expect(msg).toHaveProperty('hysteresis');
+                    expect(msg.hysteresis).toHaveProperty('enabled');
+                    expect(msg.hysteresis).toHaveProperty('consecutiveAnomalies');
+                    expect(msg.hysteresis).toHaveProperty('consecutiveNormals');
+                    done();
+                });
+                
+                n1.receive({ payload: 50 }); // warmup 2 - now outputs
+            });
+        });
+
+        it('should track consecutive anomaly count', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "threshold", 
+                  maxThreshold: 100, warningMargin: 0, hysteresisEnabled: true, consecutiveCount: 1,
+                  wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n3 = helper.getNode("n3");
+                
+                // Fill warmup buffer first
+                n1.receive({ payload: 40 }); // warmup
+                n1.receive({ payload: 50 }); // warmup done
+                
+                n3.on("input", function (msg) {
+                    // After entering anomaly state, check that consecutive counter is tracked
+                    expect(msg.hysteresis.consecutiveAnomalies).toBeGreaterThan(0);
+                    done();
+                });
+                
+                // Send anomaly
+                n1.receive({ payload: 110 });
+            });
+        });
+
+        it('should track consecutive normal count after anomaly', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "threshold", 
+                  maxThreshold: 100, warningMargin: 0, hysteresisEnabled: true, consecutiveCount: 1, 
+                  hysteresisPercent: 100,
+                  wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                const n3 = helper.getNode("n3");
+                
+                let msgCount = 0;
+                
+                // Fill warmup buffer first
+                n1.receive({ payload: 40 }); // warmup
+                
+                // Enter anomaly state
+                n1.receive({ payload: 110 });
+                
+                // Listen on both outputs to track messages
+                const checkMsg = function(msg) {
+                    msgCount++;
+                    // After first normal following anomaly, consecutiveNormals should be > 0
+                    if (msgCount >= 2 && msg.hysteresis.consecutiveNormals > 0) {
+                        expect(msg.hysteresis.consecutiveNormals).toBeGreaterThan(0);
+                        done();
+                    }
+                };
+                
+                n2.on("input", checkMsg);
+                n3.on("input", checkMsg);
+                
+                // Send normal value - due to hysteresis, may still go to anomaly output
+                setTimeout(function() {
+                    n1.receive({ payload: 50 });
+                }, 50);
+            });
+        });
+
+        it('should include rawAnomaly flag in output', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "threshold", 
+                  maxThreshold: 100, warningMargin: 0, hysteresisEnabled: true, consecutiveCount: 1,
+                  wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                
+                // Fill warmup buffer first
+                n1.receive({ payload: 40 }); // warmup
+                
+                n2.on("input", function (msg) {
+                    // rawAnomaly should always be included
+                    expect(msg).toHaveProperty('rawAnomaly');
+                    expect(msg.rawAnomaly).toBe(false); // This is a normal value
+                    expect(msg.isAnomaly).toBe(false);
+                    done();
+                });
+                
+                // Send normal value
+                n1.receive({ payload: 50 });
+            });
+        });
+    });
 });

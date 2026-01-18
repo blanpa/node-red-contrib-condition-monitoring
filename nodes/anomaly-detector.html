@@ -36,7 +36,11 @@
             // Advanced
             outputTopic: { value: "" },
             debug: { value: false },
-            persistState: { value: false }
+            persistState: { value: false },
+            // Hysteresis
+            hysteresisEnabled: { value: true },
+            hysteresisPercent: { value: 10 },
+            consecutiveCount: { value: 1 }
         },
         inputs: 1,
         outputs: 2,
@@ -246,12 +250,12 @@
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
                         <label>Minimum Threshold</label>
-                        <input type="number" id="node-input-minThreshold" step="any">
+                        <input type="number" id="node-input-minThreshold" step="any" placeholder="z.B. 0">
                         <div class="cm-help-text">Values below this are anomalies (leave empty to disable)</div>
                     </div>
                     <div class="cm-config-item">
                         <label>Maximum Threshold</label>
-                        <input type="number" id="node-input-maxThreshold" step="any">
+                        <input type="number" id="node-input-maxThreshold" step="any" placeholder="z.B. 100">
                         <div class="cm-help-text">Values above this are anomalies (leave empty to disable)</div>
                     </div>
                     <div class="cm-config-item">
@@ -314,7 +318,7 @@
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
                         <label>Target Value</label>
-                        <input type="number" id="node-input-cusumTarget" step="any">
+                        <input type="number" id="node-input-cusumTarget" step="any" placeholder="auto (Mittelwert)">
                         <div class="cm-help-text">Expected value (leave empty for auto-mean)</div>
                     </div>
                     <div class="cm-config-item">
@@ -392,6 +396,47 @@
                     <input type="checkbox" id="node-input-persistState" style="width: auto; margin-top: 8px;">
                     <div class="cm-help-text">Save buffer/statistics across Node-RED restarts</div>
                 </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Hysteresis Settings -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-balance-scale"></i> Hysteresis (Anti-Flicker)</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-hysteresisEnabled">
+                    <i class="fa fa-toggle-on"></i> Enable Hysteresis
+                </label>
+                <input type="checkbox" id="node-input-hysteresisEnabled" style="width: auto; margin-top: 8px;" checked>
+                <div class="cm-help-text">Prevents rapid alarm on/off switching (flickering)</div>
+            </div>
+            
+            <div class="cm-config-grid">
+                <div class="cm-config-item">
+                    <label for="node-input-consecutiveCount">
+                        <i class="fa fa-list-ol"></i> Consecutive Samples
+                    </label>
+                    <input type="number" id="node-input-consecutiveCount" min="1" max="10" value="1">
+                    <div class="cm-help-text">Anomalies required before triggering (1 = immediate)</div>
+                </div>
+                
+                <div class="cm-config-item">
+                    <label for="node-input-hysteresisPercent">
+                        <i class="fa fa-arrows-h"></i> Exit Hysteresis %
+                    </label>
+                    <input type="number" id="node-input-hysteresisPercent" min="0" max="100" step="5" value="10">
+                    <div class="cm-help-text">Extra samples needed to exit anomaly state (deadband)</div>
+                </div>
+            </div>
+            
+            <div class="cm-info-box">
+                <i class="fa fa-info-circle"></i>
+                <b>Example:</b> With Consecutive=2 and Exit=10%, anomaly triggers after 2 consecutive detections, 
+                but needs 3 normal samples (2 × 1.1 = 2.2, rounded up) to clear.
             </div>
         </div>
     </div>
@@ -494,11 +539,39 @@
     </ul>
     <p>During warm-up, the node status shows "warmup X/Y" and passes messages through Output 1.</p>
     
+    <h3>Hysteresis (Anti-Flicker)</h3>
+    <p>Prevents rapid alarm on/off switching (alarm flickering) near threshold boundaries:</p>
+    <ul>
+        <li><b>Consecutive Samples:</b> Number of consecutive anomalies required before triggering alarm (1 = immediate)</li>
+        <li><b>Exit Hysteresis %:</b> Extra percentage of samples needed to exit anomaly state (deadband)</li>
+    </ul>
+    <p>Example: With Consecutive=2 and Exit=50%, anomaly triggers after 2 consecutive detections, 
+    but needs 3 normal samples (2 × 1.5 = 3) to clear.</p>
+    
+    <h3>Hysteresis Output Properties</h3>
+    <dl>
+        <dt>msg.rawAnomaly <span class="property-type">boolean</span></dt>
+        <dd>The raw detection result before hysteresis is applied</dd>
+        
+        <dt>msg.hysteresis.enabled <span class="property-type">boolean</span></dt>
+        <dd>Whether hysteresis is enabled</dd>
+        
+        <dt>msg.hysteresis.applied <span class="property-type">boolean</span></dt>
+        <dd>Whether hysteresis changed the output from the raw detection</dd>
+        
+        <dt>msg.hysteresis.consecutiveAnomalies <span class="property-type">number</span></dt>
+        <dd>Current count of consecutive anomaly detections</dd>
+        
+        <dt>msg.hysteresis.consecutiveNormals <span class="property-type">number</span></dt>
+        <dd>Current count of consecutive normal values</dd>
+    </dl>
+    
     <h3>Use Cases</h3>
     <ul>
         <li><b>Temperature Monitoring:</b> Use Threshold for known limits or Z-Score for statistical detection</li>
         <li><b>Vibration Analysis:</b> Use IQR for robust outlier detection</li>
         <li><b>Process Control:</b> Use CUSUM to detect drift over time</li>
         <li><b>Sensor Validation:</b> Use Percentile for dynamic bounds</li>
+        <li><b>Industrial Alarms:</b> Enable hysteresis to prevent nuisance alarms near boundaries</li>
     </ul>
 </script>

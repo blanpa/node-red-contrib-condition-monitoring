@@ -22,7 +22,8 @@
             weibullBeta: { value: 2.0 },
             weibullEta: { value: 1000 },
             outputTopic: { value: "" },
-            debug: { value: false }
+            debug: { value: false },
+            persistState: { value: false }
         },
         inputs: 1,
         outputs: 2,
@@ -126,7 +127,7 @@
                     </div>
                     <div class="cm-config-item">
                         <label>Failure Threshold (RUL)</label>
-                        <input type="number" id="node-input-threshold" step="any">
+                        <input type="number" id="node-input-threshold" step="any" placeholder="z.B. 100">
                         <div class="cm-help-text">Optional: Calculate time to reach this value</div>
                     </div>
                 </div>
@@ -150,7 +151,7 @@
                     </div>
                     <div class="cm-config-item">
                         <label>Anomaly Threshold</label>
-                        <input type="number" id="node-input-rocThreshold" step="any">
+                        <input type="number" id="node-input-rocThreshold" step="any" placeholder="z.B. 5.0">
                         <div class="cm-help-text">Optional: Rate above this is anomalous</div>
                     </div>
                 </div>
@@ -165,12 +166,12 @@
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
                         <label><i class="fa fa-exclamation-triangle" style="color: #f44336;"></i> Failure Threshold</label>
-                        <input type="number" id="node-input-failureThreshold" step="any">
+                        <input type="number" id="node-input-failureThreshold" step="any" placeholder="z.B. 100 (erforderlich)">
                         <div class="cm-help-text">Value at which failure occurs (required)</div>
                     </div>
                     <div class="cm-config-item">
                         <label><i class="fa fa-exclamation-circle" style="color: #ff9800;"></i> Warning Threshold</label>
-                        <input type="number" id="node-input-warningThreshold" step="any">
+                        <input type="number" id="node-input-warningThreshold" step="any" placeholder="z.B. 80">
                         <div class="cm-help-text">Early warning level (optional)</div>
                     </div>
                     <div class="cm-config-item">
@@ -252,6 +253,14 @@
                     </label>
                     <input type="checkbox" id="node-input-debug" style="width: auto; margin-top: 8px;">
                     <div class="cm-help-text">Log detailed info to Node-RED debug</div>
+                </div>
+                
+                <div class="cm-config-item">
+                    <label for="node-input-persistState">
+                        <i class="fa fa-save"></i> Persist State
+                    </label>
+                    <input type="checkbox" id="node-input-persistState" style="width: auto; margin-top: 8px;">
+                    <div class="cm-help-text">Survive Node-RED restarts (requires file context storage)</div>
                 </div>
             </div>
         </div>

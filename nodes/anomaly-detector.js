@@ -54,10 +54,18 @@ module.exports = function(RED) {
         // Advanced settings
         this.outputTopic = config.outputTopic || "";
         this.debug = config.debug === true;
-        this.persistState = config.persistState === true; // New: enable state persistence
+        this.persistState = config.persistState === true;
+        
+        // Hysteresis settings - prevents alarm flickering
+        this.hysteresisEnabled = config.hysteresisEnabled !== false; // Default: enabled
+        this.hysteresisPercent = parseFloat(config.hysteresisPercent) || 10; // 10% deadband
+        this.consecutiveCount = parseInt(config.consecutiveCount) || 1; // Consecutive samples to confirm
         
         // State
         this.dataBuffer = [];
+        this.lastAnomalyState = false; // Track previous anomaly state for hysteresis
+        this.consecutiveAnomalies = 0; // Counter for consecutive anomalies
+        this.consecutiveNormals = 0; // Counter for consecutive normal values
         
         // Debug logging helper
         var debugLog = function(message) {
@@ -436,6 +444,9 @@ module.exports = function(RED) {
                     node.cusumPos = 0;
                     node.cusumNeg = 0;
                     node.initialized = false;
+                    node.lastAnomalyState = false;
+                    node.consecutiveAnomalies = 0;
+                    node.consecutiveNormals = 0;
                     node.status({fill: "blue", shape: "ring", text: node.method + " - reset"});
                     return;
                 }
@@ -497,21 +508,73 @@ module.exports = function(RED) {
                         result = detectZScore(value, values);
                 }
                 
+                // Apply hysteresis to prevent alarm flickering
+                var finalIsAnomaly = result.isAnomaly;
+                var hysteresisApplied = false;
+                
+                if (node.hysteresisEnabled) {
+                    if (result.isAnomaly) {
+                        node.consecutiveAnomalies++;
+                        node.consecutiveNormals = 0;
+                        
+                        // Only trigger anomaly if consecutive count reached
+                        // OR if already in anomaly state (maintain state)
+                        if (node.consecutiveAnomalies >= node.consecutiveCount || node.lastAnomalyState) {
+                            finalIsAnomaly = true;
+                        } else {
+                            finalIsAnomaly = false;
+                            hysteresisApplied = true;
+                        }
+                    } else {
+                        node.consecutiveNormals++;
+                        node.consecutiveAnomalies = 0;
+                        
+                        // Only return to normal if consecutive normal count reached
+                        // This creates hysteresis (deadband)
+                        if (node.lastAnomalyState) {
+                            // Apply hysteresis: need more consecutive normals to exit anomaly state
+                            var exitCount = Math.max(node.consecutiveCount, 
+                                Math.ceil(node.consecutiveCount * (1 + node.hysteresisPercent / 100)));
+                            
+                            if (node.consecutiveNormals >= exitCount) {
+                                finalIsAnomaly = false;
+                            } else {
+                                finalIsAnomaly = true; // Stay in anomaly state
+                                hysteresisApplied = true;
+                            }
+                        } else {
+                            finalIsAnomaly = false;
+                        }
+                    }
+                    
+                    node.lastAnomalyState = finalIsAnomaly;
+                }
+                
+                debugLog(node.method + ": value=" + value + ", rawAnomaly=" + result.isAnomaly + 
+                        ", finalAnomaly=" + finalIsAnomaly + ", hysteresis=" + hysteresisApplied +
+                        ", consec_anom=" + node.consecutiveAnomalies + ", consec_norm=" + node.consecutiveNormals);
+                
                 // Update status
                 var statusColor = result.severity === "critical" ? "red" :
                                   result.severity === "warning" ? "yellow" : "green";
-                node.status({fill: statusColor, shape: "dot", text: result.statusText});
-                
-                debugLog(node.method + ": value=" + value + ", severity=" + result.severity);
+                var statusShape = hysteresisApplied ? "ring" : "dot";
+                node.status({fill: statusColor, shape: statusShape, text: result.statusText});
                 
                 // Build output message
                 var outputMsg = {
                     payload: value,
-                    isAnomaly: result.isAnomaly,
+                    isAnomaly: finalIsAnomaly,
+                    rawAnomaly: result.isAnomaly,
                     severity: result.severity,
                     method: node.method,
                     bufferSize: node.dataBuffer.length,
-                    windowSize: node.windowSize
+                    windowSize: node.windowSize,
+                    hysteresis: {
+                        enabled: node.hysteresisEnabled,
+                        applied: hysteresisApplied,
+                        consecutiveAnomalies: node.consecutiveAnomalies,
+                        consecutiveNormals: node.consecutiveNormals
+                    }
                 };
                 
                 // Set topic if configured
@@ -534,7 +597,7 @@ module.exports = function(RED) {
                 });
                 
                 // Output: normal to output 1, anomaly to output 2
-                if (result.isAnomaly) {
+                if (finalIsAnomaly) {
                     node.send([null, outputMsg]);
                 } else {
                     node.send([outputMsg, null]);
@@ -562,6 +625,9 @@ module.exports = function(RED) {
             node.cusumPos = 0;
             node.cusumNeg = 0;
             node.initialized = false;
+            node.lastAnomalyState = false;
+            node.consecutiveAnomalies = 0;
+            node.consecutiveNormals = 0;
             node.status({});
             
             if (done) done();
