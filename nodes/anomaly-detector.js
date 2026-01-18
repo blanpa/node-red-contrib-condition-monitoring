@@ -163,8 +163,13 @@ module.exports = function(RED) {
             return sorted[lower] * (1 - weight) + sorted[upper] * weight;
         }
         
-        // Z-Score method
+        // Z-Score method (uses node defaults)
         function detectZScore(value, values) {
+            return detectZScoreWithConfig(value, values, node.zscoreThreshold, node.zscoreWarning);
+        }
+        
+        // Z-Score method with configurable thresholds (for msg.config override)
+        function detectZScoreWithConfig(value, values, threshold, warning) {
             var mean = calculateMean(values);
             var stdDev = calculateStdDev(values, mean);
             var zScore = stdDev === 0 ? 0 : (value - mean) / stdDev;
@@ -173,10 +178,10 @@ module.exports = function(RED) {
             var severity = "normal";
             var isAnomaly = false;
             
-            if (absZScore > node.zscoreThreshold) {
+            if (absZScore > threshold) {
                 severity = "critical";
                 isAnomaly = true;
-            } else if (absZScore > node.zscoreWarning) {
+            } else if (absZScore > warning) {
                 severity = "warning";
                 isAnomaly = true;
             }
@@ -188,8 +193,8 @@ module.exports = function(RED) {
                     zScore: zScore,
                     mean: mean,
                     stdDev: stdDev,
-                    threshold: node.zscoreThreshold,
-                    warningThreshold: node.zscoreWarning
+                    threshold: threshold,
+                    warningThreshold: warning
                 },
                 statusText: severity === "critical" ? "CRITICAL z=" + zScore.toFixed(2) :
                             severity === "warning" ? "warning z=" + zScore.toFixed(2) :
@@ -197,13 +202,19 @@ module.exports = function(RED) {
             };
         }
         
-        // IQR method
+        // IQR method (uses node defaults)
         function detectIQR(value, values) {
+            return detectIQRWithConfig(value, values, node.iqrMultiplier);
+        }
+        
+        // IQR method with configurable multiplier (for msg.config override)
+        function detectIQRWithConfig(value, values, multiplier) {
             var quartiles = calculateQuartiles(values);
-            var lowerBound = quartiles.q1 - (node.iqrMultiplier * quartiles.iqr);
-            var upperBound = quartiles.q3 + (node.iqrMultiplier * quartiles.iqr);
-            var lowerWarning = quartiles.q1 - (node.iqrWarningMultiplier * quartiles.iqr);
-            var upperWarning = quartiles.q3 + (node.iqrWarningMultiplier * quartiles.iqr);
+            var warningMultiplier = multiplier * 0.8; // Warning at 80% of critical
+            var lowerBound = quartiles.q1 - (multiplier * quartiles.iqr);
+            var upperBound = quartiles.q3 + (multiplier * quartiles.iqr);
+            var lowerWarning = quartiles.q1 - (warningMultiplier * quartiles.iqr);
+            var upperWarning = quartiles.q3 + (warningMultiplier * quartiles.iqr);
             
             var severity = "normal";
             var isAnomaly = false;
@@ -226,7 +237,7 @@ module.exports = function(RED) {
                     median: quartiles.median,
                     lowerBound: lowerBound,
                     upperBound: upperBound,
-                    multiplier: node.iqrMultiplier
+                    multiplier: multiplier
                 },
                 statusText: severity === "critical" ? "CRITICAL: " + value.toFixed(2) :
                             severity === "warning" ? "warning: " + value.toFixed(2) :
@@ -234,29 +245,34 @@ module.exports = function(RED) {
             };
         }
         
-        // Threshold method
+        // Threshold method (uses node defaults)
         function detectThreshold(value) {
+            return detectThresholdWithConfig(value, node.minThreshold, node.maxThreshold);
+        }
+        
+        // Threshold method with configurable thresholds (for msg.config override)
+        function detectThresholdWithConfig(value, minThreshold, maxThreshold) {
             var severity = "normal";
             var isAnomaly = false;
             var reason = null;
             
-            var minWarning = node.minThreshold !== null ? node.minThreshold * (1 + node.warningMargin / 100) : null;
-            var maxWarning = node.maxThreshold !== null ? node.maxThreshold * (1 - node.warningMargin / 100) : null;
+            var minWarning = minThreshold !== null ? minThreshold * (1 + node.warningMargin / 100) : null;
+            var maxWarning = maxThreshold !== null ? maxThreshold * (1 - node.warningMargin / 100) : null;
             
-            if (node.minThreshold !== null && value < node.minThreshold) {
+            if (minThreshold !== null && value < minThreshold) {
                 severity = "critical";
                 isAnomaly = true;
-                reason = "Below minimum (" + node.minThreshold + ")";
+                reason = "Below minimum (" + minThreshold + ")";
             } else if (minWarning !== null && value < minWarning) {
                 severity = "warning";
                 isAnomaly = true;
                 reason = "Approaching minimum";
             }
             
-            if (node.maxThreshold !== null && value > node.maxThreshold) {
+            if (maxThreshold !== null && value > maxThreshold) {
                 severity = "critical";
                 isAnomaly = true;
-                reason = reason ? reason + " AND above maximum" : "Above maximum (" + node.maxThreshold + ")";
+                reason = reason ? reason + " AND above maximum" : "Above maximum (" + maxThreshold + ")";
             } else if (maxWarning !== null && value > maxWarning && severity !== "critical") {
                 severity = severity === "warning" ? "warning" : "warning";
                 isAnomaly = true;
@@ -435,11 +451,210 @@ module.exports = function(RED) {
             };
         }
         
+        // Initialize multi-sensor buffers
+        node.sensorBuffers = {};
+        node.sensorStates = {};
+        node.sensorEma = {};
+        node.sensorCusum = {};
+        
+        // Process multi-sensor JSON input
+        function processMultiSensorInput(msg, sensorData) {
+            var results = {};
+            var anyAnomaly = false;
+            var worstSeverity = "normal";
+            var anomalySensors = [];
+            
+            var sensorNames = Object.keys(sensorData);
+            
+            sensorNames.forEach(function(sensorName) {
+                var value = parseFloat(sensorData[sensorName]);
+                if (isNaN(value)) return;
+                
+                // Initialize per-sensor buffers if needed
+                if (!node.sensorBuffers[sensorName]) {
+                    node.sensorBuffers[sensorName] = [];
+                    node.sensorStates[sensorName] = {
+                        lastAnomalyState: false,
+                        consecutiveAnomalies: 0,
+                        consecutiveNormals: 0
+                    };
+                    node.sensorEma[sensorName] = null;
+                    node.sensorCusum[sensorName] = { pos: 0, neg: 0 };
+                }
+                
+                // Add to sensor buffer
+                node.sensorBuffers[sensorName].push({ timestamp: Date.now(), value: value });
+                if (node.sensorBuffers[sensorName].length > node.windowSize) {
+                    node.sensorBuffers[sensorName].shift();
+                }
+                
+                var values = node.sensorBuffers[sensorName].map(function(d) { return d.value; });
+                
+                // Minimum data check
+                var minRequired = node.method === "iqr" ? 4 : 2;
+                if (node.sensorBuffers[sensorName].length < minRequired) {
+                    results[sensorName] = {
+                        value: value,
+                        isAnomaly: false,
+                        severity: "warmup",
+                        bufferSize: node.sensorBuffers[sensorName].length,
+                        minRequired: minRequired
+                    };
+                    return;
+                }
+                
+                // Detect anomaly based on method
+                var result;
+                switch (node.method) {
+                    case "zscore":
+                        result = detectZScore(value, values);
+                        break;
+                    case "iqr":
+                        result = detectIQR(value, values);
+                        break;
+                    case "threshold":
+                        result = detectThreshold(value);
+                        break;
+                    case "percentile":
+                        result = detectPercentile(value, values);
+                        break;
+                    case "ema":
+                        // Use per-sensor EMA
+                        var sensorEmaResult = detectEMASensor(value, values, sensorName);
+                        result = sensorEmaResult;
+                        break;
+                    case "cusum":
+                        var sensorCusumResult = detectCUSUMSensor(value, values, sensorName);
+                        result = sensorCusumResult;
+                        break;
+                    case "moving-average":
+                        result = detectMovingAverage(value, values);
+                        break;
+                    default:
+                        result = detectZScore(value, values);
+                }
+                
+                // Apply per-sensor hysteresis
+                var finalIsAnomaly = result.isAnomaly;
+                var state = node.sensorStates[sensorName];
+                
+                if (node.hysteresisEnabled) {
+                    if (result.isAnomaly) {
+                        state.consecutiveAnomalies++;
+                        state.consecutiveNormals = 0;
+                        
+                        if (state.consecutiveAnomalies < node.consecutiveCount) {
+                            finalIsAnomaly = false;
+                        }
+                    } else {
+                        state.consecutiveNormals++;
+                        
+                        if (state.lastAnomalyState) {
+                            var requiredNormals = Math.ceil(node.consecutiveCount * (1 + node.hysteresisPercent / 100));
+                            if (state.consecutiveNormals < requiredNormals) {
+                                finalIsAnomaly = true;
+                                result.severity = "warning";
+                            } else {
+                                state.consecutiveAnomalies = 0;
+                            }
+                        }
+                    }
+                    state.lastAnomalyState = finalIsAnomaly;
+                }
+                
+                results[sensorName] = {
+                    value: value,
+                    isAnomaly: finalIsAnomaly,
+                    rawAnomaly: result.isAnomaly,
+                    severity: finalIsAnomaly ? result.severity : "normal",
+                    method: node.method,
+                    bufferSize: node.sensorBuffers[sensorName].length,
+                    details: result.details || {}
+                };
+                
+                if (finalIsAnomaly) {
+                    anyAnomaly = true;
+                    anomalySensors.push(sensorName);
+                    if (result.severity === "critical" || (worstSeverity !== "critical" && result.severity === "warning")) {
+                        worstSeverity = result.severity;
+                    }
+                }
+            });
+            
+            // Build output message
+            var outMsg = {
+                payload: results,
+                isAnomaly: anyAnomaly,
+                severity: anyAnomaly ? worstSeverity : "normal",
+                anomalySensors: anomalySensors,
+                sensorCount: sensorNames.length,
+                method: node.method,
+                windowSize: node.windowSize,
+                inputFormat: "multi-sensor",
+                _msgid: msg._msgid
+            };
+            
+            // Copy original message properties
+            if (msg.topic) outMsg.topic = node.outputTopic || msg.topic;
+            
+            // Update status
+            if (anyAnomaly) {
+                node.status({
+                    fill: worstSeverity === "critical" ? "red" : "yellow",
+                    shape: "dot",
+                    text: worstSeverity.toUpperCase() + ": " + anomalySensors.join(", ")
+                });
+                node.send([null, outMsg]);
+            } else {
+                node.status({
+                    fill: "green",
+                    shape: "dot",
+                    text: sensorNames.length + " sensors OK"
+                });
+                node.send([outMsg, null]);
+            }
+        }
+        
+        // EMA detection for specific sensor
+        function detectEMASensor(value, values, sensorName) {
+            var result = detectEMA(value, values);
+            // Store per-sensor EMA state
+            if (!node.sensorEma[sensorName]) {
+                node.sensorEma[sensorName] = node.ema;
+            }
+            return result;
+        }
+        
+        // CUSUM detection for specific sensor
+        function detectCUSUMSensor(value, values, sensorName) {
+            var result = detectCUSUM(value, values);
+            // Store per-sensor CUSUM state
+            if (!node.sensorCusum[sensorName]) {
+                node.sensorCusum[sensorName] = { pos: node.cusumPos, neg: node.cusumNeg };
+            }
+            return result;
+        }
+        
         node.on('input', function(msg) {
             try {
+                // Dynamic configuration via msg.config
+                // Allows runtime override of node settings
+                var cfg = msg.config || {};
+                var activeMethod = cfg.method || node.method;
+                var activeWindowSize = (cfg.windowSize !== undefined) ? parseInt(cfg.windowSize) : node.windowSize;
+                var activeZscoreThreshold = (cfg.zscoreThreshold !== undefined) ? parseFloat(cfg.zscoreThreshold) : node.zscoreThreshold;
+                var activeZscoreWarning = (cfg.zscoreWarning !== undefined) ? parseFloat(cfg.zscoreWarning) : node.zscoreWarning;
+                var activeIqrMultiplier = (cfg.iqrMultiplier !== undefined) ? parseFloat(cfg.iqrMultiplier) : node.iqrMultiplier;
+                var activeMinThreshold = (cfg.minThreshold !== undefined) ? parseFloat(cfg.minThreshold) : node.minThreshold;
+                var activeMaxThreshold = (cfg.maxThreshold !== undefined) ? parseFloat(cfg.maxThreshold) : node.maxThreshold;
+                var activeHysteresisEnabled = (cfg.hysteresisEnabled !== undefined) ? cfg.hysteresisEnabled : node.hysteresisEnabled;
+                var activeConsecutiveCount = (cfg.consecutiveCount !== undefined) ? parseInt(cfg.consecutiveCount) : node.consecutiveCount;
+                
                 // Reset function
                 if (msg.reset === true) {
                     node.dataBuffer = [];
+                    node.sensorBuffers = {}; // For multi-sensor mode
+                    node.sensorStates = {};  // Hysteresis states per sensor
                     node.ema = null;
                     node.cusumPos = 0;
                     node.cusumNeg = 0;
@@ -447,7 +662,24 @@ module.exports = function(RED) {
                     node.lastAnomalyState = false;
                     node.consecutiveAnomalies = 0;
                     node.consecutiveNormals = 0;
-                    node.status({fill: "blue", shape: "ring", text: node.method + " - reset"});
+                    node.status({fill: "blue", shape: "ring", text: activeMethod + " - reset"});
+                    return;
+                }
+                
+                // Check if payload is JSON object or array (multi-sensor mode)
+                if (typeof msg.payload === 'object' && msg.payload !== null && !Array.isArray(msg.payload)) {
+                    // JSON object input: { "sensor1": 25.5, "sensor2": 30.2, ... }
+                    processMultiSensorInput(msg, msg.payload);
+                    return;
+                } else if (Array.isArray(msg.payload) && msg.payload.length > 0 && typeof msg.payload[0] === 'object') {
+                    // Array of sensor objects: [{ name: "temp", value: 25.5 }, ...]
+                    var sensorData = {};
+                    msg.payload.forEach(function(item) {
+                        if (item.name && item.value !== undefined) {
+                            sensorData[item.name] = item.value;
+                        }
+                    });
+                    processMultiSensorInput(msg, sensorData);
                     return;
                 }
                 
@@ -480,17 +712,17 @@ module.exports = function(RED) {
                     return;
                 }
                 
-                // Detect anomaly based on method
+                // Detect anomaly based on method (use active config from msg.config or node defaults)
                 var result;
-                switch (node.method) {
+                switch (activeMethod) {
                     case "zscore":
-                        result = detectZScore(value, values);
+                        result = detectZScoreWithConfig(value, values, activeZscoreThreshold, activeZscoreWarning);
                         break;
                     case "iqr":
-                        result = detectIQR(value, values);
+                        result = detectIQRWithConfig(value, values, activeIqrMultiplier);
                         break;
                     case "threshold":
-                        result = detectThreshold(value);
+                        result = detectThresholdWithConfig(value, activeMinThreshold, activeMaxThreshold);
                         break;
                     case "percentile":
                         result = detectPercentile(value, values);
@@ -505,21 +737,21 @@ module.exports = function(RED) {
                         result = detectMovingAverage(value, values);
                         break;
                     default:
-                        result = detectZScore(value, values);
+                        result = detectZScoreWithConfig(value, values, activeZscoreThreshold, activeZscoreWarning);
                 }
                 
                 // Apply hysteresis to prevent alarm flickering
                 var finalIsAnomaly = result.isAnomaly;
                 var hysteresisApplied = false;
                 
-                if (node.hysteresisEnabled) {
+                if (activeHysteresisEnabled) {
                     if (result.isAnomaly) {
                         node.consecutiveAnomalies++;
                         node.consecutiveNormals = 0;
                         
                         // Only trigger anomaly if consecutive count reached
                         // OR if already in anomaly state (maintain state)
-                        if (node.consecutiveAnomalies >= node.consecutiveCount || node.lastAnomalyState) {
+                        if (node.consecutiveAnomalies >= activeConsecutiveCount || node.lastAnomalyState) {
                             finalIsAnomaly = true;
                         } else {
                             finalIsAnomaly = false;
@@ -533,8 +765,8 @@ module.exports = function(RED) {
                         // This creates hysteresis (deadband)
                         if (node.lastAnomalyState) {
                             // Apply hysteresis: need more consecutive normals to exit anomaly state
-                            var exitCount = Math.max(node.consecutiveCount, 
-                                Math.ceil(node.consecutiveCount * (1 + node.hysteresisPercent / 100)));
+                            var exitCount = Math.max(activeConsecutiveCount, 
+                                Math.ceil(activeConsecutiveCount * (1 + node.hysteresisPercent / 100)));
                             
                             if (node.consecutiveNormals >= exitCount) {
                                 finalIsAnomaly = false;

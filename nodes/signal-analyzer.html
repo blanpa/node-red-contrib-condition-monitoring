@@ -16,6 +16,7 @@
             minPeakDistance: { value: 5 },
             peakType: { value: "both" },
             vibOutputMode: { value: "all" },
+            vibInputUnit: { value: "mm_s" },
             iso10816Class: { value: "class2" },
             // Envelope analysis settings
             envelopeBandLow: { value: 500 },
@@ -171,6 +172,19 @@
                         <div class="cm-help-text">How to output calculated features</div>
                     </div>
                     <div class="cm-config-item">
+                        <label><i class="fa fa-ruler"></i> Input Data Unit</label>
+                        <select id="node-input-vibInputUnit">
+                            <option value="mm_s" selected>Velocity (mm/s) - ISO 10816 native</option>
+                            <option value="m_s">Velocity (m/s)</option>
+                            <option value="g">Acceleration (g)</option>
+                            <option value="m_s2">Acceleration (m/s²)</option>
+                            <option value="raw">Raw/Dimensionless (ISO 10816 disabled)</option>
+                        </select>
+                        <div class="cm-help-text">Unit of incoming vibration data for correct ISO 10816 evaluation</div>
+                    </div>
+                </div>
+                <div class="cm-config-grid" style="margin-top: 10px;">
+                    <div class="cm-config-item">
                         <label><i class="fa fa-industry"></i> ISO 10816 Machine Class</label>
                         <select id="node-input-iso10816Class">
                             <option value="class1">Class I: Small machines (≤15 kW)</option>
@@ -183,8 +197,9 @@
                 </div>
                 <div class="cm-info-box" style="margin-top: 10px;">
                     <i class="fa fa-info-circle"></i>
-                    <b>ISO 10816-3:</b> Vibration severity evaluation. Output includes zone (A-D), 
-                    severity level, and maintenance recommendations based on RMS velocity.
+                    <b>ISO 10816-3:</b> Vibration severity evaluation based on RMS velocity (mm/s). 
+                    Select correct input unit above for accurate zone (A-D) assessment.
+                    <br><b>Note:</b> Acceleration data is converted to velocity using f=50Hz (typical industrial frequency).
                 </div>
             </div>
             
@@ -414,6 +429,17 @@
         
         <dt>msg.reset <span class="property-type">boolean</span></dt>
         <dd>Set to <code>true</code> to clear the sample buffer</dd>
+        
+        <dt>msg.config <span class="property-type">object</span></dt>
+        <dd>Optional runtime configuration override. Allows dynamic adjustment of parameters per message:
+        <pre>msg.config = {
+  mode: "vibration",        // Override mode (fft/vibration/peaks/envelope/cepstrum)
+  fftSize: 1024,            // Override FFT size
+  sampleRate: 1000,         // Override sample rate
+  vibrationThreshold: 5,    // Override vibration crest factor threshold
+  peakThreshold: 0.3        // Override peak detection threshold
+};</pre>
+        <b>Use cases:</b> Adaptive analysis based on operating conditions or equipment type.</dd>
     </dl>
     
     <h3>Outputs</h3>
@@ -486,22 +512,37 @@
         <dt>iso10816 <span class="property-type">object</span></dt>
         <dd>ISO 10816-3 vibration severity assessment:
         <pre>{
-  "zone": "A"|"B"|"C"|"D",
-  "severity": "good"|"acceptable"|"warning"|"critical",
+  "zone": "A"|"B"|"C"|"D"|"N/A",
+  "severity": "good"|"acceptable"|"warning"|"critical"|"unknown",
   "recommendation": "...",
   "rmsVelocity": 2.5,
   "machineClass": "class2",
   "limits": { "ab": 1.12, "bc": 2.8, "cd": 7.1 },
   "zoneProgress": 45,
   "isAlarm": false,
-  "isWarning": false
+  "isWarning": false,
+  "inputUnit": "mm_s",
+  "isValid": true
 }</pre>
         <br><b>Zones:</b>
         <br>• <b>Zone A:</b> Newly commissioned machine condition
         <br>• <b>Zone B:</b> Acceptable for unrestricted long-term operation
         <br>• <b>Zone C:</b> Acceptable only for limited periods
-        <br>• <b>Zone D:</b> Vibration causes damage - immediate action required</dd>
+        <br>• <b>Zone D:</b> Vibration causes damage - immediate action required
+        <br>• <b>N/A:</b> Input unit is raw/dimensionless - ISO evaluation not valid</dd>
     </dl>
+    
+    <h3>Input Data Unit Conversion</h3>
+    <p>ISO 10816-3 requires RMS velocity in mm/s. The node automatically converts:</p>
+    <table>
+        <tr><th>Input Unit</th><th>Conversion</th></tr>
+        <tr><td>Velocity (mm/s)</td><td>Direct use - no conversion</td></tr>
+        <tr><td>Velocity (m/s)</td><td>× 1000</td></tr>
+        <tr><td>Acceleration (g)</td><td>v = (g × 9810) / (2π × 50Hz)</td></tr>
+        <tr><td>Acceleration (m/s²)</td><td>v = (a × 1000) / (2π × 50Hz)</td></tr>
+        <tr><td>Raw/Dimensionless</td><td>ISO 10816 disabled</td></tr>
+    </table>
+    <p><b>Note:</b> Acceleration conversion uses 50Hz as typical industrial frequency. For accurate results, use velocity sensors or adjust the conversion externally.</p>
     
     <h3>ISO 10816-3 Machine Classes</h3>
     <table>

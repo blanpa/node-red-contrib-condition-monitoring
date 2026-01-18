@@ -482,15 +482,57 @@
     
     <h3>Inputs</h3>
     <dl>
-        <dt>msg.payload <span class="property-type">number</span></dt>
-        <dd>The numeric value to analyze (required)</dd>
+        <dt>msg.payload <span class="property-type">number | object</span></dt>
+        <dd>Single numeric value <b>OR</b> JSON object with multiple sensors:
+        <pre>// Single value
+msg.payload = 65.2;
+
+// Multi-sensor JSON
+msg.payload = {
+  "temperature": 65.2,
+  "pressure": 4.5,
+  "vibration": 2.3
+};</pre></dd>
         
         <dt>msg.reset <span class="property-type">boolean</span></dt>
         <dd>Set to <code>true</code> to clear the internal buffer and reset state</dd>
         
         <dt>msg.timestamp <span class="property-type">number</span></dt>
         <dd>Optional timestamp in milliseconds (uses Date.now() if not provided)</dd>
+        
+        <dt>msg.config <span class="property-type">object</span></dt>
+        <dd>Optional runtime configuration override. Allows dynamic adjustment of detection parameters per message:
+        <pre>msg.config = {
+  method: "zscore",        // Override detection method
+  zscoreThreshold: 2.5,    // Override Z-score threshold
+  zscoreWarning: 1.8,      // Override warning threshold
+  iqrMultiplier: 1.5,      // Override IQR multiplier
+  minThreshold: 10,        // Override min threshold
+  maxThreshold: 100,       // Override max threshold
+  hysteresisEnabled: false,// Enable/disable hysteresis
+  consecutiveCount: 5      // Override consecutive count
+};</pre>
+        <b>Use cases:</b> Adaptive thresholds based on time of day, operating mode, or external conditions.</dd>
     </dl>
+    
+    <h3>Multi-Sensor Mode</h3>
+    <p>When receiving a JSON object, the node:</p>
+    <ul>
+        <li>Maintains <b>separate buffers</b> for each sensor</li>
+        <li>Applies <b>separate hysteresis</b> state per sensor</li>
+        <li>Outputs a combined result with per-sensor details</li>
+    </ul>
+    <p><b>Multi-sensor output:</b></p>
+    <pre>{
+  "payload": {
+    "temperature": { "value": 65.2, "isAnomaly": false, "severity": "normal" },
+    "pressure": { "value": 4.5, "isAnomaly": true, "severity": "warning" }
+  },
+  "isAnomaly": true,
+  "anomalySensors": ["pressure"],
+  "sensorCount": 2,
+  "inputFormat": "multi-sensor"
+}</pre>
     
     <h3>Outputs</h3>
     <ol>

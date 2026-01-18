@@ -43,6 +43,7 @@ module.exports = function(RED) {
         
         // Vibration settings
         this.vibOutputMode = config.vibOutputMode || "all";
+        this.vibInputUnit = config.vibInputUnit || "mm_s"; // Input data unit for ISO 10816
         this.iso10816Class = config.iso10816Class || "class2"; // ISO 10816 machine class
         
         // Envelope analysis settings (bearing fault detection)
@@ -329,8 +330,9 @@ module.exports = function(RED) {
             var periodicity = detectPeriodicity(autocorrelation);
             
             // ISO 10816-3 Vibration Severity Assessment
-            // RMS velocity in mm/s for machine classification
-            var iso10816 = evaluateISO10816(rms, node.iso10816Class || 'class2');
+            // Convert RMS to velocity in mm/s based on input unit
+            var rmsVelocity_mm_s = convertToVelocity(rms, node.vibInputUnit || 'mm_s');
+            var iso10816 = evaluateISO10816(rmsVelocity_mm_s, node.iso10816Class || 'class2', node.vibInputUnit || 'mm_s');
             
             return {
                 rms: rms,
@@ -351,10 +353,55 @@ module.exports = function(RED) {
             };
         }
         
+        // Convert RMS value to velocity in mm/s for ISO 10816 evaluation
+        // Assumes typical industrial frequency of ~50Hz for acceleration to velocity conversion
+        function convertToVelocity(rmsValue, inputUnit) {
+            var typicalFreq = 50; // Hz - typical industrial machine frequency
+            
+            switch (inputUnit) {
+                case 'mm_s':
+                    // Already in mm/s - no conversion needed
+                    return rmsValue;
+                case 'm_s':
+                    // Convert m/s to mm/s
+                    return rmsValue * 1000;
+                case 'g':
+                    // Convert g (acceleration) to mm/s (velocity)
+                    // v = a / (2 * π * f), where a is in m/s²
+                    // g = 9.81 m/s², so: v(mm/s) = (g * 9810) / (2 * π * f)
+                    return (rmsValue * 9810) / (2 * Math.PI * typicalFreq);
+                case 'm_s2':
+                    // Convert m/s² (acceleration) to mm/s (velocity)
+                    // v = a / (2 * π * f), then convert to mm/s
+                    return (rmsValue * 1000) / (2 * Math.PI * typicalFreq);
+                case 'raw':
+                default:
+                    // Raw/dimensionless - return as-is but mark as unconverted
+                    return rmsValue;
+            }
+        }
+        
         // ISO 10816-3 Vibration Severity Evaluation
         // Based on ISO 10816-3:2009 for industrial machines with rated power > 15 kW
         // RMS velocity in mm/s
-        function evaluateISO10816(rmsVelocity, machineClass) {
+        function evaluateISO10816(rmsVelocity, machineClass, inputUnit) {
+            // If input is raw/dimensionless, return a warning that ISO evaluation is not applicable
+            if (inputUnit === 'raw') {
+                return {
+                    zone: 'N/A',
+                    severity: 'unknown',
+                    recommendation: 'ISO 10816 not applicable - input unit is raw/dimensionless. Configure velocity or acceleration unit for proper evaluation.',
+                    rmsVelocity: rmsVelocity,
+                    machineClass: machineClass,
+                    limits: null,
+                    zoneProgress: 0,
+                    isAlarm: false,
+                    isWarning: false,
+                    inputUnit: inputUnit,
+                    isValid: false
+                };
+            }
+            
             // ISO 10816-3 Zones (RMS velocity in mm/s)
             // Zone A: Newly commissioned machines
             // Zone B: Acceptable for unrestricted long-term operation
@@ -415,7 +462,9 @@ module.exports = function(RED) {
                 limits: limits,
                 zoneProgress: Math.min(100, Math.max(0, zoneProgress)),
                 isAlarm: zone === 'D',
-                isWarning: zone === 'C' || zone === 'D'
+                isWarning: zone === 'C' || zone === 'D',
+                inputUnit: inputUnit,
+                isValid: true
             };
         }
         
@@ -1104,8 +1153,13 @@ module.exports = function(RED) {
             return { normal: outputMsg, anomaly: null };
         }
         
-        // Process Vibration
+        // Process Vibration (uses node defaults)
         function processVibration(msg, values) {
+            return processVibrationWithConfig(msg, values, node.vibrationThreshold);
+        }
+        
+        // Process Vibration with configurable threshold (for msg.config override)
+        function processVibrationWithConfig(msg, values, vibrationThreshold) {
             node.buffer.push.apply(node.buffer, values);
             
             if (node.buffer.length > node.windowSize) {
@@ -1134,14 +1188,20 @@ module.exports = function(RED) {
                 }
             });
             
-            // Check for potential issues
-            var hasAnomaly = features.crestFactor > 6 || Math.abs(features.kurtosis) > 4;
+            // Check for potential issues (vibrationThreshold overrides default crest factor check)
+            var crestFactorThreshold = vibrationThreshold || 6;
+            var hasAnomaly = features.crestFactor > crestFactorThreshold || Math.abs(features.kurtosis) > 4;
             
             return { normal: hasAnomaly ? null : outputMsg, anomaly: hasAnomaly ? outputMsg : null };
         }
         
-        // Process Peaks
+        // Process Peaks (uses node defaults)
         function processPeaks(msg, value, timestamp) {
+            return processPeaksWithConfig(msg, value, timestamp, node.minPeakHeight);
+        }
+        
+        // Process Peaks with configurable threshold (for msg.config override)
+        function processPeaksWithConfig(msg, value, timestamp, peakThreshold) {
             node.sampleCount++;
             node.buffer.push(value);
             node.timestamps.push(timestamp);
@@ -1155,7 +1215,7 @@ module.exports = function(RED) {
                 return null;
             }
             
-            var peaks = detectPeaks(node.buffer, node.timestamps, node.minPeakHeight, node.minPeakDistance, node.peakType);
+            var peaks = detectPeaks(node.buffer, node.timestamps, peakThreshold, node.minPeakDistance, node.peakType);
             var stats = calculatePeakStatistics(peaks, node.buffer);
             
             var currentIndex = node.buffer.length - 1;
@@ -1185,17 +1245,28 @@ module.exports = function(RED) {
         
         node.on('input', function(msg) {
             try {
+                // Dynamic configuration via msg.config
+                // Allows runtime override of node settings
+                var cfg = msg.config || {};
+                var activeMode = cfg.mode || node.mode;
+                var activeFftSize = (cfg.fftSize !== undefined) ? parseInt(cfg.fftSize) : node.fftSize;
+                var activeSampleRate = (cfg.sampleRate !== undefined) ? parseFloat(cfg.sampleRate) : node.sampleRate;
+                var activeFreqMin = (cfg.freqMin !== undefined) ? parseFloat(cfg.freqMin) : node.freqMin;
+                var activeFreqMax = (cfg.freqMax !== undefined) ? parseFloat(cfg.freqMax) : node.freqMax;
+                var activeVibrationThreshold = (cfg.vibrationThreshold !== undefined) ? parseFloat(cfg.vibrationThreshold) : node.vibrationThreshold;
+                var activePeakThreshold = (cfg.peakThreshold !== undefined) ? parseFloat(cfg.peakThreshold) : node.peakThreshold;
+                
                 if (msg.reset === true) {
                     node.buffer = [];
                     node.timestamps = [];
                     node.sampleCount = 0;
-                    node.status({fill: "blue", shape: "ring", text: node.mode + " - reset"});
+                    node.status({fill: "blue", shape: "ring", text: activeMode + " - reset"});
                     return;
                 }
                 
                 var result = null;
                 
-                if (node.mode === "fft") {
+                if (activeMode === "fft") {
                     var value = parseFloat(msg.payload);
                     if (isNaN(value)) {
                         node.warn("Invalid payload: not a number");
@@ -1203,32 +1274,32 @@ module.exports = function(RED) {
                     }
                     result = processFFT(msg, value);
                     
-                } else if (node.mode === "vibration") {
+                } else if (activeMode === "vibration") {
                     var values = Array.isArray(msg.payload) ? msg.payload : [msg.payload];
                     values = values.filter(function(v) { return typeof v === 'number' && !isNaN(v); });
                     if (values.length === 0) {
                         node.warn("No valid numeric values found");
                         return;
                     }
-                    result = processVibration(msg, values);
+                    result = processVibrationWithConfig(msg, values, activeVibrationThreshold);
                     
-                } else if (node.mode === "peaks") {
+                } else if (activeMode === "peaks") {
                     var value = parseFloat(msg.payload);
                     var timestamp = msg.timestamp || Date.now();
                     if (isNaN(value)) {
                         node.warn("Invalid payload: not a number");
                         return;
                     }
-                    result = processPeaks(msg, value, timestamp);
+                    result = processPeaksWithConfig(msg, value, timestamp, activePeakThreshold);
                     
-                } else if (node.mode === "envelope") {
+                } else if (activeMode === "envelope") {
                     var value = parseFloat(msg.payload);
                     if (isNaN(value)) {
                         node.warn("Invalid payload: not a number");
                         return;
                     }
                     result = processEnvelope(msg, value);
-                } else if (node.mode === "cepstrum") {
+                } else if (activeMode === "cepstrum") {
                     var value = parseFloat(msg.payload);
                     if (isNaN(value)) {
                         node.warn("Invalid payload: not a number");

@@ -297,8 +297,17 @@
     
     <h3>Inputs</h3>
     <dl>
-        <dt>msg.payload <span class="property-type">number</span></dt>
-        <dd>The numeric value to analyze (required)</dd>
+        <dt>msg.payload <span class="property-type">number | object</span></dt>
+        <dd>Single numeric value <b>OR</b> JSON object with multiple sensors:
+        <pre>// Single value
+msg.payload = 75.2;
+
+// Multi-sensor JSON
+msg.payload = {
+  "motor_temp": 75.2,
+  "bearing_vib": 2.5,
+  "current": 15.3
+};</pre></dd>
         
         <dt>msg.timestamp <span class="property-type">number</span></dt>
         <dd>Optional timestamp in milliseconds. If not provided, uses <code>Date.now()</code>.
@@ -306,7 +315,37 @@
         
         <dt>msg.reset <span class="property-type">boolean</span></dt>
         <dd>Set to <code>true</code> to clear history and reset calculations</dd>
+        
+        <dt>msg.config <span class="property-type">object</span></dt>
+        <dd>Optional runtime configuration override. Allows dynamic adjustment of parameters per message:
+        <pre>msg.config = {
+  mode: "rate-of-change",   // Override mode (prediction/rate-of-change/rul)
+  threshold: 80,            // Override prediction threshold
+  rocThreshold: 5,          // Override rate of change threshold
+  failureThreshold: 100,    // Override RUL failure threshold
+  warningThreshold: 80,     // Override RUL warning threshold
+  predictionSteps: 10       // Override prediction horizon
+};</pre>
+        <b>Use cases:</b> Adaptive thresholds, A/B testing, context-sensitive sensitivity.</dd>
     </dl>
+    
+    <h3>Multi-Sensor Mode</h3>
+    <p>When receiving a JSON object, the node:</p>
+    <ul>
+        <li>Maintains <b>separate buffers</b> for each sensor</li>
+        <li>Calculates trends/RUL <b>independently</b> per sensor</li>
+        <li>Tracks threshold exceedance per sensor</li>
+    </ul>
+    <p><b>Multi-sensor output:</b></p>
+    <pre>{
+  "payload": {
+    "motor_temp": { "value": 75.2, "trend": "increasing", "slope": 0.5 },
+    "bearing_vib": { "value": 2.5, "trend": "stable", "slope": 0.01 }
+  },
+  "sensorCount": 2,
+  "inputFormat": "multi-sensor",
+  "thresholdExceeded": false
+}</pre>
     
     <h3>Outputs</h3>
     <ol>

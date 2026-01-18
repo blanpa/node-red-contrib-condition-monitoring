@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.2] - 2026-01-18 - Predictive Maintenance Enhancement
+
+### ✨ New Features
+
+#### Anomaly Detector
+- **Hysteresis (Anti-Flicker)** - Prevents rapid alarm on/off switching
+  - Configurable consecutive samples before triggering alarm
+  - Exit hysteresis percentage (deadband) for returning to normal state
+  - New output properties: `rawAnomaly`, `hysteresis.applied`, `hysteresis.consecutiveAnomalies`
+- **Multi-Sensor JSON Input** - Process multiple sensors in one message
+  - Accepts JSON objects: `{ "temp": 65.2, "pressure": 4.5 }`
+  - Maintains separate buffers and hysteresis states per sensor
+  - Outputs combined result with `anomalySensors` array
+
+#### Signal Analyzer
+- **ISO 10816-3 Integration** - Vibration severity assessment
+  - Machine classes I-IV (small to large machines)
+  - Zones A-D (good, acceptable, warning, critical)
+  - Automatic severity, recommendation, and alarm/warning flags
+  - Zone progress percentage for trending
+- **Butterworth Filter** - Improved envelope analysis
+  - 2nd order IIR filter with bilinear transform
+  - Zero-phase filtering (filtfilt) - no phase distortion
+  - Automatic fallback to simple filter for edge cases
+
+#### Health Index
+- **Dynamic Weighted Aggregation** - Auto-adjusts sensor weights based on reliability
+  - Tracks per-sensor anomaly rates and signal variance
+  - Automatically downweights unreliable or noisy sensors
+  - New output: `dynamicWeights` with `effectiveWeight`, `reliabilityFactor`, `anomalyRate`
+
+#### Trend Predictor
+- **Robust RUL Calculation** - More stable predictions with noisy data
+  - Theil-Sen estimator for robust slope (resistant to outliers)
+  - Median filter to remove spikes before trend analysis
+  - Moving average smoothing for noise reduction
+  - Weighted combination of robust and linear slope (70/30)
+- **Multi-Sensor JSON Input** - Process multiple sensors in one message
+  - Accepts JSON objects: `{ "motor_temp": 75.2, "bearing_vib": 2.5 }`
+  - Calculates trends/RUL independently per sensor
+  - Outputs `exceededSensors` array when thresholds are reached
+
+### 🎨 UI Improvements
+
+- Added placeholder text (hellgrau) to all input fields showing example values
+- ISO 10816 machine class selector in Signal Analyzer vibration mode
+- Hysteresis settings section in Anomaly Detector
+- Dynamic weighting option in Health Index aggregation dropdown
+- Updated help documentation for all new features
+
+### 🧪 Testing
+
+- **148 Tests** - Up from 83 (65 new tests added)
+- Added tests for hysteresis behavior and state tracking
+- Added tests for ISO 10816 zone evaluation
+- Added tests for dynamic weight calculation
+- Added tests for robust RUL slope calculation
+- Added tests for multi-sensor JSON input (Anomaly Detector, Trend Predictor)
+
+---
+
 ## [0.2.0] - 2026-01-07 - Major Consolidation Release
 
 ### 🚀 Breaking Changes
@@ -312,7 +373,8 @@ All features are working and ready for real-world testing. API may change before
 - **0.1.0** - Initial beta release ✅
 - **0.1.1** - Bug fix release ✅
 - **0.1.2** - Quality & Testing release ✅
-- **0.2.0** - Major Consolidation release (current) ✅
+- **0.2.0** - Major Consolidation release ✅
+- **0.2.2** - Predictive Maintenance Enhancement (current) ✅
 - **0.3.0 - 0.8.0** - Beta updates with bug fixes and improvements
 - **0.9.0** - Release candidate (feature freeze)
 - **1.0.0** - First stable release (target: Q2 2026)

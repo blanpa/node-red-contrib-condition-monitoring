@@ -504,8 +504,13 @@ module.exports = function(RED) {
             };
         }
         
-        // Process RUL mode
+        // Process RUL mode (uses node defaults)
         function processRUL(msg, value, timestamp) {
+            return processRULWithConfig(msg, value, timestamp, node.failureThreshold, node.warningThreshold);
+        }
+        
+        // Process RUL mode with configurable thresholds (for msg.config override)
+        function processRULWithConfig(msg, value, timestamp, failureThreshold, warningThreshold) {
             node.buffer.push(value);
             node.timestamps.push(timestamp);
             
@@ -524,7 +529,7 @@ module.exports = function(RED) {
                 return null;
             }
             
-            if (node.failureThreshold === null) {
+            if (failureThreshold === null) {
                 node.status({fill: "red", shape: "ring", text: "RUL: no threshold set"});
                 return null;
             }
@@ -532,7 +537,7 @@ module.exports = function(RED) {
             var rulResult = calculateRUL(
                 node.buffer, 
                 node.timestamps, 
-                node.failureThreshold, 
+                failureThreshold, 
                 node.degradationModel,
                 node.confidenceLevel
             );
@@ -579,8 +584,8 @@ module.exports = function(RED) {
                     trend: rulResult.trend
                 },
                 thresholds: {
-                    failure: node.failureThreshold,
-                    warning: node.warningThreshold
+                    failure: failureThreshold,
+                    warning: warningThreshold
                 },
                 currentValue: value,
                 timestamp: timestamp
@@ -603,13 +608,18 @@ module.exports = function(RED) {
             node.status({fill: statusColor, shape: rulResult.status === 'healthy' ? 'dot' : 'ring', text: statusText});
             
             var isAnomaly = rulResult.status === 'critical' || rulResult.status === 'failed' ||
-                           (node.warningThreshold !== null && value >= node.warningThreshold);
+                           (warningThreshold !== null && value >= warningThreshold);
             
             return { normal: isAnomaly ? null : outputMsg, anomaly: isAnomaly ? outputMsg : null };
         }
         
-        // Process Trend Prediction
+        // Process Trend Prediction (uses node defaults)
         function processPrediction(msg, value, timestamp) {
+            return processPredictionWithConfig(msg, value, timestamp, node.threshold, node.predictionSteps);
+        }
+        
+        // Process Trend Prediction with configurable parameters (for msg.config override)
+        function processPredictionWithConfig(msg, value, timestamp, threshold, predictionSteps) {
             node.buffer.push(value);
             node.timestamps.push(timestamp);
             
@@ -630,16 +640,16 @@ module.exports = function(RED) {
             
             var prediction = null;
             if (node.method === "linear") {
-                prediction = linearRegression(node.buffer, node.predictionSteps);
+                prediction = linearRegression(node.buffer, predictionSteps);
             } else {
-                prediction = exponentialSmoothing(node.buffer, node.predictionSteps);
+                prediction = exponentialSmoothing(node.buffer, predictionSteps);
             }
             
             var timeToThreshold = null;
             var stepsToThreshold = null;
             
-            if (node.threshold !== null && prediction) {
-                stepsToThreshold = calculateStepsToThreshold(prediction.predictedValues, node.threshold);
+            if (threshold !== null && prediction) {
+                stepsToThreshold = calculateStepsToThreshold(prediction.predictedValues, threshold);
                 if (stepsToThreshold !== null && node.timestamps.length >= 2) {
                     var timeDiffs = [];
                     for (var i = 1; i < node.timestamps.length; i++) {
@@ -681,8 +691,13 @@ module.exports = function(RED) {
             return { normal: outputMsg, anomaly: null };
         }
         
-        // Process Rate of Change
+        // Process Rate of Change (uses node defaults)
         function processRateOfChange(msg, value, timestamp) {
+            return processRateOfChangeWithConfig(msg, value, timestamp, node.rocThreshold);
+        }
+        
+        // Process Rate of Change with configurable threshold (for msg.config override)
+        function processRateOfChangeWithConfig(msg, value, timestamp, rocThreshold) {
             node.rocHistory.push({ value: value, timestamp: timestamp });
             
             var windowMs = node.timeWindow * 1000;
@@ -726,8 +741,8 @@ module.exports = function(RED) {
                     }
                 }
                 
-                if (node.rocThreshold !== null && rateOfChange !== null) {
-                    isAnomalous = Math.abs(rateOfChange) > node.rocThreshold;
+                if (rocThreshold !== null && rateOfChange !== null) {
+                    isAnomalous = Math.abs(rateOfChange) > rocThreshold;
                 }
             }
             
@@ -760,15 +775,204 @@ module.exports = function(RED) {
             return { normal: isAnomalous ? null : outputMsg, anomaly: isAnomalous ? outputMsg : null };
         }
         
+        // Multi-sensor state buffers
+        node.sensorBuffers = {};
+        node.sensorTimestamps = {};
+        node.sensorPrevious = {};
+        node.sensorRocHistory = {};
+        
+        // Process multi-sensor JSON input
+        function processMultiSensorInput(msg, sensorData) {
+            var results = {};
+            var anyThresholdExceeded = false;
+            var exceededSensors = [];
+            var timestamp = msg.timestamp || Date.now();
+            
+            var sensorNames = Object.keys(sensorData);
+            
+            sensorNames.forEach(function(sensorName) {
+                var value = parseFloat(sensorData[sensorName]);
+                if (isNaN(value)) return;
+                
+                // Initialize per-sensor buffers if needed
+                if (!node.sensorBuffers[sensorName]) {
+                    node.sensorBuffers[sensorName] = [];
+                    node.sensorTimestamps[sensorName] = [];
+                    node.sensorPrevious[sensorName] = { value: null, timestamp: null };
+                    node.sensorRocHistory[sensorName] = [];
+                }
+                
+                // Add to sensor buffer
+                node.sensorBuffers[sensorName].push(value);
+                node.sensorTimestamps[sensorName].push(timestamp);
+                if (node.sensorBuffers[sensorName].length > node.windowSize) {
+                    node.sensorBuffers[sensorName].shift();
+                    node.sensorTimestamps[sensorName].shift();
+                }
+                
+                var sensorResult = {};
+                
+                if (node.mode === "prediction") {
+                    if (node.sensorBuffers[sensorName].length >= 3) {
+                        var regression = linearRegression(node.sensorBuffers[sensorName], node.predictionSteps);
+                        sensorResult = {
+                            value: value,
+                            trend: regression.slope > 0.01 ? "increasing" : regression.slope < -0.01 ? "decreasing" : "stable",
+                            slope: regression.slope,
+                            predicted: regression.predicted,
+                            confidence: regression.rSquared,
+                            bufferSize: node.sensorBuffers[sensorName].length
+                        };
+                        
+                        if (node.threshold !== null) {
+                            var stepsToThreshold = regression.slope !== 0 ? 
+                                Math.ceil((node.threshold - value) / regression.slope) : Infinity;
+                            sensorResult.stepsToThreshold = stepsToThreshold > 0 ? stepsToThreshold : 0;
+                            if (value >= node.threshold || (stepsToThreshold > 0 && stepsToThreshold <= node.predictionSteps)) {
+                                anyThresholdExceeded = true;
+                                exceededSensors.push(sensorName);
+                            }
+                        }
+                    } else {
+                        sensorResult = {
+                            value: value,
+                            trend: "warmup",
+                            bufferSize: node.sensorBuffers[sensorName].length,
+                            minRequired: 3
+                        };
+                    }
+                } else if (node.mode === "rate-of-change") {
+                    var prev = node.sensorPrevious[sensorName];
+                    if (prev.value !== null) {
+                        var deltaTime = (timestamp - prev.timestamp) / 1000;
+                        var deltaValue = value - prev.value;
+                        var roc = deltaTime > 0 ? deltaValue / deltaTime : 0;
+                        
+                        if (node.rocMethod === "percentage" && prev.value !== 0) {
+                            roc = (roc / Math.abs(prev.value)) * 100;
+                        }
+                        
+                        sensorResult = {
+                            value: value,
+                            rateOfChange: roc,
+                            deltaValue: deltaValue,
+                            deltaTime: deltaTime,
+                            unit: node.rocMethod === "percentage" ? "%/s" : "/s"
+                        };
+                        
+                        if (node.rocThreshold !== null && Math.abs(roc) > node.rocThreshold) {
+                            anyThresholdExceeded = true;
+                            exceededSensors.push(sensorName);
+                            sensorResult.thresholdExceeded = true;
+                        }
+                    } else {
+                        sensorResult = { value: value, rateOfChange: null, warmup: true };
+                    }
+                    node.sensorPrevious[sensorName] = { value: value, timestamp: timestamp };
+                } else if (node.mode === "rul") {
+                    if (node.sensorBuffers[sensorName].length >= 5 && node.failureThreshold !== null) {
+                        var rul = calculateRUL(
+                            node.sensorBuffers[sensorName],
+                            node.sensorTimestamps[sensorName],
+                            node.failureThreshold,
+                            node.degradationModel,
+                            node.confidenceLevel
+                        );
+                        sensorResult = {
+                            value: value,
+                            rul: rul,
+                            bufferSize: node.sensorBuffers[sensorName].length
+                        };
+                        
+                        if (rul.status === "critical" || rul.status === "failed") {
+                            anyThresholdExceeded = true;
+                            exceededSensors.push(sensorName);
+                        }
+                    } else {
+                        sensorResult = {
+                            value: value,
+                            rul: null,
+                            warmup: true,
+                            bufferSize: node.sensorBuffers[sensorName].length,
+                            minRequired: 5
+                        };
+                    }
+                }
+                
+                results[sensorName] = sensorResult;
+            });
+            
+            // Build output message
+            var outMsg = {
+                payload: results,
+                mode: node.mode,
+                sensorCount: sensorNames.length,
+                inputFormat: "multi-sensor",
+                _msgid: msg._msgid
+            };
+            
+            if (anyThresholdExceeded) {
+                outMsg.thresholdExceeded = true;
+                outMsg.exceededSensors = exceededSensors;
+            }
+            
+            if (msg.topic) outMsg.topic = node.outputTopic || msg.topic;
+            
+            // Update status
+            var statusText = sensorNames.length + " sensors";
+            if (node.mode === "prediction") {
+                statusText += " (trend)";
+            } else if (node.mode === "rul") {
+                statusText += " (RUL)";
+            }
+            
+            if (anyThresholdExceeded) {
+                node.status({
+                    fill: "red",
+                    shape: "dot",
+                    text: "threshold: " + exceededSensors.join(", ")
+                });
+                node.send([null, outMsg]);
+            } else {
+                node.status({
+                    fill: "green",
+                    shape: "dot",
+                    text: statusText
+                });
+                node.send([outMsg, null]);
+            }
+        }
+        
         node.on('input', function(msg) {
             try {
+                // Dynamic configuration via msg.config
+                // Allows runtime override of node settings
+                var cfg = msg.config || {};
+                var activeMode = cfg.mode || node.mode;
+                var activeWindowSize = (cfg.windowSize !== undefined) ? parseInt(cfg.windowSize) : node.windowSize;
+                var activeThreshold = (cfg.threshold !== undefined) ? parseFloat(cfg.threshold) : node.threshold;
+                var activeFailureThreshold = (cfg.failureThreshold !== undefined) ? parseFloat(cfg.failureThreshold) : node.failureThreshold;
+                var activeWarningThreshold = (cfg.warningThreshold !== undefined) ? parseFloat(cfg.warningThreshold) : node.warningThreshold;
+                var activeRocThreshold = (cfg.rocThreshold !== undefined) ? parseFloat(cfg.rocThreshold) : node.rocThreshold;
+                var activePredictionSteps = (cfg.predictionSteps !== undefined) ? parseInt(cfg.predictionSteps) : node.predictionSteps;
+                
                 if (msg.reset === true) {
                     node.buffer = [];
                     node.timestamps = [];
                     node.previousValue = null;
                     node.previousTimestamp = null;
                     node.rocHistory = [];
-                    node.status({fill: "blue", shape: "ring", text: node.mode + " - reset"});
+                    node.sensorBuffers = {};
+                    node.sensorTimestamps = {};
+                    node.sensorPrevious = {};
+                    node.sensorRocHistory = {};
+                    node.status({fill: "blue", shape: "ring", text: activeMode + " - reset"});
+                    return;
+                }
+                
+                // Check if payload is JSON object (multi-sensor mode)
+                if (typeof msg.payload === 'object' && msg.payload !== null && !Array.isArray(msg.payload)) {
+                    processMultiSensorInput(msg, msg.payload);
                     return;
                 }
                 
@@ -782,12 +986,12 @@ module.exports = function(RED) {
                 
                 var result = null;
                 
-                if (node.mode === "prediction") {
-                    result = processPrediction(msg, value, timestamp);
-                } else if (node.mode === "rate-of-change") {
-                    result = processRateOfChange(msg, value, timestamp);
-                } else if (node.mode === "rul") {
-                    result = processRUL(msg, value, timestamp);
+                if (activeMode === "prediction") {
+                    result = processPredictionWithConfig(msg, value, timestamp, activeThreshold, activePredictionSteps);
+                } else if (activeMode === "rate-of-change") {
+                    result = processRateOfChangeWithConfig(msg, value, timestamp, activeRocThreshold);
+                } else if (activeMode === "rul") {
+                    result = processRULWithConfig(msg, value, timestamp, activeFailureThreshold, activeWarningThreshold);
                 }
                 
                 if (result) {

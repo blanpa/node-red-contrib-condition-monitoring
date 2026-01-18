@@ -102,6 +102,16 @@ module.exports = function(RED) {
         };
         
         node.on('input', function(msg) {
+            // Dynamic configuration via msg.config
+            // Allows runtime override of node settings
+            const cfg = msg.config || {};
+            const activeHealthyThreshold = (cfg.healthyThreshold !== undefined) ? parseFloat(cfg.healthyThreshold) : healthyThreshold;
+            const activeWarningThreshold = (cfg.warningThreshold !== undefined) ? parseFloat(cfg.warningThreshold) : warningThreshold;
+            const activeDegradedThreshold = (cfg.degradedThreshold !== undefined) ? parseFloat(cfg.degradedThreshold) : degradedThreshold;
+            const activeCriticalThreshold = (cfg.criticalThreshold !== undefined) ? parseFloat(cfg.criticalThreshold) : criticalThreshold;
+            const activeAggregationMethod = cfg.aggregationMethod || aggregationMethod;
+            const activeSensorWeights = cfg.sensorWeights || sensorWeights;
+            
             const payload = msg.payload;
             
             // Accept array or object of sensor values
@@ -125,25 +135,25 @@ module.exports = function(RED) {
                 return;
             }
             
-            // Calculate health index
-            const healthResult = calculateHealthIndex(sensorData, sensorWeights, aggregationMethod);
+            // Calculate health index (using active config from msg.config or node defaults)
+            const healthResult = calculateHealthIndex(sensorData, activeSensorWeights, activeAggregationMethod);
             
             debugLog("Health Index: " + healthResult.index.toFixed(1) + "%, Worst: " + (healthResult.worstSensor ? healthResult.worstSensor.name : "N/A"));
             
-            // Determine health status using configurable thresholds
+            // Determine health status using configurable thresholds (active config)
             let status = "healthy";
             let statusColor = "green";
             
-            if (healthResult.index < criticalThreshold) {
+            if (healthResult.index < activeCriticalThreshold) {
                 status = "critical";
                 statusColor = "red";
-            } else if (healthResult.index < degradedThreshold) {
+            } else if (healthResult.index < activeDegradedThreshold) {
                 status = "degraded";
                 statusColor = "red";
-            } else if (healthResult.index < warningThreshold) {
+            } else if (healthResult.index < activeWarningThreshold) {
                 status = "warning";
                 statusColor = "yellow";
-            } else if (healthResult.index < healthyThreshold) {
+            } else if (healthResult.index < activeHealthyThreshold) {
                 status = "attention";
                 statusColor = "yellow";
             }

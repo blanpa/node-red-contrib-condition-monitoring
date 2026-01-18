@@ -604,6 +604,82 @@ describe('signal-analyzer Node', function () {
                 }
             });
         });
+
+        it('should disable ISO 10816 for raw/dimensionless input', function (done) {
+            const flow = [
+                { id: "n1", type: "signal-analyzer", name: "test", mode: "vibration", 
+                  windowSize: 20, vibInputUnit: "raw", iso10816Class: "class2", wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                
+                n2.on("input", function (msg) {
+                    expect(msg.payload.iso10816.zone).toBe('N/A');
+                    expect(msg.payload.iso10816.severity).toBe('unknown');
+                    expect(msg.payload.iso10816.isValid).toBe(false);
+                    done();
+                });
+                
+                for (let i = 0; i < 20; i++) {
+                    n1.receive({ payload: Math.sin(i * 0.5) * 2 });
+                }
+            });
+        });
+
+        it('should convert m/s to mm/s correctly', function (done) {
+            const flow = [
+                { id: "n1", type: "signal-analyzer", name: "test", mode: "vibration", 
+                  windowSize: 20, vibInputUnit: "m_s", iso10816Class: "class2", wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                
+                n2.on("input", function (msg) {
+                    // Input is in m/s, so RMS of 0.001 m/s = 1 mm/s -> Zone A for class2
+                    expect(msg.payload.iso10816.isValid).toBe(true);
+                    expect(msg.payload.iso10816.inputUnit).toBe('m_s');
+                    // RMS velocity should be 1000x the input RMS
+                    expect(msg.payload.iso10816.rmsVelocity).toBeCloseTo(msg.payload.rms * 1000, 1);
+                    done();
+                });
+                
+                // Send very small values (in m/s)
+                for (let i = 0; i < 20; i++) {
+                    n1.receive({ payload: Math.sin(i * 0.5) * 0.001 });
+                }
+            });
+        });
+
+        it('should include inputUnit and isValid in ISO output', function (done) {
+            const flow = [
+                { id: "n1", type: "signal-analyzer", name: "test", mode: "vibration", 
+                  windowSize: 20, vibInputUnit: "mm_s", iso10816Class: "class2", wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                
+                n2.on("input", function (msg) {
+                    expect(msg.payload.iso10816).toHaveProperty('inputUnit');
+                    expect(msg.payload.iso10816).toHaveProperty('isValid');
+                    expect(msg.payload.iso10816.inputUnit).toBe('mm_s');
+                    expect(msg.payload.iso10816.isValid).toBe(true);
+                    done();
+                });
+                
+                for (let i = 0; i < 20; i++) {
+                    n1.receive({ payload: Math.sin(i * 0.5) * 2 });
+                }
+            });
+        });
     });
 
     // ============================================

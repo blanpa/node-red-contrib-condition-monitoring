@@ -464,6 +464,21 @@
     <dl class="message-properties">
         <dt>payload <span class="property-type">array | object</span></dt>
         <dd>Array or object containing sensor readings with optional anomaly detection metadata</dd>
+        
+        <dt>msg.config <span class="property-type">object</span></dt>
+        <dd>Optional runtime configuration override. Allows dynamic adjustment of thresholds per message:
+        <pre>msg.config = {
+  healthyThreshold: 90,     // Override healthy threshold
+  warningThreshold: 70,     // Override warning threshold
+  degradedThreshold: 50,    // Override degraded threshold
+  criticalThreshold: 25,    // Override critical threshold
+  aggregationMethod: "min", // Override aggregation (weighted/min/average)
+  sensorWeights: {          // Override sensor weights
+    "temp": 2.0,
+    "vibration": 1.5
+  }
+};</pre>
+        <b>Use cases:</b> Different thresholds for different operating modes or machine types.</dd>
     </dl>
     <p><b>Expected sensor data format:</b></p>
     <pre>{

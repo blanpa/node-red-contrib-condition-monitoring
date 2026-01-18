@@ -5,7 +5,7 @@ This directory contains trained ML models for use with the `ml-inference` Node-R
 All models are trained on **realistic synthetic industrial data** simulating:
 - Temperature sensors (60-80°C with daily cycles)
 - Pressure sensors (4-6 bar with pump cycles)
-- Vibration sensors (1-3 mm/s ISO 10816 compliant)
+- Vibration sensors (1-3 mm/s ISO 10816-3 compliant, Class II machines)
 - Flow sensors (90-110 L/min)
 - Motor current sensors (15-20A)
 - Humidity sensors (40-60% RH)

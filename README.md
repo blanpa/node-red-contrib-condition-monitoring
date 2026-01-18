@@ -11,18 +11,19 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## Project Status: v0.2.1 Beta
+## Project Status: v0.2.2 Beta
 
-**Performance & Reliability Update**
+**Predictive Maintenance Enhancement Update**
 
 - **8 Unified Nodes** - PCA and enhanced core nodes
-- **High-Performance FFT** - Radix-4 Cooley-Tukey algorithm via fft.js (O(n log n) instead of O(n²))
-- **Persistent Python Bridge** - 10-100x faster ML inference for Python models (Keras, sklearn, TFLite)
-- **State Persistence** - Optional context-based state saving across Node-RED restarts
-- **Advanced Diagnostics** - Envelope spectrum, cepstrum analysis for gearbox faults
-- **Reliability Analysis** - Weibull distribution with B-life (B1, B5, B10, B50) integrated in Trend Predictor
-- **ML Inference** - ONNX, TensorFlow.js, Keras, scikit-learn, TFLite, Google Coral support
-- **Comprehensive Testing** - 83 unit tests with Jest framework
+- **ISO 10816-3 Integration** - Vibration severity assessment with zones A-D
+- **Butterworth Filter** - 2nd order IIR filter with zero-phase filtering (filtfilt)
+- **Hysteresis (Anti-Flicker)** - Prevents rapid alarm on/off switching
+- **Dynamic Sensor Weighting** - Auto-adjusts weights based on sensor reliability
+- **Robust RUL Calculation** - Theil-Sen estimator, median filter, moving average smoothing
+- **High-Performance FFT** - Radix-4 Cooley-Tukey algorithm via fft.js
+- **State Persistence** - Optional context-based state saving across restarts
+- **Comprehensive Testing** - 135 unit tests with Jest framework
 
 ---
 
@@ -100,6 +101,16 @@ All nodes are in the **`condition-monitoring`** category.
 | **CUSUM** | Drift detection, gradual shifts |
 | **Moving Average** | Smoothed baseline comparison |
 
+**Hysteresis (Anti-Flicker):**
+- Prevents rapid alarm on/off switching near thresholds
+- Configurable consecutive samples before triggering
+- Deadband percentage for exiting anomaly state
+
+**Multi-Sensor JSON Input:**
+- Accepts JSON objects with multiple sensors: `{ "temp": 65.2, "pressure": 4.5 }`
+- Maintains separate buffers and hysteresis states per sensor
+- Outputs combined result with per-sensor analysis
+
 **Example:**
 ```
 [MQTT Sensor] → [Anomaly Detector (Z-Score)] → [Normal] → [Dashboard]
@@ -145,14 +156,24 @@ All nodes are in the **`condition-monitoring`** category.
 | Mode | Output |
 |------|--------|
 | **FFT** | Frequency peaks, spectral features |
-| **Vibration** | RMS, Crest Factor, Kurtosis, Skewness, Health Score, Autocorrelation, Sample Entropy, Periodicity |
+| **Vibration** | RMS, Crest Factor, Kurtosis, Skewness, Health Score, **ISO 10816-3 assessment** |
 | **Peaks** | Local maxima/minima detection |
-| **Envelope** | Bearing fault detection (BPFO, BPFI, BSF, FTF) |
+| **Envelope** | Bearing fault detection (BPFO, BPFI, BSF, FTF) with **Butterworth filter** |
 | **Cepstrum** | Gearbox fault detection (GMF, sidebands) |
+
+**ISO 10816-3 Vibration Severity:**
+- Machine classes I-IV (small to large machines)
+- Zones A-D with severity levels and recommendations
+- Automatic alarm/warning thresholds
+
+**Butterworth Filter:**
+- 2nd order IIR filter for envelope analysis
+- Zero-phase filtering (filtfilt) - no phase distortion
+- Automatic fallback for edge cases
 
 **Example:**
 ```
-[Vibration Sensor] → [Signal Analyzer (Vibration)] → RMS, Crest Factor
+[Vibration Sensor] → [Signal Analyzer (Vibration)] → RMS, ISO 10816 Zone
                    → [Signal Analyzer (FFT)] → Frequency Peaks
                    → [Signal Analyzer (Envelope)] → Bearing faults
 ```
@@ -173,6 +194,12 @@ All nodes are in the **`condition-monitoring`** category.
 - Confidence intervals for predictions
 - Status: healthy/warning/critical/failed
 - **Degradation models:** Linear, Exponential, Weibull (reliability-based)
+- **Robust calculation:** Theil-Sen estimator, median filter, moving average smoothing
+
+**Multi-Sensor JSON Input:**
+- Accepts JSON objects with multiple sensors: `{ "temp": 65.2, "vibration": 2.5 }`
+- Calculates trends/RUL for each sensor independently
+- Tracks threshold exceedance per sensor
 
 **Weibull Analysis:**
 - Automatic Weibull parameter estimation (β, η)
@@ -190,10 +217,11 @@ All nodes are in the **`condition-monitoring`** category.
 **Multi-sensor health aggregation:**
 - Weighted combination of sensors
 - 0-100% health score
-- Configurable aggregation methods (Weighted, Minimum, Average, Geometric)
+- Configurable aggregation methods (Weighted, **Dynamic**, Minimum, Average, Geometric)
+- **Dynamic weighting** - Auto-adjusts weights based on sensor reliability
 - **Visual threshold configuration** with slider-based UI
 - Configurable status levels (healthy, warning, degraded, critical)
-- Automatic worst sensor identification
+- Automatic worst sensor identification with reliability metrics
 
 ### 7. ML Inference
 
@@ -407,6 +435,81 @@ msg.timestamp = Date.now();
 
 ---
 
+## Dynamic Configuration (msg.config)
+
+All major nodes support dynamic runtime configuration via `msg.config`. This allows you to override node settings on a per-message basis without redeploying the flow.
+
+### Supported Nodes and Parameters
+
+#### Anomaly Detector
+
+```javascript
+msg.config = {
+  method: "zscore",           // Override detection method
+  zscoreThreshold: 2.5,       // Override Z-score threshold
+  zscoreWarning: 1.8,         // Override warning threshold
+  iqrMultiplier: 1.5,         // Override IQR multiplier
+  minThreshold: 10,           // Override min threshold
+  maxThreshold: 100,          // Override max threshold
+  hysteresisEnabled: false,   // Enable/disable hysteresis
+  consecutiveCount: 5         // Override consecutive count
+};
+msg.payload = 42.5;
+```
+
+#### Trend Predictor
+
+```javascript
+msg.config = {
+  mode: "rate-of-change",     // Override mode (prediction/rate-of-change/rul)
+  threshold: 80,              // Override prediction threshold
+  rocThreshold: 5,            // Override rate of change threshold
+  failureThreshold: 100,      // Override RUL failure threshold
+  warningThreshold: 80,       // Override RUL warning threshold
+  predictionSteps: 10         // Override prediction horizon
+};
+msg.payload = 75.2;
+```
+
+#### Signal Analyzer
+
+```javascript
+msg.config = {
+  mode: "vibration",          // Override mode (fft/vibration/peaks/envelope/cepstrum)
+  fftSize: 1024,              // Override FFT size
+  sampleRate: 1000,           // Override sample rate
+  vibrationThreshold: 5,      // Override vibration threshold
+  peakThreshold: 0.3          // Override peak detection threshold
+};
+msg.payload = [0.5, 0.7, 0.3, ...];
+```
+
+#### Health Index
+
+```javascript
+msg.config = {
+  healthyThreshold: 90,       // Override healthy threshold
+  warningThreshold: 70,       // Override warning threshold
+  degradedThreshold: 50,      // Override degraded threshold
+  criticalThreshold: 25,      // Override critical threshold
+  aggregationMethod: "min",   // Override aggregation (weighted/min/average)
+  sensorWeights: {            // Override sensor weights
+    "temp": 2.0,
+    "vibration": 1.5
+  }
+};
+msg.payload = { temp: 45, vibration: 2.3 };
+```
+
+### Use Cases
+
+1. **Adaptive Thresholds**: Adjust thresholds based on time of day, operating mode, or external conditions
+2. **A/B Testing**: Compare different detection parameters on the same data stream
+3. **Contextual Sensitivity**: Use tighter thresholds during critical operations
+4. **Batch Processing**: Process historical data with different configurations
+
+---
+
 ## Docker Setup
 
 ### For ML Inference Node
@@ -532,10 +635,9 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - [x] Weibull reliability analysis
 - [x] Cepstrum analysis for gearbox diagnostics
 - [x] Mahalanobis distance for multivariate anomalies
-- [ ] Dashboard UI components
+- [x] ISO 10816-3 vibration severity assessment
+- [x] Hysteresis (anti-flicker) for anomaly detection
 - [ ] Pre-trained models for common use cases
-- [ ] Real-time charting integration
-- [ ] OPC-UA integration
 
 ---
 

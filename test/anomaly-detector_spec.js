@@ -345,4 +345,279 @@ describe('anomaly-detector Node', function () {
             });
         });
     });
+
+    // ============================================
+    // Multi-Sensor JSON Input Tests
+    // ============================================
+
+    describe('Multi-Sensor JSON Input', function () {
+        
+        it('should process JSON object with multiple sensors', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "zscore", 
+                  zscoreThreshold: 3, windowSize: 10, wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                
+                let messageCount = 0;
+                n2.on("input", function (msg) {
+                    messageCount++;
+                    if (messageCount >= 5) {
+                        expect(msg).toHaveProperty('payload');
+                        expect(msg).toHaveProperty('isAnomaly');
+                        expect(msg).toHaveProperty('sensorCount');
+                        expect(msg).toHaveProperty('inputFormat', 'multi-sensor');
+                        expect(msg.payload).toHaveProperty('temperature');
+                        expect(msg.payload).toHaveProperty('pressure');
+                        expect(msg.payload.temperature).toHaveProperty('value');
+                        expect(msg.payload.temperature).toHaveProperty('isAnomaly');
+                        done();
+                    }
+                });
+                
+                // Send JSON sensor data
+                for (let i = 0; i < 10; i++) {
+                    n1.receive({ 
+                        payload: {
+                            temperature: 65 + Math.random() * 2,
+                            pressure: 4.5 + Math.random() * 0.5,
+                            vibration: 2.0 + Math.random() * 0.3
+                        }
+                    });
+                }
+            });
+        });
+
+        it('should detect anomaly in one sensor while others are normal', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "zscore", 
+                  zscoreThreshold: 2, windowSize: 10, wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n3 = helper.getNode("n3"); // Anomaly output
+                
+                n3.on("input", function (msg) {
+                    expect(msg.isAnomaly).toBe(true);
+                    expect(msg.anomalySensors).toContain('temperature');
+                    expect(msg.payload.temperature.isAnomaly).toBe(true);
+                    expect(msg.payload.pressure.isAnomaly).toBe(false);
+                    done();
+                });
+                
+                // Build up baseline with normal values
+                for (let i = 0; i < 15; i++) {
+                    n1.receive({ 
+                        payload: {
+                            temperature: 65 + Math.random() * 0.5,
+                            pressure: 4.5 + Math.random() * 0.1
+                        }
+                    });
+                }
+                
+                // Send anomalous temperature
+                n1.receive({ 
+                    payload: {
+                        temperature: 95, // Anomaly
+                        pressure: 4.5    // Normal
+                    }
+                });
+            });
+        });
+
+        it('should track separate buffers per sensor', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "zscore", 
+                  zscoreThreshold: 3, windowSize: 5, wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                
+                let msgCount = 0;
+                n2.on("input", function (msg) {
+                    msgCount++;
+                    if (msgCount === 5) {
+                        // After 5 messages, each sensor should have bufferSize of 5
+                        expect(msg.payload.sensor1.bufferSize).toBe(5);
+                        expect(msg.payload.sensor2.bufferSize).toBe(5);
+                        done();
+                    }
+                });
+                
+                for (let i = 0; i < 5; i++) {
+                    n1.receive({ 
+                        payload: {
+                            sensor1: 10 + i,
+                            sensor2: 20 + i
+                        }
+                    });
+                }
+            });
+        });
+
+        it('should output anomalySensors array with affected sensors', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "threshold", 
+                  minThreshold: 0, maxThreshold: 100, wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n3 = helper.getNode("n3");
+                
+                n3.on("input", function (msg) {
+                    expect(msg.anomalySensors).toBeInstanceOf(Array);
+                    expect(msg.anomalySensors).toContain('temp');
+                    expect(msg.anomalySensors).not.toContain('pressure');
+                    done();
+                });
+                
+                // Fill buffer
+                n1.receive({ payload: { temp: 50, pressure: 50 } });
+                n1.receive({ payload: { temp: 50, pressure: 50 } });
+                
+                // temp exceeds threshold
+                n1.receive({ 
+                    payload: {
+                        temp: 150,    // Above max threshold
+                        pressure: 50  // Normal
+                    }
+                });
+            });
+        });
+    });
+
+    // ============================================
+    // Dynamic Configuration via msg.config Tests
+    // ============================================
+
+    describe('Dynamic Configuration (msg.config)', function () {
+        
+        it('should override threshold via msg.config', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "zscore", 
+                  zscoreThreshold: 3.0, windowSize: 10, wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n3 = helper.getNode("n3"); // Anomaly output
+                
+                n3.on("input", function (msg) {
+                    // With lowered threshold (1.5), this should be an anomaly
+                    expect(msg.isAnomaly).toBe(true);
+                    done();
+                });
+                
+                // Build baseline
+                for (let i = 0; i < 10; i++) {
+                    n1.receive({ payload: 50 });
+                }
+                
+                // Send value with lowered threshold via msg.config
+                // This value would be normal with threshold 3.0, but anomaly with 1.5
+                n1.receive({ 
+                    payload: 55,  // ~2 std devs away
+                    config: { zscoreThreshold: 1.5, zscoreWarning: 1.0 }
+                });
+            });
+        });
+
+        it('should override method via msg.config', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "zscore", 
+                  windowSize: 10, minThreshold: 0, maxThreshold: 100, wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n3 = helper.getNode("n3");
+                
+                n3.on("input", function (msg) {
+                    // Should detect anomaly using threshold method
+                    expect(msg.isAnomaly).toBe(true);
+                    done();
+                });
+                
+                // Build buffer
+                for (let i = 0; i < 5; i++) {
+                    n1.receive({ payload: 50 });
+                }
+                
+                // Override to threshold method and send value above max
+                n1.receive({ 
+                    payload: 150,
+                    config: { method: "threshold", maxThreshold: 100 }
+                });
+            });
+        });
+
+        it('should use node defaults when msg.config is not provided', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "threshold", 
+                  minThreshold: 0, maxThreshold: 100, windowSize: 5, wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n3 = helper.getNode("n3");
+                
+                n3.on("input", function (msg) {
+                    expect(msg.isAnomaly).toBe(true);
+                    expect(msg.severity).toBe("critical");
+                    done();
+                });
+                
+                // Fill buffer
+                n1.receive({ payload: 50 });
+                n1.receive({ payload: 50 });
+                
+                // Should use node defaults (maxThreshold: 100)
+                n1.receive({ payload: 150 });
+            });
+        });
+
+        it('should override hysteresis settings via msg.config', function (done) {
+            const flow = [
+                { id: "n1", type: "anomaly-detector", name: "test", method: "threshold", 
+                  minThreshold: 0, maxThreshold: 100, hysteresisEnabled: true, 
+                  consecutiveCount: 3, windowSize: 5, wires: [["n2"], ["n3"]] },
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+            helper.load(anomalyDetectorNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const n3 = helper.getNode("n3");
+                
+                n3.on("input", function (msg) {
+                    // With hysteresis disabled via msg.config, should trigger immediately
+                    expect(msg.isAnomaly).toBe(true);
+                    done();
+                });
+                
+                // Fill buffer
+                n1.receive({ payload: 50 });
+                n1.receive({ payload: 50 });
+                
+                // Disable hysteresis via msg.config - should trigger on first anomaly
+                n1.receive({ 
+                    payload: 150,
+                    config: { hysteresisEnabled: false }
+                });
+            });
+        });
+    });
 });
