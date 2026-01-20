@@ -15,7 +15,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 **Predictive Maintenance Enhancement Update**
 
-- **8 Unified Nodes** - PCA and enhanced core nodes
+- **9 Unified Nodes** - PCA, Training Data Collector, and enhanced core nodes
 - **ISO 10816-3 Integration** - Vibration severity assessment with zones A-D
 - **Butterworth Filter** - 2nd order IIR filter with zero-phase filtering (filtfilt)
 - **Hysteresis (Anti-Flicker)** - Prevents rapid alarm on/off switching
@@ -41,7 +41,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ## Features
 
-- **8 Powerful Nodes** - Complete condition monitoring toolkit
+- **9 Powerful Nodes** - Complete condition monitoring toolkit
 - **10 Anomaly Detection Methods** - Z-Score, IQR, Moving Average, Threshold, Percentile, EMA, CUSUM, Isolation Forest, PCA, Mahalanobis
 - **Signal Analysis** - High-performance FFT (Radix-4), Vibration Features (RMS, Crest Factor, Kurtosis), Peak Detection, Envelope Analysis, Cepstrum, Autocorrelation (ACF), Sample Entropy, Periodicity Detection
 - **Correlation Analysis** - Pearson, Spearman, Cross-Correlation with time lag detection
@@ -81,7 +81,7 @@ docker-compose up -d
 2. Menu → Import → Examples
 3. Select one of the example flows
 
-## Available Nodes (8 Nodes)
+## Available Nodes (9 Nodes)
 
 All nodes are in the **`condition-monitoring`** category.
 
@@ -256,6 +256,43 @@ Require Python environment with ML libraries:
 | **T²** | Variations within normal operating space |
 | **SPE** | New patterns not seen during training |
 | **Combined** | Both T² and SPE (recommended) |
+
+### 9. Training Data Collector
+
+**Collects sensor data for ML model training:**
+
+| Feature | Description |
+|---------|-------------|
+| **3 Collection Modes** | Batch, Streaming (JSONL), Time-Series Windows |
+| **Multiple Export Formats** | CSV, JSONL, JSON with metadata |
+| **Auto-Compression** | .gz compression for large datasets (>10k samples) |
+| **Train/Val/Test Split** | Automatic dataset splitting with configurable ratios |
+| **Label Modes** | Manual, from message, RUL countdown, unlabeled |
+| **S3 Upload** | Direct upload to AWS S3 buckets |
+| **Data Validation** | Rejects NaN/Infinity, tracks statistics |
+
+**Use Cases:**
+- Collect labeled training data from live sensors
+- Create datasets for the training notebooks
+- Export time-series windows for LSTM/Transformer training
+- Automatic cloud backup to S3
+
+**Control Actions:**
+```javascript
+msg.action = "export";   // Export current buffer
+msg.action = "clear";    // Clear buffer
+msg.action = "stats";    // Get collection statistics
+msg.action = "pause";    // Pause collection
+msg.action = "resume";   // Resume collection
+msg.action = "resetRul"; // Reset RUL counter
+```
+
+**Example:**
+```
+[Sensors] → [Multi-Value Processor] → [Training Data Collector] → [S3/File]
+                                              ↑
+                              [Inject: action="export"]
+```
 
 ---
 

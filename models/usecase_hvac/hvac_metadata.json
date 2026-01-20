@@ -1,0 +1,43 @@
+{
+  "features": [
+    "outdoor_temp",
+    "return_temp",
+    "mixed_temp",
+    "supply_temp",
+    "airflow",
+    "fan_power",
+    "filter_dp",
+    "fan_vibration",
+    "chw_valve",
+    "delta_t_coil",
+    "delta_t_room",
+    "fan_efficiency",
+    "filter_loading",
+    "specific_fan_power",
+    "economizer_eff",
+    "cooling_eff",
+    "vib_airflow_ratio"
+  ],
+  "classes": [
+    "clogged_filter",
+    "damper_stuck",
+    "fan_belt_wear",
+    "normal",
+    "refrigerant_leak"
+  ],
+  "accuracy": 0.9794444444444445,
+  "thresholds": {
+    "filter_dp_warning": 0.8,
+    "filter_dp_critical": 1.2,
+    "fan_vibration_warning": 0.2,
+    "fan_vibration_critical": 0.4,
+    "supply_temp_deviation": 3.0
+  },
+  "fault_descriptions": {
+    "clogged_filter": "Air filter needs replacement",
+    "fan_belt_wear": "Fan belt showing wear - schedule replacement",
+    "refrigerant_leak": "Possible refrigerant leak - check system",
+    "damper_stuck": "Outdoor air damper not responding",
+    "normal": "System operating normally"
+  }
+}

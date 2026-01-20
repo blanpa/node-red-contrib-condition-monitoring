@@ -1,0 +1,55 @@
+{
+  "datasetInfo": {
+    "name": "test_dataset",
+    "created": "2026-01-18T18:37:10.996Z",
+    "sessionStart": "2026-01-18T18:37:10.893Z",
+    "totalSamples": 2,
+    "exportedSamples": 2
+  },
+  "features": {
+    "names": [
+      "temp",
+      "vib"
+    ],
+    "count": 2,
+    "statistics": {
+      "temp": {
+        "count": 2,
+        "mean": 67.5,
+        "std": 2.5,
+        "min": 65,
+        "max": 70
+      },
+      "vib": {
+        "count": 2,
+        "mean": 0.65,
+        "std": 0.15000000000000008,
+        "min": 0.5,
+        "max": 0.8
+      }
+    }
+  },
+  "labels": {
+    "mode": "manual",
+    "classes": [
+      "normal",
+      "fault"
+    ],
+    "distribution": {
+      "normal": 1,
+      "fault": 1
+    }
+  },
+  "config": {
+    "mode": "batch",
+    "exportFormat": "csv",
+    "windowSize": 10,
+    "windowOverlap": 50,
+    "compressionEnabled": false
+  },
+  "dataQuality": {
+    "totalCollected": 2,
+    "exported": 2,
+    "validationEnabled": true
+  }
+}

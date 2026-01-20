@@ -1,0 +1,41 @@
+{
+  "models": {
+    "gradient_boosting": {
+      "file": "bearing_rul_gb.joblib",
+      "rmse": 39.09171798658184,
+      "mae": 34.80547216813784,
+      "r2": 0.6337264157819095
+    },
+    "lstm": {
+      "file": "bearing_rul_lstm.keras",
+      "rmse": 37.885584911886156,
+      "mae": 32.90443361216865,
+      "r2": 0.6564068038255331,
+      "seq_length": 30
+    }
+  },
+  "features": [
+    "vib_rms",
+    "vib_peak",
+    "crest_factor",
+    "kurtosis",
+    "defect_freq_amp",
+    "temperature",
+    "debris_count",
+    "hf_energy",
+    "rpm",
+    "load_factor"
+  ],
+  "max_rul": 200,
+  "seq_length": 30,
+  "bearing_frequencies": {
+    "BPFO": 89.2987012987013,
+    "BPFI": 135.70129870129873,
+    "BSF": 58.032909156334846,
+    "FTF": 9.922077922077923
+  },
+  "thresholds": {
+    "warning_rul_days": 30,
+    "critical_rul_days": 7
+  }
+}

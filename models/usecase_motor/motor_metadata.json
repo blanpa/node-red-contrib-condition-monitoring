@@ -1,0 +1,64 @@
+{
+  "model": "Random Forest Classifier",
+  "features": [
+    "Ia_rms",
+    "Ib_rms",
+    "Ic_rms",
+    "I_avg",
+    "current_imbalance",
+    "I_fundamental",
+    "THD",
+    "sideband_2pct",
+    "sideband_3pct",
+    "sideband_4pct",
+    "sideband_5pct",
+    "vib_rms",
+    "vib_peak",
+    "vib_crest",
+    "vib_kurtosis",
+    "vib_band_0_100",
+    "vib_band_100_500",
+    "vib_band_500_1000",
+    "vib_band_1000_3000",
+    "vib_band_3000_5000",
+    "vib_dominant_freq",
+    "load_factor"
+  ],
+  "classes": [
+    "bearing_fault",
+    "broken_rotor_bar",
+    "eccentricity",
+    "misalignment",
+    "normal",
+    "stator_fault",
+    "unbalance"
+  ],
+  "accuracy": 0.9380952380952381,
+  "health_index_thresholds": {
+    "current_imbalance": {
+      "good": 0.02,
+      "warning": 0.05,
+      "critical": 0.1
+    },
+    "THD": {
+      "good": 0.05,
+      "warning": 0.1,
+      "critical": 0.15
+    },
+    "vib_rms": {
+      "good": 2.0,
+      "warning": 4.5,
+      "critical": 7.0
+    },
+    "vib_crest": {
+      "good": 3.0,
+      "warning": 4.5,
+      "critical": 6.0
+    },
+    "vib_kurtosis": {
+      "good": 3.5,
+      "warning": 5.0,
+      "critical": 7.0
+    }
+  }
+}

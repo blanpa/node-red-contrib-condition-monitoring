@@ -23,6 +23,16 @@
             autoUpdate: { value: false },
             updateCheckInterval: { value: 3600 },
             modelStage: { value: "production" },
+            // MLflow Tracking (Performance Logging)
+            mlflowTrackingEnabled: { value: false },
+            mlflowTrackingUri: { value: "" },
+            mlflowExperimentName: { value: "node-red-ml-inference" },
+            mlflowRunName: { value: "" },
+            mlflowLogInferenceTime: { value: true },
+            mlflowLogPredictions: { value: false },
+            mlflowLogInputStats: { value: false },
+            mlflowLogAnomalies: { value: false },
+            mlflowBatchSize: { value: 100 },
             inputShape: { value: "" },
             inputProperty: { value: "payload" },
             outputProperty: { value: "prediction" },
@@ -415,6 +425,30 @@
                     helpText = "Format: batch,features (e.g., 1,10). Model must be quantized TFLite (.tflite)";
                 }
                 $("#shape-help").text(helpText);
+            });
+            
+            // MLflow Tracking toggle handler
+            function updateMlflowTrackingVisibility() {
+                var enabled = $("#node-input-mlflowTrackingEnabled").prop("checked");
+                if (enabled) {
+                    $(".mlflow-tracking-option").show();
+                } else {
+                    $(".mlflow-tracking-option").hide();
+                }
+            }
+            
+            $("#node-input-mlflowTrackingEnabled").on("change", updateMlflowTrackingVisibility);
+            
+            // Initialize MLflow Tracking visibility
+            updateMlflowTrackingVisibility();
+            
+            // If MLflow Registry is selected, suggest using the same URI for tracking
+            $("#node-input-mlflowRegistryUri").on("change", function() {
+                var registryUri = $(this).val();
+                var trackingUri = $("#node-input-mlflowTrackingUri").val();
+                if (registryUri && !trackingUri) {
+                    $("#node-input-mlflowTrackingUri").attr("placeholder", registryUri + " (auto from Registry)");
+                }
             });
         },
         oneditsave: function() {
@@ -978,6 +1012,86 @@
                         <option value="deprecated">Deprecated</option>
                     </select>
                 </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 4. MLFLOW TRACKING - Performance Logging (collapsed) -->
+    <div class="ml-section">
+        <div class="ml-section-header">
+            <span><i class="fa fa-chart-line"></i> MLflow Tracking</span>
+            <i class="fa fa-chevron-down ml-collapse-icon"></i>
+        </div>
+        <div class="ml-section-content" style="display: none;">
+            <div class="ml-config-grid">
+                <!-- Enable Tracking -->
+                <div class="ml-config-item ml-config-full">
+                    <label style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="node-input-mlflowTrackingEnabled" style="width: auto;">
+                        <span><i class="fa fa-toggle-on"></i> Enable Performance Tracking</span>
+                    </label>
+                    <div class="ml-help-text">Log inference metrics to MLflow for monitoring and analysis</div>
+                </div>
+                
+                <!-- Tracking URI -->
+                <div class="ml-config-item ml-config-full mlflow-tracking-option">
+                    <label><i class="fa fa-server"></i> Tracking URI</label>
+                    <input type="text" id="node-input-mlflowTrackingUri" placeholder="http://mlflow:5000 (uses Registry URI if empty)">
+                    <div class="ml-help-text">MLflow server URL for tracking. Leave empty to use Registry URI.</div>
+                </div>
+                
+                <!-- Experiment Name -->
+                <div class="ml-config-item mlflow-tracking-option">
+                    <label><i class="fa fa-flask"></i> Experiment Name</label>
+                    <input type="text" id="node-input-mlflowExperimentName" placeholder="node-red-ml-inference">
+                </div>
+                
+                <!-- Run Name -->
+                <div class="ml-config-item mlflow-tracking-option">
+                    <label><i class="fa fa-play"></i> Run Name</label>
+                    <input type="text" id="node-input-mlflowRunName" placeholder="(uses node name)">
+                </div>
+                
+                <!-- Metrics to Log -->
+                <div class="ml-config-item ml-config-full mlflow-tracking-option">
+                    <label><i class="fa fa-list-check"></i> Metrics to Log</label>
+                    <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px;">
+                        <label style="display: flex; align-items: center; gap: 4px; font-weight: normal;">
+                            <input type="checkbox" id="node-input-mlflowLogInferenceTime" style="width: auto;" checked>
+                            <span>Inference Time</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 4px; font-weight: normal;">
+                            <input type="checkbox" id="node-input-mlflowLogPredictions" style="width: auto;">
+                            <span>Predictions</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 4px; font-weight: normal;">
+                            <input type="checkbox" id="node-input-mlflowLogInputStats" style="width: auto;">
+                            <span>Input Statistics</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 4px; font-weight: normal;">
+                            <input type="checkbox" id="node-input-mlflowLogAnomalies" style="width: auto;">
+                            <span>Anomaly Detection</span>
+                        </label>
+                    </div>
+                </div>
+                
+                <!-- Batch Size -->
+                <div class="ml-config-item mlflow-tracking-option">
+                    <label><i class="fa fa-layer-group"></i> Batch Size</label>
+                    <input type="number" id="node-input-mlflowBatchSize" value="100" min="1" max="1000">
+                    <div class="ml-help-text">Metrics are batched before sending to MLflow</div>
+                </div>
+            </div>
+            
+            <!-- Info Box -->
+            <div class="ml-help-text mlflow-tracking-option" style="margin-top: 12px; padding: 8px; background: #e3f2fd; border-radius: 4px;">
+                <i class="fa fa-info-circle"></i> <strong>Tracked Metrics:</strong><br>
+                <ul style="margin: 4px 0 0 16px; padding: 0;">
+                    <li><code>inference_time_ms</code> - Time per inference in milliseconds</li>
+                    <li><code>prediction_*</code> - Prediction value/mean/max/min</li>
+                    <li><code>input_*</code> - Input statistics (mean, std, min, max)</li>
+                    <li><code>is_anomaly</code>, <code>anomaly_score</code> - Anomaly detection</li>
+                </ul>
             </div>
         </div>
     </div>

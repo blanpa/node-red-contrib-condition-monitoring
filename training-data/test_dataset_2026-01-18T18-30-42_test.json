@@ -1,0 +1,31 @@
+{
+  "datasetInfo": {
+    "name": "test_dataset",
+    "created": "2026-01-18T18:30:42.555Z",
+    "samples": 1,
+    "features": [
+      "temp"
+    ],
+    "classes": [
+      "normal"
+    ],
+    "featureDimension": 1,
+    "statistics": {
+      "temp": {
+        "count": 1,
+        "mean": 65,
+        "std": 0,
+        "min": 65,
+        "max": 65
+      }
+    }
+  },
+  "data": [
+    {
+      "x": [
+        65
+      ],
+      "y": "normal"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "bearing_damage": 0,
+  "cavitation": 1,
+  "impeller_wear": 2,
+  "normal": 3,
+  "seal_leakage": 4
+}

@@ -1,0 +1,12 @@
+[workspace]
+authors = ["blanpa <pascal.blansche@octotronic.com>"]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+name = "mojo"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+max = ">=26.1.0.dev2026011805,<27"
+jupyterlab = ">=4.5.2,<5"

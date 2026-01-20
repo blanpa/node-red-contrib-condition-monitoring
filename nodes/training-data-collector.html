@@ -1,0 +1,732 @@
+<script type="text/javascript">
+    RED.nodes.registerType('training-data-collector', {
+        category: 'condition-monitoring',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            // Dataset settings
+            datasetName: { value: "dataset", required: true },
+            outputPath: { value: "" },
+            mode: { value: "batch" },
+            autoSave: { value: true },
+            // Feature configuration
+            featureSource: { value: "payload" },
+            featureFields: { value: "" },
+            includeTimestamp: { value: true },
+            timestampFormat: { value: "iso" },
+            // Label configuration
+            labelMode: { value: "manual" },
+            labelField: { value: "label" },
+            severityField: { value: "severity" },
+            rulStartValue: { value: 100 },
+            rulUnit: { value: "samples" },
+            defaultLabel: { value: "normal" },
+            // Buffer settings
+            bufferSize: { value: 1000 },
+            windowSize: { value: 100 },
+            windowOverlap: { value: 50 },
+            flushOnDeploy: { value: true },
+            // Export settings
+            exportFormat: { value: "csv" },
+            compressionEnabled: { value: true },
+            compressionThreshold: { value: 10000 },
+            splitTrain: { value: 80 },
+            splitVal: { value: 10 },
+            splitTest: { value: 10 },
+            shuffleOnExport: { value: true },
+            includeMetadata: { value: true },
+            // S3 settings
+            s3Enabled: { value: false },
+            s3Bucket: { value: "" },
+            s3Prefix: { value: "training-data/" },
+            s3Region: { value: "eu-central-1" },
+            s3AccessKeyId: { value: "" },
+            s3SecretAccessKey: { value: "" },
+            // Data quality
+            validateData: { value: true },
+            removeOutliers: { value: false },
+            outlierThreshold: { value: 5.0 }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "icon.png",
+        label: function() {
+            return this.name || this.datasetName || "Training Data";
+        },
+        paletteLabel: "Training Data",
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        oneditprepare: function() {
+            var node = this;
+            
+            // Collapsible sections
+            $(".cm-section-header").on("click", function() {
+                var $content = $(this).next(".cm-section-content");
+                var $icon = $(this).find(".cm-collapse-icon");
+                $content.slideToggle(200);
+                $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
+            
+            // Show/hide feature fields based on source
+            $("#node-input-featureSource").on("change", function() {
+                if ($(this).val() === "custom") {
+                    $("#feature-fields-row").show();
+                } else {
+                    $("#feature-fields-row").hide();
+                }
+            }).trigger("change");
+            
+            // Show/hide RUL settings based on label mode
+            $("#node-input-labelMode").on("change", function() {
+                var mode = $(this).val();
+                if (mode === "rul") {
+                    $("#rul-settings-row").show();
+                    $("#default-label-row").hide();
+                } else if (mode === "unlabeled") {
+                    $("#rul-settings-row").hide();
+                    $("#default-label-row").hide();
+                } else {
+                    $("#rul-settings-row").hide();
+                    $("#default-label-row").show();
+                }
+            }).trigger("change");
+            
+            // Show/hide window settings based on mode
+            $("#node-input-mode").on("change", function() {
+                if ($(this).val() === "timeseries") {
+                    $("#window-settings-row").show();
+                } else {
+                    $("#window-settings-row").hide();
+                }
+            }).trigger("change");
+            
+            // Show/hide S3 credentials based on enabled
+            $("#node-input-s3Enabled").on("change", function() {
+                if ($(this).is(":checked")) {
+                    $(".s3-settings-row").show();
+                } else {
+                    $(".s3-settings-row").hide();
+                }
+            }).trigger("change");
+            
+            // Check S3 availability
+            $.getJSON("training-data-collector/s3-status", function(data) {
+                if (data.available) {
+                    $("#s3-status").html('<span class="tdc-badge tdc-badge-ok"><i class="fa fa-check-circle"></i> ' + data.message + '</span>');
+                } else {
+                    $("#s3-status").html('<span class="tdc-badge tdc-badge-warn"><i class="fa fa-exclamation-triangle"></i> ' + data.message + '</span>');
+                }
+            });
+            
+            // Split ratio validation
+            function validateSplitRatio() {
+                var train = parseInt($("#node-input-splitTrain").val()) || 0;
+                var val = parseInt($("#node-input-splitVal").val()) || 0;
+                var test = parseInt($("#node-input-splitTest").val()) || 0;
+                var total = train + val + test;
+                
+                if (total !== 100) {
+                    $("#split-warning").html('<span class="tdc-badge tdc-badge-warn">Sum: ' + total + '% (should be 100%)</span>');
+                } else {
+                    $("#split-warning").html('<span class="tdc-badge tdc-badge-ok"><i class="fa fa-check"></i> Valid</span>');
+                }
+            }
+            
+            $("#node-input-splitTrain, #node-input-splitVal, #node-input-splitTest").on("change keyup", validateSplitRatio);
+            validateSplitRatio();
+            
+            // Load existing datasets
+            $.getJSON("training-data-collector/datasets", function(data) {
+                if (data.datasets && data.datasets.length > 0) {
+                    var listHtml = '<div class="tdc-dataset-list">';
+                    data.datasets.slice(0, 5).forEach(function(d) {
+                        var size = (d.size / 1024).toFixed(1) + " KB";
+                        if (d.size > 1024 * 1024) {
+                            size = (d.size / 1024 / 1024).toFixed(1) + " MB";
+                        }
+                        var icon = d.compressed ? 'file-archive-o' : 'file-text-o';
+                        listHtml += '<div class="tdc-dataset-item">';
+                        listHtml += '<i class="fa fa-' + icon + '"></i>';
+                        listHtml += '<span class="tdc-dataset-name">' + d.name + '</span>';
+                        listHtml += '<span class="tdc-dataset-size">' + size + '</span>';
+                        listHtml += '</div>';
+                    });
+                    if (data.datasets.length > 5) {
+                        listHtml += '<div class="tdc-dataset-more">... and ' + (data.datasets.length - 5) + ' more</div>';
+                    }
+                    listHtml += '</div>';
+                    $("#existing-datasets").html(listHtml);
+                    $("#datasets-path").text(data.path);
+                } else {
+                    $("#existing-datasets").html('<div class="tdc-empty-state"><i class="fa fa-folder-open-o"></i><p>No datasets yet</p></div>');
+                    $("#datasets-path").text(data.path || 'Not configured');
+                }
+            });
+        },
+        oneditsave: function() {
+            // Convert split percentages to ratio object for node config
+            this.splitRatio = {
+                train: parseInt($("#node-input-splitTrain").val()) / 100 || 0.8,
+                val: parseInt($("#node-input-splitVal").val()) / 100 || 0.1,
+                test: parseInt($("#node-input-splitTest").val()) / 100 || 0.1
+            };
+        }
+    });
+</script>
+
+<style>
+    /* Consistent with other condition-monitoring nodes */
+    .tdc-section {
+        background: #fafafa;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        overflow: hidden;
+    }
+    
+    .cm-section-header {
+        background: linear-gradient(135deg, #9482f1 0%, #7d6bd3 100%);
+        color: #fff;
+        padding: 10px 14px;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        user-select: none;
+    }
+    
+    .cm-section-header:hover {
+        background: linear-gradient(135deg, #a896f5 0%, #9482f1 100%);
+    }
+    
+    .cm-section-header i:first-child {
+        margin-right: 8px;
+    }
+    
+    .cm-section-content {
+        padding: 14px;
+    }
+    
+    .tdc-config-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }
+    
+    .tdc-config-item {
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .tdc-config-item.full-width {
+        grid-column: 1 / -1;
+    }
+    
+    .tdc-config-item label {
+        font-size: 11px;
+        color: #666;
+        margin-bottom: 6px;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    
+    .tdc-config-item input,
+    .tdc-config-item select {
+        padding: 8px 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 13px;
+    }
+    
+    .tdc-config-item input:focus,
+    .tdc-config-item select:focus {
+        border-color: #9482f1;
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(148, 130, 241, 0.2);
+    }
+    
+    .tdc-config-item input[type="checkbox"] {
+        width: auto;
+        margin-right: 8px;
+    }
+    
+    .tdc-checkbox-row {
+        display: flex;
+        align-items: center;
+        padding: 8px 0;
+    }
+    
+    .tdc-checkbox-row label {
+        margin-bottom: 0;
+        font-size: 13px;
+        color: #333;
+    }
+    
+    .tdc-help-text {
+        font-size: 11px;
+        color: #888;
+        margin-top: 6px;
+        line-height: 1.4;
+    }
+    
+    .tdc-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 500;
+    }
+    
+    .tdc-badge-ok {
+        background: #e8f5e9;
+        color: #2e7d32;
+    }
+    
+    .tdc-badge-warn {
+        background: #fff3e0;
+        color: #e65100;
+    }
+    
+    .tdc-dataset-list {
+        background: #fff;
+        border: 1px solid #e0e0e0;
+        border-radius: 4px;
+        max-height: 150px;
+        overflow-y: auto;
+    }
+    
+    .tdc-dataset-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-bottom: 1px solid #f0f0f0;
+        font-size: 12px;
+    }
+    
+    .tdc-dataset-item:last-child {
+        border-bottom: none;
+    }
+    
+    .tdc-dataset-item i {
+        color: #9482f1;
+    }
+    
+    .tdc-dataset-name {
+        flex: 1;
+        font-weight: 500;
+        color: #333;
+    }
+    
+    .tdc-dataset-size {
+        color: #888;
+        font-size: 11px;
+    }
+    
+    .tdc-dataset-more {
+        padding: 8px 12px;
+        font-size: 11px;
+        color: #888;
+        text-align: center;
+        background: #f5f5f5;
+    }
+    
+    .tdc-empty-state {
+        text-align: center;
+        padding: 20px;
+        color: #888;
+    }
+    
+    .tdc-empty-state i {
+        font-size: 32px;
+        margin-bottom: 8px;
+        opacity: 0.5;
+    }
+    
+    .tdc-empty-state p {
+        margin: 0;
+        font-size: 12px;
+    }
+    
+    .tdc-split-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+    
+    .tdc-split-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+    
+    .tdc-split-item label {
+        font-size: 12px;
+        color: #666;
+        min-width: 35px;
+    }
+    
+    .tdc-split-item input {
+        width: 60px;
+        padding: 6px 8px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 13px;
+        text-align: center;
+    }
+    
+    .tdc-path-display {
+        font-family: monospace;
+        font-size: 11px;
+        color: #666;
+        background: #f5f5f5;
+        padding: 6px 10px;
+        border-radius: 4px;
+        word-break: break-all;
+    }
+</style>
+
+<script type="text/html" data-template-name="training-data-collector">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    
+    <!-- Dataset Section -->
+    <div class="tdc-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-database"></i> Dataset Configuration</span>
+            <i class="fa fa-chevron-up cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="tdc-config-grid">
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-file-text-o"></i> Dataset Name</label>
+                    <input type="text" id="node-input-datasetName" placeholder="dataset">
+                </div>
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-folder-o"></i> Output Path</label>
+                    <input type="text" id="node-input-outputPath" placeholder="(relative subdirectory)">
+                </div>
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-cogs"></i> Collection Mode</label>
+                    <select id="node-input-mode">
+                        <option value="batch">Batch (collect, then export)</option>
+                        <option value="streaming">Streaming (append to file)</option>
+                        <option value="timeseries">Time-Series (sliding windows)</option>
+                    </select>
+                </div>
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-file-code-o"></i> Export Format</label>
+                    <select id="node-input-exportFormat">
+                        <option value="csv">CSV (pandas compatible)</option>
+                        <option value="jsonl">JSONL/NDJSON (streaming)</option>
+                        <option value="json">JSON (with metadata)</option>
+                    </select>
+                </div>
+            </div>
+            <div class="tdc-checkbox-row">
+                <input type="checkbox" id="node-input-autoSave">
+                <label for="node-input-autoSave">Auto-save when buffer is full</label>
+            </div>
+            
+            <div style="margin-top: 12px;">
+                <label style="font-size: 11px; color: #666; font-weight: 500;"><i class="fa fa-hdd-o"></i> Existing Datasets</label>
+                <div id="existing-datasets" style="margin-top: 6px;"></div>
+                <div class="tdc-help-text">Storage: <span id="datasets-path" class="tdc-path-display"></span></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Features Section -->
+    <div class="tdc-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-list"></i> Feature Configuration</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content" style="display: none;">
+            <div class="tdc-config-grid">
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-sign-in"></i> Feature Source</label>
+                    <select id="node-input-featureSource">
+                        <option value="payload">msg.payload (auto-detect)</option>
+                        <option value="payload.features">msg.payload.features</option>
+                        <option value="custom">Custom fields</option>
+                    </select>
+                </div>
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-clock-o"></i> Timestamp Format</label>
+                    <select id="node-input-timestampFormat">
+                        <option value="iso">ISO 8601</option>
+                        <option value="unix">Unix (seconds)</option>
+                        <option value="unix_ms">Unix (milliseconds)</option>
+                    </select>
+                </div>
+                <div class="tdc-config-item full-width" id="feature-fields-row">
+                    <label><i class="fa fa-list-ol"></i> Feature Fields</label>
+                    <input type="text" id="node-input-featureFields" placeholder="temperature, vibration_rms, pressure">
+                    <div class="tdc-help-text">Comma-separated field paths (e.g., payload.temp, sensor.value)</div>
+                </div>
+            </div>
+            <div class="tdc-checkbox-row">
+                <input type="checkbox" id="node-input-includeTimestamp">
+                <label for="node-input-includeTimestamp">Include timestamp in export</label>
+            </div>
+            <div class="tdc-checkbox-row">
+                <input type="checkbox" id="node-input-validateData">
+                <label for="node-input-validateData">Validate data (reject NaN/Infinity)</label>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Labels Section -->
+    <div class="tdc-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-tags"></i> Label Configuration</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content" style="display: none;">
+            <div class="tdc-config-grid">
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-tag"></i> Label Mode</label>
+                    <select id="node-input-labelMode">
+                        <option value="manual">Manual (default/msg.label)</option>
+                        <option value="fromMessage">From Message (custom field)</option>
+                        <option value="rul">RUL Countdown</option>
+                        <option value="unlabeled">Unlabeled</option>
+                    </select>
+                </div>
+                <div class="tdc-config-item" id="default-label-row">
+                    <label><i class="fa fa-bookmark-o"></i> Default Label</label>
+                    <input type="text" id="node-input-defaultLabel" placeholder="normal">
+                </div>
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-key"></i> Label Field</label>
+                    <input type="text" id="node-input-labelField" placeholder="label">
+                </div>
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-signal"></i> Severity Field</label>
+                    <input type="text" id="node-input-severityField" placeholder="severity">
+                </div>
+            </div>
+            
+            <div id="rul-settings-row" style="margin-top: 12px; display: none;">
+                <div class="tdc-config-grid">
+                    <div class="tdc-config-item">
+                        <label><i class="fa fa-hourglass-start"></i> RUL Start Value</label>
+                        <input type="number" id="node-input-rulStartValue" placeholder="100">
+                    </div>
+                    <div class="tdc-config-item">
+                        <label><i class="fa fa-calendar"></i> RUL Unit</label>
+                        <select id="node-input-rulUnit">
+                            <option value="samples">samples</option>
+                            <option value="seconds">seconds</option>
+                            <option value="hours">hours</option>
+                            <option value="days">days</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="tdc-help-text">RUL counts down from start value. Use msg.action="resetRul" to restart.</div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Buffer Section -->
+    <div class="tdc-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-database"></i> Buffer & Windows</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content" style="display: none;">
+            <div class="tdc-config-grid">
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-th-large"></i> Buffer Size</label>
+                    <input type="number" id="node-input-bufferSize" placeholder="1000">
+                </div>
+                <div class="tdc-config-item" id="window-settings-row" style="display: none;">
+                    <label><i class="fa fa-arrows-h"></i> Window Size</label>
+                    <input type="number" id="node-input-windowSize" placeholder="100">
+                </div>
+            </div>
+            <div id="window-overlap-row" class="tdc-config-item" style="margin-top: 12px; display: none;">
+                <label><i class="fa fa-clone"></i> Window Overlap (%)</label>
+                <input type="number" id="node-input-windowOverlap" placeholder="50" style="width: 100px;">
+                <div class="tdc-help-text">For LSTM/Transformer training: creates overlapping sequences.</div>
+            </div>
+            <div class="tdc-checkbox-row">
+                <input type="checkbox" id="node-input-flushOnDeploy">
+                <label for="node-input-flushOnDeploy">Save buffer on deploy/restart</label>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Export Section -->
+    <div class="tdc-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-download"></i> Export Settings</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content" style="display: none;">
+            <div class="tdc-checkbox-row">
+                <input type="checkbox" id="node-input-compressionEnabled">
+                <label for="node-input-compressionEnabled">Compress large files (.gz)</label>
+            </div>
+            <div class="tdc-config-item" style="margin-top: 8px;">
+                <label><i class="fa fa-compress"></i> Compression Threshold</label>
+                <input type="number" id="node-input-compressionThreshold" placeholder="10000" style="width: 120px;">
+                <div class="tdc-help-text">Number of samples before enabling compression</div>
+            </div>
+            
+            <div style="margin-top: 16px;">
+                <label style="font-size: 11px; color: #666; font-weight: 500;"><i class="fa fa-pie-chart"></i> Train/Val/Test Split</label>
+                <div class="tdc-split-row" style="margin-top: 8px;">
+                    <div class="tdc-split-item">
+                        <label>Train:</label>
+                        <input type="number" id="node-input-splitTrain" min="0" max="100">
+                        <span>%</span>
+                    </div>
+                    <div class="tdc-split-item">
+                        <label>Val:</label>
+                        <input type="number" id="node-input-splitVal" min="0" max="100">
+                        <span>%</span>
+                    </div>
+                    <div class="tdc-split-item">
+                        <label>Test:</label>
+                        <input type="number" id="node-input-splitTest" min="0" max="100">
+                        <span>%</span>
+                    </div>
+                    <span id="split-warning"></span>
+                </div>
+            </div>
+            
+            <div class="tdc-checkbox-row">
+                <input type="checkbox" id="node-input-shuffleOnExport">
+                <label for="node-input-shuffleOnExport">Shuffle data before split</label>
+            </div>
+            <div class="tdc-checkbox-row">
+                <input type="checkbox" id="node-input-includeMetadata">
+                <label for="node-input-includeMetadata">Generate metadata file</label>
+            </div>
+        </div>
+    </div>
+    
+    <!-- S3 Section -->
+    <div class="tdc-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cloud-upload"></i> S3 Upload</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content" style="display: none;">
+            <div id="s3-status" style="margin-bottom: 12px;"></div>
+            
+            <div class="tdc-checkbox-row">
+                <input type="checkbox" id="node-input-s3Enabled">
+                <label for="node-input-s3Enabled"><strong>Enable S3 Upload</strong></label>
+            </div>
+            
+            <div class="s3-settings-row" style="display: none;">
+                <div class="tdc-config-grid" style="margin-top: 12px;">
+                    <div class="tdc-config-item">
+                        <label><i class="fa fa-cloud"></i> S3 Bucket</label>
+                        <input type="text" id="node-input-s3Bucket" placeholder="my-training-bucket">
+                    </div>
+                    <div class="tdc-config-item">
+                        <label><i class="fa fa-folder-o"></i> S3 Prefix</label>
+                        <input type="text" id="node-input-s3Prefix" placeholder="training-data/">
+                    </div>
+                    <div class="tdc-config-item">
+                        <label><i class="fa fa-globe"></i> AWS Region</label>
+                        <select id="node-input-s3Region">
+                            <option value="us-east-1">US East (N. Virginia)</option>
+                            <option value="us-west-2">US West (Oregon)</option>
+                            <option value="eu-central-1">EU (Frankfurt)</option>
+                            <option value="eu-west-1">EU (Ireland)</option>
+                            <option value="ap-northeast-1">Asia Pacific (Tokyo)</option>
+                            <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="tdc-config-grid" style="margin-top: 12px;">
+                    <div class="tdc-config-item">
+                        <label><i class="fa fa-key"></i> Access Key ID</label>
+                        <input type="text" id="node-input-s3AccessKeyId" placeholder="(or use env var)">
+                    </div>
+                    <div class="tdc-config-item">
+                        <label><i class="fa fa-lock"></i> Secret Access Key</label>
+                        <input type="password" id="node-input-s3SecretAccessKey" placeholder="(or use env var)">
+                    </div>
+                </div>
+                <div class="tdc-help-text" style="margin-top: 8px;">
+                    <strong>Tip:</strong> For security, use environment variables: <code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>
+                </div>
+            </div>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="training-data-collector">
+    <p>Collects sensor data in formats suitable for Machine Learning training.</p>
+    
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">object | array | number</span></dt>
+        <dd>Sensor data to collect. Can be object with named features, array of values, or single number.</dd>
+        <dt class="optional">label <span class="property-type">string</span></dt>
+        <dd>Classification label for supervised learning.</dd>
+        <dt class="optional">severity <span class="property-type">number</span></dt>
+        <dd>Severity score (0-1) for anomaly/fault data.</dd>
+        <dt class="optional">action <span class="property-type">string</span></dt>
+        <dd>Control action: "export", "clear", "stats", "pause", "resume", "resetRul".</dd>
+    </dl>
+    
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">object</span></dt>
+        <dd>Export result or statistics when triggered via action.</dd>
+    </dl>
+    
+    <h3>Details</h3>
+    <p><b>Collection Modes:</b></p>
+    <ul>
+        <li><b>Batch:</b> Collects samples in memory, exports on demand or when buffer is full.</li>
+        <li><b>Streaming:</b> Appends each sample directly to a JSONL file.</li>
+        <li><b>Time-Series:</b> Creates sliding windows for sequence models (LSTM, Transformer).</li>
+    </ul>
+    
+    <p><b>Label Modes:</b></p>
+    <ul>
+        <li><b>Manual:</b> Uses default label or msg.label if provided.</li>
+        <li><b>From Message:</b> Extracts label from configured field path.</li>
+        <li><b>RUL:</b> Counts down from start value (Remaining Useful Life).</li>
+        <li><b>Unlabeled:</b> No labels (for unsupervised learning).</li>
+    </ul>
+    
+    <p><b>Export Formats:</b></p>
+    <ul>
+        <li><b>CSV:</b> Compatible with pandas, Excel.</li>
+        <li><b>JSONL:</b> Line-delimited JSON for HuggingFace datasets.</li>
+        <li><b>JSON:</b> Structured format with metadata and statistics.</li>
+    </ul>
+    
+    <p><b>S3 Upload:</b> Install <code>@aws-sdk/client-s3</code> for S3 support.</p>
+    
+    <h3>Control Actions</h3>
+    <pre>msg.action = "export";   // Export current buffer
+msg.action = "clear";    // Clear buffer
+msg.action = "stats";    // Get statistics
+msg.action = "pause";    // Pause collection
+msg.action = "resume";   // Resume collection
+msg.action = "resetRul"; // Reset RUL counter</pre>
+    
+    <h3>Example Flow</h3>
+    <pre>[Sensor] → [Multi-Value Processor] → [Training Data Collector]
+                                              ↑
+                              [Inject: action="export"]</pre>
+</script>

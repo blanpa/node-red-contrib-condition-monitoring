@@ -6,9 +6,18 @@ yarn.lock
 # Python virtual environment
 .venv/
 venv/
+notebooks_venv/
 __pycache__/
 *.pyc
 *.pyo
+
+# Jupyter notebooks output
+notebooks/*_executed.ipynb
+.ipynb_checkpoints/
+
+# Generated data (users can regenerate)
+data/simulated/
+data/usecase_*/
 
 # Node-RED data directory (Docker volumes) - except flows.json
 node-red-data/*

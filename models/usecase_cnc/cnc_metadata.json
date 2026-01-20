@@ -1,0 +1,58 @@
+{
+  "features": [
+    "force_x",
+    "force_y",
+    "force_z",
+    "force_resultant",
+    "spindle_current",
+    "vibration_rms",
+    "ae_rms",
+    "temperature",
+    "power_kw",
+    "spindle_speed",
+    "feed_rate",
+    "depth_of_cut",
+    "force_xy_ratio",
+    "force_z_ratio",
+    "specific_energy",
+    "power_force_ratio",
+    "vib_force_ratio",
+    "ae_vib_ratio"
+  ],
+  "wear_states": [
+    "critical",
+    "good",
+    "new",
+    "worn"
+  ],
+  "models": {
+    "wear_prediction": {
+      "file": "cnc_wear_rf.joblib",
+      "rmse": 0.006051593656154893,
+      "mae": 0.004763985106015248,
+      "output": "wear_vb in mm"
+    },
+    "rtl_prediction": {
+      "file": "cnc_rtl_rf.joblib",
+      "rmse": 1.6750871252845991,
+      "mae": 0.9525918833435615,
+      "output": "remaining_life in minutes",
+      "max_rtl": 60
+    },
+    "state_classification": {
+      "file": "cnc_state_gb.joblib",
+      "classes": [
+        "critical",
+        "good",
+        "new",
+        "worn"
+      ]
+    }
+  },
+  "thresholds": {
+    "wear_warning": 0.2,
+    "wear_limit": 0.3,
+    "rtl_warning": 10,
+    "rtl_critical": 5
+  }
+}

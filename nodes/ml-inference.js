@@ -205,6 +205,303 @@ module.exports = function(RED) {
         }
     }
     
+    // ========================================
+    // MLflow Tracking API - Performance Logging
+    // ========================================
+    
+    /**
+     * MLflow Tracking Manager - handles experiment/run lifecycle and metric logging
+     */
+    class MLflowTracker {
+        constructor(trackingUri, experimentName, token) {
+            this.trackingUri = trackingUri ? trackingUri.replace(/\/$/, '') : '';
+            this.experimentName = experimentName || 'node-red-ml-inference';
+            this.token = token || '';
+            this.experimentId = null;
+            this.runId = null;
+            this.metricsBuffer = [];
+            this.bufferSize = 100; // Batch size for metric logging
+            this.flushInterval = null;
+            this.enabled = !!this.trackingUri;
+            this.stepCounter = 0;
+        }
+        
+        /**
+         * Make HTTP request to MLflow API
+         */
+        async _request(method, endpoint, data = null) {
+            if (!this.enabled) return null;
+            
+            return new Promise((resolve, reject) => {
+                const url = `${this.trackingUri}${endpoint}`;
+                const isHttps = url.startsWith('https');
+                const protocol = isHttps ? https : http;
+                
+                const urlObj = new URL(url);
+                const options = {
+                    hostname: urlObj.hostname,
+                    port: urlObj.port || (isHttps ? 443 : 80),
+                    path: urlObj.pathname + urlObj.search,
+                    method: method,
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                };
+                
+                if (this.token) {
+                    options.headers['Authorization'] = 'Bearer ' + this.token;
+                }
+                
+                const req = protocol.request(options, (res) => {
+                    let responseData = '';
+                    res.on('data', chunk => responseData += chunk);
+                    res.on('end', () => {
+                        if (res.statusCode >= 200 && res.statusCode < 300) {
+                            try {
+                                resolve(responseData ? JSON.parse(responseData) : {});
+                            } catch (e) {
+                                resolve({});
+                            }
+                        } else {
+                            reject(new Error(`MLflow API error: ${res.statusCode} - ${responseData}`));
+                        }
+                    });
+                });
+                
+                req.on('error', reject);
+                
+                if (data) {
+                    req.write(JSON.stringify(data));
+                }
+                req.end();
+            });
+        }
+        
+        /**
+         * Get or create experiment by name
+         */
+        async getOrCreateExperiment() {
+            if (!this.enabled) return null;
+            
+            try {
+                // Try to get existing experiment
+                const searchResult = await this._request('GET', 
+                    `/api/2.0/mlflow/experiments/get-by-name?experiment_name=${encodeURIComponent(this.experimentName)}`);
+                
+                if (searchResult && searchResult.experiment) {
+                    this.experimentId = searchResult.experiment.experiment_id;
+                    return this.experimentId;
+                }
+            } catch (e) {
+                // Experiment doesn't exist, create it
+            }
+            
+            try {
+                const createResult = await this._request('POST', '/api/2.0/mlflow/experiments/create', {
+                    name: this.experimentName,
+                    tags: [
+                        { key: 'source', value: 'node-red-ml-inference' },
+                        { key: 'created_at', value: new Date().toISOString() }
+                    ]
+                });
+                
+                if (createResult && createResult.experiment_id) {
+                    this.experimentId = createResult.experiment_id;
+                    return this.experimentId;
+                }
+            } catch (e) {
+                RED.log.warn('[MLflowTracker] Failed to create experiment: ' + e.message);
+            }
+            
+            return null;
+        }
+        
+        /**
+         * Start a new MLflow run for this node instance
+         */
+        async startRun(runName, tags = {}) {
+            if (!this.enabled) return null;
+            
+            if (!this.experimentId) {
+                await this.getOrCreateExperiment();
+            }
+            
+            if (!this.experimentId) return null;
+            
+            try {
+                const runTags = [
+                    { key: 'mlflow.runName', value: runName },
+                    { key: 'node_red.node_type', value: 'ml-inference' },
+                    { key: 'node_red.start_time', value: new Date().toISOString() }
+                ];
+                
+                // Add custom tags
+                for (const [key, value] of Object.entries(tags)) {
+                    runTags.push({ key: `node_red.${key}`, value: String(value) });
+                }
+                
+                const result = await this._request('POST', '/api/2.0/mlflow/runs/create', {
+                    experiment_id: this.experimentId,
+                    start_time: Date.now(),
+                    tags: runTags
+                });
+                
+                if (result && result.run) {
+                    this.runId = result.run.info.run_id;
+                    this.stepCounter = 0;
+                    
+                    // Start periodic flush
+                    this._startFlushInterval();
+                    
+                    return this.runId;
+                }
+            } catch (e) {
+                RED.log.warn('[MLflowTracker] Failed to start run: ' + e.message);
+            }
+            
+            return null;
+        }
+        
+        /**
+         * Log a single metric (buffered)
+         */
+        logMetric(key, value, step = null) {
+            if (!this.enabled || !this.runId) return;
+            
+            const metric = {
+                key: key,
+                value: typeof value === 'number' ? value : parseFloat(value) || 0,
+                timestamp: Date.now(),
+                step: step !== null ? step : this.stepCounter++
+            };
+            
+            this.metricsBuffer.push(metric);
+            
+            // Flush if buffer is full
+            if (this.metricsBuffer.length >= this.bufferSize) {
+                this.flush();
+            }
+        }
+        
+        /**
+         * Log multiple metrics at once (buffered)
+         */
+        logMetrics(metrics, step = null) {
+            if (!this.enabled || !this.runId) return;
+            
+            const currentStep = step !== null ? step : this.stepCounter++;
+            
+            for (const [key, value] of Object.entries(metrics)) {
+                this.metricsBuffer.push({
+                    key: key,
+                    value: typeof value === 'number' ? value : parseFloat(value) || 0,
+                    timestamp: Date.now(),
+                    step: currentStep
+                });
+            }
+            
+            if (this.metricsBuffer.length >= this.bufferSize) {
+                this.flush();
+            }
+        }
+        
+        /**
+         * Log parameters (not buffered - immediate)
+         */
+        async logParams(params) {
+            if (!this.enabled || !this.runId) return;
+            
+            const paramList = [];
+            for (const [key, value] of Object.entries(params)) {
+                paramList.push({ key: key, value: String(value).substring(0, 500) }); // MLflow limit
+            }
+            
+            try {
+                await this._request('POST', '/api/2.0/mlflow/runs/log-batch', {
+                    run_id: this.runId,
+                    params: paramList
+                });
+            } catch (e) {
+                RED.log.debug('[MLflowTracker] Failed to log params: ' + e.message);
+            }
+        }
+        
+        /**
+         * Flush metrics buffer to MLflow
+         */
+        async flush() {
+            if (!this.enabled || !this.runId || this.metricsBuffer.length === 0) return;
+            
+            const metricsToSend = [...this.metricsBuffer];
+            this.metricsBuffer = [];
+            
+            try {
+                await this._request('POST', '/api/2.0/mlflow/runs/log-batch', {
+                    run_id: this.runId,
+                    metrics: metricsToSend
+                });
+            } catch (e) {
+                RED.log.debug('[MLflowTracker] Failed to flush metrics: ' + e.message);
+                // Re-add metrics to buffer on failure (up to limit)
+                this.metricsBuffer = [...metricsToSend.slice(-50), ...this.metricsBuffer].slice(0, this.bufferSize * 2);
+            }
+        }
+        
+        /**
+         * Start periodic flush interval
+         */
+        _startFlushInterval() {
+            if (this.flushInterval) return;
+            
+            // Flush every 10 seconds
+            this.flushInterval = setInterval(() => {
+                this.flush();
+            }, 10000);
+        }
+        
+        /**
+         * End the current run
+         */
+        async endRun(status = 'FINISHED') {
+            if (!this.enabled || !this.runId) return;
+            
+            // Final flush
+            await this.flush();
+            
+            // Stop flush interval
+            if (this.flushInterval) {
+                clearInterval(this.flushInterval);
+                this.flushInterval = null;
+            }
+            
+            try {
+                await this._request('POST', '/api/2.0/mlflow/runs/update', {
+                    run_id: this.runId,
+                    status: status,
+                    end_time: Date.now()
+                });
+            } catch (e) {
+                RED.log.debug('[MLflowTracker] Failed to end run: ' + e.message);
+            }
+            
+            this.runId = null;
+        }
+        
+        /**
+         * Clean up resources
+         */
+        destroy() {
+            if (this.flushInterval) {
+                clearInterval(this.flushInterval);
+                this.flushInterval = null;
+            }
+            this.endRun('KILLED');
+        }
+    }
+    
+    // Store active trackers by node ID
+    const activeTrackers = new Map();
+    
     // Download file with authentication
     async function downloadFile(url, authType, authToken, targetPath) {
         return new Promise((resolve, reject) => {
@@ -325,6 +622,20 @@ module.exports = function(RED) {
         this.autoUpdate = config.autoUpdate || false;
         this.updateCheckInterval = parseInt(config.updateCheckInterval) || 3600; // seconds
         this.modelStage = config.modelStage || "production"; // development, staging, production, deprecated, archived
+        
+        // MLflow Tracking (Phase 6) - Performance Logging
+        this.mlflowTrackingEnabled = config.mlflowTrackingEnabled || false;
+        this.mlflowTrackingUri = config.mlflowTrackingUri || config.mlflowRegistryUri || ""; // Reuse registry URI if not specified
+        this.mlflowExperimentName = config.mlflowExperimentName || "node-red-ml-inference";
+        this.mlflowRunName = config.mlflowRunName || config.name || node.id;
+        this.mlflowLogInferenceTime = config.mlflowLogInferenceTime !== false; // Default: true
+        this.mlflowLogPredictions = config.mlflowLogPredictions || false; // Default: false (can be verbose)
+        this.mlflowLogInputStats = config.mlflowLogInputStats || false; // Log input min/max/mean
+        this.mlflowLogAnomalies = config.mlflowLogAnomalies || false; // Log anomaly detections
+        this.mlflowBatchSize = parseInt(config.mlflowBatchSize) || 100; // Metrics batch size
+        
+        // MLflow Tracker instance
+        this.mlflowTracker = null;
         
         // State
         this.model = null;
@@ -845,6 +1156,57 @@ module.exports = function(RED) {
                 
                 node.log("Model loaded successfully: " + actualModelPath + " (" + modelType + ") from " + node.modelSource);
                 
+                // ========================================
+                // Initialize MLflow Tracking if enabled
+                // ========================================
+                if (node.mlflowTrackingEnabled && node.mlflowTrackingUri) {
+                    try {
+                        // Clean up existing tracker if any
+                        if (node.mlflowTracker) {
+                            await node.mlflowTracker.endRun('FINISHED');
+                        }
+                        
+                        // Create new tracker
+                        node.mlflowTracker = new MLflowTracker(
+                            node.mlflowTrackingUri,
+                            node.mlflowExperimentName,
+                            node.mlflowAuthToken
+                        );
+                        node.mlflowTracker.bufferSize = node.mlflowBatchSize;
+                        
+                        // Start a new run
+                        const runTags = {
+                            model_name: metadata ? metadata.name : path.basename(actualModelPath),
+                            model_version: metadata ? metadata.version : '1.0.0',
+                            model_source: node.modelSource,
+                            model_format: modelType,
+                            model_stage: node.modelStage,
+                            node_id: node.id,
+                            node_name: node.name || 'ml-inference'
+                        };
+                        
+                        await node.mlflowTracker.startRun(node.mlflowRunName || node.name || node.id, runTags);
+                        
+                        // Log initial parameters
+                        await node.mlflowTracker.logParams({
+                            model_path: actualModelPath,
+                            model_type: modelType,
+                            input_shape: node.inputShape || 'auto',
+                            preprocess_mode: node.preprocessMode,
+                            batch_size: String(node.batchSize)
+                        });
+                        
+                        node.log("[MLflowTracker] Started tracking run: " + node.mlflowTracker.runId);
+                        
+                        // Store tracker reference
+                        activeTrackers.set(node.id, node.mlflowTracker);
+                        
+                    } catch (trackingErr) {
+                        node.warn("[MLflowTracker] Failed to initialize tracking: " + trackingErr.message);
+                        node.mlflowTracker = null;
+                    }
+                }
+                
             } catch (err) {
                 node.loadError = err;
                 node.modelLoaded = false;
@@ -1033,6 +1395,78 @@ module.exports = function(RED) {
                 
                 const inferenceTime = Date.now() - startTime;
                 
+                // ========================================
+                // MLflow Tracking - Log Performance Metrics
+                // ========================================
+                if (node.mlflowTracker && node.mlflowTrackingEnabled) {
+                    const metrics = {};
+                    
+                    // Always log inference time if enabled
+                    if (node.mlflowLogInferenceTime) {
+                        metrics['inference_time_ms'] = inferenceTime;
+                    }
+                    
+                    // Log prediction statistics if enabled
+                    if (node.mlflowLogPredictions && prediction !== null) {
+                        if (typeof prediction === 'number') {
+                            metrics['prediction_value'] = prediction;
+                        } else if (Array.isArray(prediction)) {
+                            // For array predictions, log statistics
+                            const flatPred = prediction.flat(Infinity).filter(v => typeof v === 'number');
+                            if (flatPred.length > 0) {
+                                metrics['prediction_mean'] = flatPred.reduce((a, b) => a + b, 0) / flatPred.length;
+                                metrics['prediction_max'] = Math.max(...flatPred);
+                                metrics['prediction_min'] = Math.min(...flatPred);
+                            }
+                        } else if (typeof prediction === 'object' && prediction.score !== undefined) {
+                            metrics['prediction_score'] = prediction.score;
+                        }
+                    }
+                    
+                    // Log input statistics if enabled
+                    if (node.mlflowLogInputStats && inputArray) {
+                        const flatInput = inputArray.flat(Infinity).filter(v => typeof v === 'number');
+                        if (flatInput.length > 0) {
+                            metrics['input_mean'] = flatInput.reduce((a, b) => a + b, 0) / flatInput.length;
+                            metrics['input_max'] = Math.max(...flatInput);
+                            metrics['input_min'] = Math.min(...flatInput);
+                            metrics['input_std'] = Math.sqrt(
+                                flatInput.reduce((sum, val) => sum + Math.pow(val - metrics['input_mean'], 2), 0) / flatInput.length
+                            );
+                        }
+                    }
+                    
+                    // Log anomaly detection if enabled and prediction indicates anomaly
+                    if (node.mlflowLogAnomalies) {
+                        let isAnomaly = false;
+                        let anomalyScore = 0;
+                        
+                        if (typeof prediction === 'number') {
+                            // Threshold-based: assume > 0.5 is anomaly
+                            isAnomaly = prediction > 0.5;
+                            anomalyScore = prediction;
+                        } else if (Array.isArray(prediction) && prediction.length >= 2) {
+                            // Classification: [normal_prob, anomaly_prob]
+                            const flatPred = prediction.flat(Infinity);
+                            if (flatPred.length >= 2) {
+                                isAnomaly = flatPred[1] > flatPred[0];
+                                anomalyScore = flatPred[1];
+                            }
+                        } else if (typeof prediction === 'object') {
+                            isAnomaly = prediction.isAnomaly || prediction.anomaly || false;
+                            anomalyScore = prediction.score || prediction.anomalyScore || 0;
+                        }
+                        
+                        metrics['is_anomaly'] = isAnomaly ? 1 : 0;
+                        metrics['anomaly_score'] = anomalyScore;
+                    }
+                    
+                    // Log all collected metrics
+                    if (Object.keys(metrics).length > 0) {
+                        node.mlflowTracker.logMetrics(metrics);
+                    }
+                }
+                
                 // Build output message
                 const outputMsg = Object.assign({}, msg);
                 
@@ -1051,7 +1485,11 @@ module.exports = function(RED) {
                     modelFormat: node.modelFormat,
                     inferenceTime: inferenceTime,
                     inputShape: node.inputShape,
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    mlflowTracking: node.mlflowTrackingEnabled && node.mlflowTracker ? {
+                        experimentName: node.mlflowExperimentName,
+                        runId: node.mlflowTracker.runId
+                    } : null
                 };
                 
                 send(outputMsg);
@@ -1076,6 +1514,20 @@ module.exports = function(RED) {
             if (updateTimer) {
                 clearInterval(updateTimer);
                 updateTimer = null;
+            }
+            
+            // ========================================
+            // Cleanup MLflow Tracker
+            // ========================================
+            if (node.mlflowTracker) {
+                try {
+                    await node.mlflowTracker.endRun('FINISHED');
+                    activeTrackers.delete(node.id);
+                    node.log("[MLflowTracker] Run ended successfully");
+                } catch (trackingErr) {
+                    node.warn("[MLflowTracker] Error ending run: " + trackingErr.message);
+                }
+                node.mlflowTracker = null;
             }
             
             if (node.model) {

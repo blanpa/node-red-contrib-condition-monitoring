@@ -1,0 +1,17 @@
+{
+  "features": [
+    "flow",
+    "p_inlet",
+    "p_outlet",
+    "current",
+    "vibration_rms",
+    "bearing_temp",
+    "delta_p",
+    "efficiency",
+    "specific_energy",
+    "temp_rise",
+    "vib_flow_ratio",
+    "npsh_margin"
+  ],
+  "description": "Feature order for pump monitoring models"
+}
