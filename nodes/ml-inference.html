@@ -78,32 +78,49 @@
                     ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-check-circle"></i> ONNX Runtime</span>'
                     : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-times-circle"></i> ONNX Runtime</span>';
                 
-                // Check Python/Coral status
+                // Check Python/Coral/MAX status
                 $.getJSON("ml-inference/python-status", function(pythonData) {
                     var pythonStatus = pythonData.available
                         ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-code"></i> Python</span>'
                         : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-code"></i> Python</span>';
                     
-                    $.getJSON("ml-inference/coral-status", function(coralData) {
-                        var coralStatus = coralData.available
-                            ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-microchip"></i> Coral TPU</span>'
-                            : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
-                        $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + coralStatus);
+                    $.getJSON("ml-inference/max-status", function(maxData) {
+                        var maxStatus = maxData.available
+                            ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-rocket"></i> MAX Engine</span>'
+                            : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-rocket"></i> MAX Engine</span>';
+                        
+                        $.getJSON("ml-inference/coral-status", function(coralData) {
+                            var coralStatus = coralData.available
+                                ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-microchip"></i> Coral TPU</span>'
+                                : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
+                            $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + maxStatus + coralStatus);
+                        }).fail(function() {
+                            var coralStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
+                            $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + maxStatus + coralStatus);
+                        });
                     }).fail(function() {
-                        var coralStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
-                        $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + coralStatus);
+                        var maxStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-rocket"></i> MAX Engine</span>';
+                        $.getJSON("ml-inference/coral-status", function(coralData) {
+                            var coralStatus = coralData.available
+                                ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-microchip"></i> Coral TPU</span>'
+                                : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
+                            $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + maxStatus + coralStatus);
+                        }).fail(function() {
+                            var coralStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
+                            $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + maxStatus + coralStatus);
+                        });
                     });
                 }).fail(function() {
+                    var pythonStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-code"></i> Python</span>';
+                    var maxStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-rocket"></i> MAX Engine</span>';
                     $.getJSON("ml-inference/coral-status", function(coralData) {
                         var coralStatus = coralData.available
                             ? '<span class="ml-runtime-badge ml-runtime-installed"><i class="fa fa-microchip"></i> Coral TPU</span>'
                             : '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
-                        var pythonStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-code"></i> Python</span>';
-                        $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + coralStatus);
+                        $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + maxStatus + coralStatus);
                     }).fail(function() {
                         var coralStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-microchip"></i> Coral TPU</span>';
-                        var pythonStatus = '<span class="ml-runtime-badge ml-runtime-missing"><i class="fa fa-code"></i> Python</span>';
-                        $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + coralStatus);
+                        $("#runtime-status").html(tfjsStatus + onnxStatus + pythonStatus + maxStatus + coralStatus);
                     });
                 });
             }).fail(function() {
@@ -1120,6 +1137,7 @@
                         </optgroup>
                         <optgroup label="Hardware Accelerated">
                             <option value="coral">Coral Edge TPU</option>
+                            <option value="max">MAX Engine (ONNX)</option>
                         </optgroup>
                     </select>
                     <div id="python-warning" class="ml-help-text" style="display: none; color: #e65100;">

@@ -1,0 +1,53 @@
+# MAX Engine Inference Server for Node-RED Condition Monitoring
+# ================================================================
+# This container runs a lightweight HTTP server for ONNX model inference
+# using MAX Engine Python API.
+#
+# For GPU acceleration, use: docker run --gpus=1 ...
+# Or the NVIDIA-specific image: modular/max-nvidia-base
+
+# Use Modular's MAX base image (CPU version for compatibility)
+# For GPU: use modular/max-nvidia-full:latest or modular/max-amd:latest
+FROM python:3.11-slim
+
+LABEL maintainer="Node-RED Condition Monitoring"
+LABEL description="MAX Engine inference server for high-performance ML"
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install MAX Engine and dependencies
+# Note: For production with GPU, use the official Modular containers
+# This is a CPU-compatible fallback using ONNX Runtime as backend
+RUN pip install --no-cache-dir \
+    numpy \
+    onnxruntime \
+    flask \
+    gunicorn \
+    requests
+
+# Try to install MAX Engine (requires Modular CLI on host for full features)
+# Fallback to ONNX Runtime if MAX is not available
+RUN pip install --no-cache-dir max 2>/dev/null || echo "MAX Engine not available, using ONNX Runtime fallback"
+
+# Create app directory
+WORKDIR /app
+
+# Copy the bridge script
+COPY nodes/max_bridge.py /app/max_bridge.py
+
+# Create models directory
+RUN mkdir -p /models
+
+# Expose the inference API port
+EXPOSE 8765
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8765/health || exit 1
+
+# Run the bridge server
+CMD ["python", "/app/max_bridge.py"]

@@ -22,10 +22,13 @@ services:
       - TZ=Europe/Berlin
       # MLflow Server URL für Integration (interner Container-Name)
       - MLFLOW_TRACKING_URI=http://mlflow:5000
+      # MAX Engine URL für High-Performance Inference
+      - MAX_ENGINE_URL=http://max-engine:8765
       # Von Node-RED aus erreichbar als http://mlflow:5000
     restart: unless-stopped
     depends_on:
       - mlflow
+      - max-engine
     networks:
       - node-red-network
 
@@ -53,8 +56,40 @@ services:
     networks:
       - node-red-network
 
+  # MAX Engine Server for high-performance ONNX inference
+  # API: http://localhost:8765 (internal: http://max-engine:8765)
+  # Uses Modular MAX Engine for optimized ML inference
+  max-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.max
+    image: max-engine-inference:dev
+    container_name: max-engine-inference
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./models:/models:ro
+      - ./nodes/max_bridge.py:/app/max_bridge.py:ro
+      - max-cache:/root/.cache/max
+    environment:
+      - MAX_BRIDGE_PORT=8765
+      - MAX_BRIDGE_HOST=0.0.0.0
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    networks:
+      - node-red-network
+    # Note: Add --gpus=1 if you have NVIDIA GPU
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
 volumes:
   mlflow-data:
+  max-cache:
 
 networks:
   node-red-network:

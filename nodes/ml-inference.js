@@ -10,6 +10,9 @@ module.exports = function(RED) {
     // Import persistent Python bridge
     const { getGlobalBridge, shutdownGlobalBridge } = require('./python-bridge-manager');
     
+    // Import MAX Engine bridge
+    const { getMaxBridge, isMaxBridgeAvailable, shutdownMaxBridge } = require('./max-bridge-manager');
+    
     // Model storage directory
     const MODELS_DIR = path.join(RED.settings.userDir || os.homedir(), 'ml-models');
     
@@ -17,6 +20,11 @@ module.exports = function(RED) {
     let pythonBridge = null;
     let pythonBridgeReady = false;
     let pythonBridgeError = null;
+    
+    // Global MAX Engine bridge instance
+    let maxBridge = null;
+    let maxBridgeReady = false;
+    let maxBridgeError = null;
     
     // Initialize Python bridge on first node creation
     async function ensurePythonBridge() {
@@ -58,6 +66,50 @@ module.exports = function(RED) {
         return pythonBridge;
     }
     
+    // Initialize MAX Engine bridge
+    async function ensureMaxBridge() {
+        if (maxBridge && maxBridgeReady) {
+            return maxBridge;
+        }
+        
+        if (maxBridgeError) {
+            throw maxBridgeError;
+        }
+        
+        if (!maxBridge) {
+            maxBridge = getMaxBridge({
+                serverUrl: process.env.MAX_ENGINE_URL || 'http://localhost:8765'
+            });
+            
+            maxBridge.on('health', (info) => {
+                RED.log.debug('[MaxBridge] Health: ' + JSON.stringify(info));
+            });
+            
+            maxBridge.on('unhealthy', (err) => {
+                RED.log.warn('[MaxBridge] Unhealthy: ' + err.message);
+                maxBridgeReady = false;
+            });
+            
+            maxBridge.on('modelLoaded', (info) => {
+                RED.log.info('[MaxBridge] Model loaded: ' + info.modelId + ' (' + info.backend + ')');
+            });
+            
+            try {
+                await maxBridge.checkHealth();
+                maxBridgeReady = true;
+                maxBridge.startHealthCheck();
+                RED.log.info('[MaxBridge] Connected to MAX Engine server');
+            } catch (err) {
+                maxBridgeError = err;
+                maxBridge = null;
+                RED.log.warn('[MaxBridge] Not available: ' + err.message);
+                throw err;
+            }
+        }
+        
+        return maxBridge;
+    }
+    
     // Shutdown bridge on Node-RED close
     // Use once() to prevent multiple registrations across test runs
     // Store handler reference for proper cleanup
@@ -72,6 +124,17 @@ module.exports = function(RED) {
                 }
                 pythonBridge = null;
                 pythonBridgeReady = false;
+            }
+            // Shutdown MAX bridge
+            if (maxBridge) {
+                try {
+                    shutdownMaxBridge();
+                    RED.log.info('[MaxBridge] Shutdown complete');
+                } catch (err) {
+                    RED.log.warn('[MaxBridge] Shutdown error: ' + err.message);
+                }
+                maxBridge = null;
+                maxBridgeReady = false;
             }
             // Reset handler reference after execution
             RED._pythonBridgeShutdownHandler = null;
@@ -904,6 +967,58 @@ module.exports = function(RED) {
             };
         }
         
+        // Load ONNX model using MAX Engine bridge (high-performance)
+        async function loadMaxModel(modelPath) {
+            const fullPath = path.isAbsolute(modelPath) ? modelPath : path.join(process.cwd(), modelPath);
+            
+            if (!fs.existsSync(fullPath)) {
+                throw new Error("Model file not found: " + fullPath);
+            }
+            
+            // Get or start the MAX bridge
+            const bridge = await ensureMaxBridge();
+            
+            // Generate a unique model ID for this node
+            const modelId = 'max_' + path.basename(fullPath) + '_' + node.id;
+            
+            // Load model into the MAX server
+            // Use container path for Docker: /models/...
+            let containerPath = fullPath;
+            if (fullPath.includes('/data/models/')) {
+                containerPath = fullPath.replace(/.*\/data\/models\//, '/models/');
+            } else if (fullPath.includes('/models/')) {
+                // Already a container path
+                containerPath = fullPath;
+            }
+            
+            await bridge.loadModel(containerPath, modelId, 'auto');
+            
+            return {
+                type: 'max',
+                modelPath: fullPath,
+                containerPath: containerPath,
+                modelId: modelId,
+                predict: async function(inputData) {
+                    const bridge = await ensureMaxBridge();
+                    const result = await bridge.predict(modelId, inputData);
+                    return result.prediction;
+                },
+                batchPredict: async function(inputs) {
+                    const bridge = await ensureMaxBridge();
+                    const result = await bridge.batchPredict(modelId, inputs);
+                    return result.predictions;
+                },
+                unload: async function() {
+                    try {
+                        const bridge = await ensureMaxBridge();
+                        await bridge.unloadModel(modelId);
+                    } catch (err) {
+                        // Ignore unload errors
+                    }
+                }
+            };
+        }
+        
         // Load scikit-learn model (.pkl, .joblib) using persistent Python bridge
         async function loadSklearnModel(modelPath) {
             const fullPath = path.isAbsolute(modelPath) ? modelPath : path.join(process.cwd(), modelPath);
@@ -1117,6 +1232,11 @@ module.exports = function(RED) {
                     node.model = await loadSklearnModel(actualModelPath);
                     node.modelLoaded = true;
                     node.status({ fill: "green", shape: "dot", text: "sklearn ready" });
+                } else if (modelType === 'max') {
+                    // ONNX models via MAX Engine (high-performance)
+                    node.model = await loadMaxModel(actualModelPath);
+                    node.modelLoaded = true;
+                    node.status({ fill: "green", shape: "dot", text: "max ready" });
                 } else {
                     throw new Error("Unknown model type: " + modelType);
                 }
@@ -1388,6 +1508,13 @@ module.exports = function(RED) {
                         prediction = await node.model.predict(preparedInput);
                     } else {
                         throw new Error("scikit-learn model not properly loaded");
+                    }
+                } else if (node.modelFormat === 'max') {
+                    // MAX Engine for high-performance ONNX inference
+                    if (node.model && node.model.predict) {
+                        prediction = await node.model.predict(preparedInput);
+                    } else {
+                        throw new Error("MAX model not properly loaded");
                     }
                 } else {
                     throw new Error("Unknown model format: " + node.modelFormat);
@@ -1662,6 +1789,30 @@ print(json.dumps(packages))
         }
         
         checkPython(pythonCandidates, 0);
+    });
+    
+    // API endpoint to check MAX Engine availability
+    RED.httpAdmin.get("/ml-inference/max-status", async function(req, res) {
+        try {
+            const bridge = getMaxBridge({
+                serverUrl: process.env.MAX_ENGINE_URL || 'http://localhost:8765'
+            });
+            
+            const status = await bridge.getStatus();
+            res.json({
+                available: true,
+                backend: status.backend,
+                max_available: status.max_available,
+                onnx_available: status.onnx_available,
+                models_loaded: status.models,
+                stats: status.stats
+            });
+        } catch (err) {
+            res.json({
+                available: false,
+                error: err.message
+            });
+        }
     });
     
     // API endpoint to check Coral TPU availability
