@@ -394,7 +394,7 @@
         "topic": "",
         "payload": "",
         "payloadType": "date",
-        "x": 140,
+        "x": 130,
         "y": 120,
         "wires": [
             [
@@ -425,7 +425,7 @@
         "z": "motor-monitoring-tab",
         "name": "Split Sensors",
         "mode": "split",
-        "outputMode": "parallel",
+        "outputMode": "sequential",
         "preserveOriginal": true,
         "x": 590,
         "y": 80,
@@ -1127,6 +1127,12 @@
         "windowSize": 100,
         "numEstimators": 100,
         "maxSamples": 256,
+        "learningMode": "batch",
+        "retrainInterval": 50,
+        "adaptRate": 0.1,
+        "persistState": false,
+        "outputTopic": "",
+        "debug": false,
         "x": 640,
         "y": 120,
         "wires": [
@@ -1375,7 +1381,7 @@
         "type": "function",
         "z": "ml-sensor-tab",
         "name": "Simulate 8 Sensors (Normalized)",
-        "func": "// Simulate 8 sensor values (normalized 0-1)\n// Model trained with anomaly pattern: high temp + low pressure + high humidity\nflow.cycle = (flow.cycle || 0) + 1;\n\n// Normal operation values (centered around 0.5)\nvar temp = 0.50 + (Math.random() - 0.5) * 0.1;\nvar vibration = 0.48 + (Math.random() - 0.5) * 0.1;\nvar pressure = 0.52 + (Math.random() - 0.5) * 0.1;\nvar power = 0.49 + (Math.random() - 0.5) * 0.1;\nvar speed = 0.51 + (Math.random() - 0.5) * 0.1;\nvar flow = 0.50 + (Math.random() - 0.5) * 0.1;\nvar current = 0.48 + (Math.random() - 0.5) * 0.1;\nvar humidity = 0.52 + (Math.random() - 0.5) * 0.1;\n\n// Inject anomaly every 20 cycles (5%)\nif (flow.cycle % 20 === 0) {\n    // Anomaly pattern: high temp (idx 0) + low pressure (idx 2) + high humidity (idx 7)\n    temp = 0.92 + Math.random() * 0.08;\n    pressure = 0.05 + Math.random() * 0.1;\n    humidity = 0.85 + Math.random() * 0.1;\n    msg.isAnomalyInjected = true;\n    msg.anomalyType = 'high_temp_low_pressure';\n} else {\n    msg.isAnomalyInjected = false;\n}\n\n// Model expects array of 8 normalized values\nmsg.payload = [temp, vibration, pressure, power, speed, flow, current, humidity];\nmsg.sensorLabels = ['temp', 'vibration', 'pressure', 'power', 'speed', 'flow', 'current', 'humidity'];\nmsg.timestamp = Date.now();\n\nreturn msg;",
+        "func": "// Realistic Motor/Pump Monitoring - 8 sensors (normalized 0-1)\n// Sensors: temp, vibration, pressure, power, speed, flow, current, humidity\nflow.cycle = (flow.cycle || 0) + 1;\n\n// Normal operation - stable around operating point\nvar temp = 0.45 + (Math.random() - 0.5) * 0.08;\nvar vibration = 0.25 + (Math.random() - 0.5) * 0.10;\nvar pressure = 0.55 + (Math.random() - 0.5) * 0.08;\nvar power = 0.50 + (Math.random() - 0.5) * 0.08;\nvar speed = 0.60 + (Math.random() - 0.5) * 0.06;\nvar flowVal = 0.55 + (Math.random() - 0.5) * 0.08;\nvar current = 0.45 + (Math.random() - 0.5) * 0.08;\nvar humidity = 0.40 + (Math.random() - 0.5) * 0.10;\n\nmsg.isAnomalyInjected = false;\nmsg.anomalyType = 'normal';\n\n// Inject realistic anomalies (15% rate, rotating types)\nvar anomalyType = flow.cycle % 20;\nif (anomalyType === 0) {\n    // BEARING FAILURE: high vibration, elevated temp, slightly higher current\n    vibration = 0.82 + Math.random() * 0.15;\n    temp = 0.72 + Math.random() * 0.12;\n    current = 0.62 + Math.random() * 0.10;\n    msg.isAnomalyInjected = true;\n    msg.anomalyType = 'bearing_failure';\n} else if (anomalyType === 7) {\n    // MOTOR OVERLOAD: high current+temp, low speed (motor struggling)\n    current = 0.88 + Math.random() * 0.10;\n    temp = 0.78 + Math.random() * 0.12;\n    power = 0.85 + Math.random() * 0.10;\n    speed = 0.30 + Math.random() * 0.10;\n    msg.isAnomalyInjected = true;\n    msg.anomalyType = 'motor_overload';\n} else if (anomalyType === 14) {\n    // PUMP CAVITATION: low pressure, high vibration, reduced flow\n    pressure = 0.12 + Math.random() * 0.08;\n    vibration = 0.75 + Math.random() * 0.12;\n    flowVal = 0.25 + Math.random() * 0.10;\n    temp = 0.62 + Math.random() * 0.10;\n    msg.isAnomalyInjected = true;\n    msg.anomalyType = 'pump_cavitation';\n}\n\nmsg.payload = [temp, vibration, pressure, power, speed, flowVal, current, humidity];\nmsg.sensorLabels = ['temp', 'vibration', 'pressure', 'power', 'speed', 'flow', 'current', 'humidity'];\nmsg.timestamp = Date.now();\n\nreturn msg;",
         "outputs": 1,
         "x": 460,
         "y": 120,
@@ -1475,11 +1481,166 @@
         "id": "comment-ml-sensor-info",
         "type": "comment",
         "z": "ml-sensor-tab",
-        "name": "To use: Place your TensorFlow.js model in /data/models/sensor-anomaly/",
-        "info": "**Model Requirements:**\n\n1. Place your TensorFlow.js model files in:\n   - `/data/models/sensor-anomaly/model.json`\n   - `/data/models/sensor-anomaly/weights.bin`\n\n2. Expected input: Array of 5 normalized sensor values\n3. Expected output: Single value (anomaly probability 0-1)\n\n**Training your own model:**\n```python\nimport tensorflow as tf\n\nmodel = tf.keras.Sequential([\n    tf.keras.layers.Dense(16, activation='relu', input_shape=(5,)),\n    tf.keras.layers.Dense(8, activation='relu'),\n    tf.keras.layers.Dense(1, activation='sigmoid')\n])\n\nmodel.compile(optimizer='adam', loss='binary_crossentropy')\nmodel.fit(X_train, y_train, epochs=50)\n\n# Convert to TensorFlow.js\nimport tensorflowjs as tfjs\ntfjs.converters.save_keras_model(model, 'sensor-anomaly')\n```",
-        "x": 270,
+        "name": "Realistische Testfälle: Normal, Borderline, Bearing, Overload, Kavitation",
+        "info": "**Erwartete Ausgaben mit realistischen Modellen:**\n\n- Normal: Score 0.15-0.30\n- Borderline: Score 0.40-0.60 (schwer zu klassifizieren)\n- Klare Anomalie: Score 0.70-0.90\n\n**Sensor-Wert-Referenz (normalisiert 0-1):**\n| Sensor | Normal | Borderline | Anomalie |\n|--------|--------|------------|----------|\n| temp | 0.40-0.50 | 0.55-0.65 | 0.70-0.90 |\n| vibration | 0.20-0.30 | 0.40-0.55 | 0.70-0.95 |\n| pressure | 0.50-0.60 | 0.30-0.40 | 0.08-0.20 |\n| current | 0.40-0.50 | 0.55-0.65 | 0.80-0.95 |",
+        "x": 300,
         "y": 200,
         "wires": []
+    },
+    {
+        "id": "inject-ml-normal",
+        "type": "inject",
+        "z": "ml-sensor-tab",
+        "name": "Normal (expect 0.15-0.30)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "anomalyType",
+                "v": "normal",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.45, 0.25, 0.55, 0.50, 0.60, 0.55, 0.45, 0.40]",
+        "payloadType": "json",
+        "x": 160,
+        "y": 260,
+        "wires": [
+            [
+                "ml-sensor-inference",
+                "debug-sensor-input"
+            ]
+        ]
+    },
+    {
+        "id": "inject-ml-borderline",
+        "type": "inject",
+        "z": "ml-sensor-tab",
+        "name": "Borderline (expect 0.40-0.60)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "anomalyType",
+                "v": "borderline",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.58, 0.42, 0.48, 0.58, 0.52, 0.48, 0.55, 0.42]",
+        "payloadType": "json",
+        "x": 170,
+        "y": 300,
+        "wires": [
+            [
+                "ml-sensor-inference",
+                "debug-sensor-input"
+            ]
+        ]
+    },
+    {
+        "id": "inject-ml-bearing",
+        "type": "inject",
+        "z": "ml-sensor-tab",
+        "name": "Bearing Failure (expect 0.75-0.85)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "anomalyType",
+                "v": "bearing_failure",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.72, 0.82, 0.55, 0.55, 0.58, 0.53, 0.62, 0.40]",
+        "payloadType": "json",
+        "x": 180,
+        "y": 340,
+        "wires": [
+            [
+                "ml-sensor-inference",
+                "debug-sensor-input"
+            ]
+        ]
+    },
+    {
+        "id": "inject-ml-overload",
+        "type": "inject",
+        "z": "ml-sensor-tab",
+        "name": "Motor Overload (expect 0.80-0.90)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "anomalyType",
+                "v": "motor_overload",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.78, 0.45, 0.50, 0.85, 0.30, 0.45, 0.88, 0.40]",
+        "payloadType": "json",
+        "x": 180,
+        "y": 380,
+        "wires": [
+            [
+                "ml-sensor-inference",
+                "debug-sensor-input"
+            ]
+        ]
+    },
+    {
+        "id": "inject-ml-cavitation",
+        "type": "inject",
+        "z": "ml-sensor-tab",
+        "name": "Pump Cavitation (expect 0.70-0.80)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "anomalyType",
+                "v": "pump_cavitation",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.62, 0.75, 0.12, 0.55, 0.58, 0.25, 0.50, 0.40]",
+        "payloadType": "json",
+        "x": 180,
+        "y": 420,
+        "wires": [
+            [
+                "ml-sensor-inference",
+                "debug-sensor-input"
+            ]
+        ]
     },
     {
         "id": "comment-ml-image-header",
@@ -1776,7 +1937,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.52, 0.41, 0.58, 0.44, 0.56, 0.49, 0.47, 0.53, 0.46, 0.54]",
+        "payload": "[0.46, 0.40, 0.45, 0.50, 0.55, 0.50, 0.25, 0.30, 0.48, 0.52]",
         "payloadType": "json",
         "x": 150,
         "y": 100,
@@ -1801,7 +1962,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.92, 0.88, 0.95, 0.91, 0.56, 0.49, 0.47, 0.53, 0.46, 0.54]",
+        "payload": "[0.85, 0.88, 0.82, 0.80, 0.15, 0.18, 0.12, 0.20, 0.55, 0.45]",
         "payloadType": "json",
         "x": 160,
         "y": 160,
@@ -1826,7 +1987,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.02, 0.03, 0.58, 0.44, 0.56, 0.49, 0.47, 0.53, 0.46, 0.54]",
+        "payload": "[0.05, 0.08, 0.10, 0.50, 0.55, 0.50, 0.25, 0.30, 0.48, 0.52]",
         "payloadType": "json",
         "x": 160,
         "y": 220,
@@ -1851,7 +2012,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.9, 0.15, 0.88, 0.12, 0.92, 0.18, 0.85, 0.2, 0.9, 0.1]",
+        "payload": "[0.90, 0.15, 0.88, 0.12, 0.92, 0.18, 0.85, 0.20, 0.90, 0.10]",
         "payloadType": "json",
         "x": 170,
         "y": 280,
@@ -1974,7 +2135,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.5, 0.48, 0.52, 0.49, 0.51, 0.5, 0.48, 0.52]",
+        "payload": "[0.45, 0.55, 0.25, 0.55, 0.45]",
         "payloadType": "json",
         "x": 150,
         "y": 100,
@@ -1988,7 +2149,7 @@
         "id": "inject-tflite-anomaly",
         "type": "inject",
         "z": "tflite-example-tab",
-        "name": "Anomaly: Spike",
+        "name": "Anomaly: High Temp/Vibration",
         "props": [
             {
                 "p": "payload"
@@ -1999,7 +2160,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.95, 0.48, 0.05, 0.49, 0.92, 0.5, 0.03, 0.88]",
+        "payload": "[0.85, 0.30, 0.80, 0.30, 0.85]",
         "payloadType": "json",
         "x": 140,
         "y": 160,
@@ -2013,7 +2174,7 @@
         "id": "inject-tflite-drop",
         "type": "inject",
         "z": "tflite-example-tab",
-        "name": "Anomaly: Drop",
+        "name": "Anomaly: Pressure Drop",
         "props": [
             {
                 "p": "payload"
@@ -2024,7 +2185,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.95, 0.48, 0.05, 0.49, 0.92, 0.5, 0.03, 0.88]",
+        "payload": "[0.60, 0.15, 0.45, 0.25, 0.55]",
         "payloadType": "json",
         "x": 140,
         "y": 220,
@@ -2042,7 +2203,7 @@
         "modelSource": "local",
         "modelPath": "/data/models/sensor-tflite/model.tflite",
         "modelType": "tflite",
-        "inputShape": "[5]",
+        "inputShape": "[1,5]",
         "inputProperty": "payload",
         "outputProperty": "prediction",
         "preprocessMode": "array",
@@ -2147,7 +2308,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.2, 0.25, 0.3, 0.28, 0.22, 0.35, 0.25, 0.3]",
+        "payload": "[0.16, 0.18, 0.28, 0.14, 0.12, 0.25, 0.26, 0.45]",
         "payloadType": "json",
         "x": 140,
         "y": 100,
@@ -2172,7 +2333,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.75, 0.82, 0.68, 0.78, 0.72, 0.8, 0.7, 0.85]",
+        "payload": "[0.35, 0.40, 0.45, 0.38, 0.55, 0.60, 0.65, 0.70]",
         "payloadType": "json",
         "x": 140,
         "y": 160,
@@ -2197,7 +2358,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.75, 0.82, 0.68, 0.78, 0.72, 0.8, 0.7, 0.85]",
+        "payload": "[0.68, 0.80, 0.55, 0.45, 0.35, 0.25, 0.55, 0.70]",
         "payloadType": "json",
         "x": 150,
         "y": 220,
@@ -2222,7 +2383,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.75, 0.82, 0.68, 0.78, 0.72, 0.8, 0.7, 0.85]",
+        "payload": "[0.62, 0.78, 0.72, 0.60, 0.40, 0.65, 0.75, 0.58]",
         "payloadType": "json",
         "x": 160,
         "y": 280,
@@ -2483,7 +2644,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.48, 0.52, 0.51, 0.49, 0.50, 0.47]",
+        "payload": "[0.48, 0.52, 0.51, 0.49, 0.50]",
         "payloadType": "json",
         "x": 130,
         "y": 100,
@@ -2508,7 +2669,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.92, 0.51, 0.08, 0.50, 0.88, 0.52]",
+        "payload": "[0.92, 0.51, 0.08, 0.50, 0.88]",
         "payloadType": "json",
         "x": 140,
         "y": 160,
@@ -2526,7 +2687,7 @@
         "modelSource": "local",
         "modelPath": "/data/models/sklearn-rf/model.pkl",
         "modelType": "sklearn",
-        "inputShape": "[1,6]",
+        "inputShape": "[1,5]",
         "inputProperty": "payload",
         "outputProperty": "prediction",
         "preprocessMode": "array",
@@ -2601,7 +2762,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.48, 0.52, 0.51, 0.49, 0.50, 0.47]",
+        "payload": "[0.48, 0.52, 0.51, 0.49, 0.50]",
         "payloadType": "json",
         "x": 130,
         "y": 260,
@@ -2626,7 +2787,7 @@
         "once": false,
         "onceDelay": 0.1,
         "topic": "",
-        "payload": "[0.92, 0.51, 0.08, 0.50, 0.88, 0.52]",
+        "payload": "[0.92, 0.51, 0.08, 0.50, 0.88]",
         "payloadType": "json",
         "x": 150,
         "y": 320,
@@ -2644,7 +2805,7 @@
         "modelSource": "local",
         "modelPath": "/data/models/sklearn-gb/model.joblib",
         "modelType": "sklearn",
-        "inputShape": "[1,6]",
+        "inputShape": "[1,5]",
         "inputProperty": "payload",
         "outputProperty": "prediction",
         "preprocessMode": "array",
@@ -2769,10 +2930,17 @@
         "type": "pca-anomaly",
         "z": "pca-example-tab",
         "name": "PCA Multi-Sensor",
+        "nComponents": "",
         "windowSize": 50,
         "threshold": 3,
+        "method": "combined",
         "autoComponents": true,
         "varianceThreshold": 0.95,
+        "contributionThreshold": "",
+        "showTopContributors": "",
+        "outputTopic": "",
+        "debug": false,
+        "persistState": false,
         "x": 450,
         "y": 130,
         "wires": [
@@ -3371,5 +3539,1088 @@
         "wires": [
             []
         ]
+    },
+    {
+        "id": "lstm-rul-tab",
+        "type": "tab",
+        "label": "Example 20: LSTM RUL",
+        "disabled": false,
+        "info": "LSTM-based Remaining Useful Life prediction using sensor sequences.\n\nInput: 30 timesteps x 15 features (normalized 0-1)\nOutput: RUL in days (0-125)"
+    },
+    {
+        "id": "comment-lstm-header",
+        "type": "comment",
+        "z": "lstm-rul-tab",
+        "name": "LSTM RUL Prediction - Sequence-based Remaining Useful Life",
+        "info": "This example uses an LSTM model for RUL prediction.\n\n**Input Format:**\nSequence of 30 timesteps, each with 15 features:\n- rms, peak, crest_factor, std, kurtosis, skewness\n- spectral_centroid, spectral_spread\n- band_0_100, band_100_200, band_200_500, band_500_1000, band_1000_3000\n- temperature, current\n\n**Output:** RUL in days (0-125)\n\n**Expected Results:**\n- Healthy machine: RUL > 100 days\n- Degrading: RUL 30-50 days\n- Critical: RUL < 10 days",
+        "x": 280,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "inject-lstm-healthy",
+        "type": "inject",
+        "z": "lstm-rul-tab",
+        "name": "Healthy (expect RUL >100)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedRul",
+                "v": ">100 days",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37]]",
+        "payloadType": "json",
+        "x": 170,
+        "y": 120,
+        "wires": [
+            [
+                "ml-lstm-inference"
+            ]
+        ]
+    },
+    {
+        "id": "inject-lstm-degrading",
+        "type": "inject",
+        "z": "lstm-rul-tab",
+        "name": "Degrading (expect RUL 30-50)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedRul",
+                "v": "30-50 days",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[[0.35,0.52,1.49,0.25,0.35,0.18,0.45,0.35,0.28,0.35,0.40,0.38,0.33,0.48,0.50],[0.38,0.56,1.47,0.28,0.38,0.21,0.48,0.38,0.31,0.38,0.43,0.41,0.36,0.51,0.53],[0.40,0.60,1.50,0.30,0.40,0.23,0.50,0.40,0.33,0.40,0.45,0.43,0.38,0.53,0.55],[0.42,0.63,1.50,0.32,0.42,0.25,0.52,0.42,0.35,0.42,0.47,0.45,0.40,0.55,0.57],[0.44,0.66,1.50,0.34,0.44,0.27,0.54,0.44,0.37,0.44,0.49,0.47,0.42,0.57,0.59],[0.46,0.69,1.50,0.36,0.46,0.29,0.56,0.46,0.39,0.46,0.51,0.49,0.44,0.59,0.61],[0.48,0.72,1.50,0.38,0.48,0.31,0.58,0.48,0.41,0.48,0.53,0.51,0.46,0.61,0.63],[0.50,0.75,1.50,0.40,0.50,0.33,0.60,0.50,0.43,0.50,0.55,0.53,0.48,0.63,0.65],[0.52,0.78,1.50,0.42,0.52,0.35,0.62,0.52,0.45,0.52,0.57,0.55,0.50,0.65,0.67],[0.54,0.81,1.50,0.44,0.54,0.37,0.64,0.54,0.47,0.54,0.59,0.57,0.52,0.67,0.69],[0.55,0.83,1.51,0.45,0.55,0.38,0.65,0.55,0.48,0.55,0.60,0.58,0.53,0.68,0.70],[0.56,0.84,1.50,0.46,0.56,0.39,0.66,0.56,0.49,0.56,0.61,0.59,0.54,0.69,0.71],[0.57,0.86,1.51,0.47,0.57,0.40,0.67,0.57,0.50,0.57,0.62,0.60,0.55,0.70,0.72],[0.58,0.87,1.50,0.48,0.58,0.41,0.68,0.58,0.51,0.58,0.63,0.61,0.56,0.71,0.73],[0.59,0.89,1.51,0.49,0.59,0.42,0.69,0.59,0.52,0.59,0.64,0.62,0.57,0.72,0.74],[0.60,0.90,1.50,0.50,0.60,0.43,0.70,0.60,0.53,0.60,0.65,0.63,0.58,0.73,0.75],[0.61,0.92,1.51,0.51,0.61,0.44,0.71,0.61,0.54,0.61,0.66,0.64,0.59,0.74,0.76],[0.62,0.93,1.50,0.52,0.62,0.45,0.72,0.62,0.55,0.62,0.67,0.65,0.60,0.75,0.77],[0.63,0.95,1.51,0.53,0.63,0.46,0.73,0.63,0.56,0.63,0.68,0.66,0.61,0.76,0.78],[0.64,0.96,1.50,0.54,0.64,0.47,0.74,0.64,0.57,0.64,0.69,0.67,0.62,0.77,0.79],[0.64,0.96,1.50,0.54,0.64,0.47,0.74,0.64,0.57,0.64,0.69,0.67,0.62,0.77,0.79],[0.65,0.98,1.51,0.55,0.65,0.48,0.75,0.65,0.58,0.65,0.70,0.68,0.63,0.78,0.80],[0.65,0.98,1.51,0.55,0.65,0.48,0.75,0.65,0.58,0.65,0.70,0.68,0.63,0.78,0.80],[0.66,0.99,1.50,0.56,0.66,0.49,0.76,0.66,0.59,0.66,0.71,0.69,0.64,0.79,0.81],[0.66,0.99,1.50,0.56,0.66,0.49,0.76,0.66,0.59,0.66,0.71,0.69,0.64,0.79,0.81],[0.67,1.00,1.49,0.57,0.67,0.50,0.77,0.67,0.60,0.67,0.72,0.70,0.65,0.80,0.82],[0.67,1.00,1.49,0.57,0.67,0.50,0.77,0.67,0.60,0.67,0.72,0.70,0.65,0.80,0.82],[0.68,1.00,1.47,0.58,0.68,0.51,0.78,0.68,0.61,0.68,0.73,0.71,0.66,0.81,0.83],[0.68,1.00,1.47,0.58,0.68,0.51,0.78,0.68,0.61,0.68,0.73,0.71,0.66,0.81,0.83],[0.69,1.00,1.45,0.59,0.69,0.52,0.79,0.69,0.62,0.69,0.74,0.72,0.67,0.82,0.84]]",
+        "payloadType": "json",
+        "x": 180,
+        "y": 160,
+        "wires": [
+            [
+                "ml-lstm-inference"
+            ]
+        ]
+    },
+    {
+        "id": "inject-lstm-critical",
+        "type": "inject",
+        "z": "lstm-rul-tab",
+        "name": "Critical (expect RUL <10)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedRul",
+                "v": "<10 days",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[[0.60,0.90,1.50,0.50,0.60,0.43,0.70,0.55,0.50,0.55,0.60,0.65,0.60,0.70,0.72],[0.62,0.93,1.50,0.52,0.62,0.45,0.72,0.57,0.52,0.57,0.62,0.67,0.62,0.72,0.74],[0.65,0.98,1.51,0.55,0.65,0.48,0.75,0.60,0.55,0.60,0.65,0.70,0.65,0.75,0.77],[0.68,1.00,1.47,0.58,0.68,0.51,0.78,0.63,0.58,0.63,0.68,0.73,0.68,0.78,0.80],[0.72,1.00,1.39,0.62,0.72,0.55,0.82,0.67,0.62,0.67,0.72,0.77,0.72,0.82,0.84],[0.75,1.00,1.33,0.65,0.75,0.58,0.85,0.70,0.65,0.70,0.75,0.80,0.75,0.85,0.87],[0.78,1.00,1.28,0.68,0.78,0.61,0.88,0.73,0.68,0.73,0.78,0.83,0.78,0.88,0.90],[0.80,1.00,1.25,0.70,0.80,0.63,0.90,0.75,0.70,0.75,0.80,0.85,0.80,0.90,0.92],[0.82,1.00,1.22,0.72,0.82,0.65,0.92,0.77,0.72,0.77,0.82,0.87,0.82,0.92,0.94],[0.84,1.00,1.19,0.74,0.84,0.67,0.94,0.79,0.74,0.79,0.84,0.89,0.84,0.94,0.96],[0.85,1.00,1.18,0.75,0.85,0.68,0.95,0.80,0.75,0.80,0.85,0.90,0.85,0.95,0.97],[0.86,1.00,1.16,0.76,0.86,0.69,0.96,0.81,0.76,0.81,0.86,0.91,0.86,0.96,0.98],[0.87,1.00,1.15,0.77,0.87,0.70,0.97,0.82,0.77,0.82,0.87,0.92,0.87,0.97,0.99],[0.88,1.00,1.14,0.78,0.88,0.71,0.98,0.83,0.78,0.83,0.88,0.93,0.88,0.98,1.00],[0.89,1.00,1.12,0.79,0.89,0.72,0.99,0.84,0.79,0.84,0.89,0.94,0.89,0.99,1.00],[0.90,1.00,1.11,0.80,0.90,0.73,1.00,0.85,0.80,0.85,0.90,0.95,0.90,1.00,1.00],[0.90,1.00,1.11,0.80,0.90,0.73,1.00,0.85,0.80,0.85,0.90,0.95,0.90,1.00,1.00],[0.91,1.00,1.10,0.81,0.91,0.74,1.00,0.86,0.81,0.86,0.91,0.96,0.91,1.00,1.00],[0.91,1.00,1.10,0.81,0.91,0.74,1.00,0.86,0.81,0.86,0.91,0.96,0.91,1.00,1.00],[0.92,1.00,1.09,0.82,0.92,0.75,1.00,0.87,0.82,0.87,0.92,0.97,0.92,1.00,1.00],[0.92,1.00,1.09,0.82,0.92,0.75,1.00,0.87,0.82,0.87,0.92,0.97,0.92,1.00,1.00],[0.93,1.00,1.08,0.83,0.93,0.76,1.00,0.88,0.83,0.88,0.93,0.98,0.93,1.00,1.00],[0.93,1.00,1.08,0.83,0.93,0.76,1.00,0.88,0.83,0.88,0.93,0.98,0.93,1.00,1.00],[0.94,1.00,1.06,0.84,0.94,0.77,1.00,0.89,0.84,0.89,0.94,0.99,0.94,1.00,1.00],[0.94,1.00,1.06,0.84,0.94,0.77,1.00,0.89,0.84,0.89,0.94,0.99,0.94,1.00,1.00],[0.95,1.00,1.05,0.85,0.95,0.78,1.00,0.90,0.85,0.90,0.95,1.00,0.95,1.00,1.00],[0.95,1.00,1.05,0.85,0.95,0.78,1.00,0.90,0.85,0.90,0.95,1.00,0.95,1.00,1.00],[0.96,1.00,1.04,0.86,0.96,0.79,1.00,0.91,0.86,0.91,0.96,1.00,0.96,1.00,1.00],[0.96,1.00,1.04,0.86,0.96,0.79,1.00,0.91,0.86,0.91,0.96,1.00,0.96,1.00,1.00],[0.97,1.00,1.03,0.87,0.97,0.80,1.00,0.92,0.87,0.92,0.97,1.00,0.97,1.00,1.00]]",
+        "payloadType": "json",
+        "x": 170,
+        "y": 200,
+        "wires": [
+            [
+                "ml-lstm-inference"
+            ]
+        ]
+    },
+    {
+        "id": "ml-lstm-inference",
+        "type": "ml-inference",
+        "z": "lstm-rul-tab",
+        "name": "LSTM RUL Model",
+        "modelSource": "local",
+        "modelPath": "/data/models/lstm-rul/model.keras",
+        "modelType": "keras",
+        "inputShape": "[1,30,15]",
+        "inputProperty": "payload",
+        "outputProperty": "prediction",
+        "preprocessMode": "array",
+        "batchSize": 1,
+        "warmup": true,
+        "x": 440,
+        "y": 160,
+        "wires": [
+            [
+                "function-lstm-interpret"
+            ]
+        ]
+    },
+    {
+        "id": "function-lstm-interpret",
+        "type": "function",
+        "z": "lstm-rul-tab",
+        "name": "Interpret RUL",
+        "func": "var prediction = msg.prediction;\nvar maxRul = 125;  // Max RUL days\nvar rul = 0;\n\n// Handle different output formats\nif (Array.isArray(prediction)) {\n    rul = prediction[0];\n    if (Array.isArray(rul)) {\n        rul = rul[0];\n    }\n} else if (typeof prediction === 'number') {\n    rul = prediction;\n} else if (prediction && prediction.data) {\n    rul = prediction.data[0];\n}\n\n// Model outputs 0-1, scale to 0-125\nrul = rul * maxRul;\n\n// Determine status\nvar status = 'healthy';\nvar urgency = 'none';\nif (rul < 10) {\n    status = 'critical';\n    urgency = 'immediate';\n} else if (rul < 30) {\n    status = 'warning';\n    urgency = 'soon';\n} else if (rul < 60) {\n    status = 'degrading';\n    urgency = 'scheduled';\n}\n\nmsg.payload = {\n    rul_days: Math.round(rul * 10) / 10,\n    status: status,\n    urgency: urgency,\n    expected: msg.expectedRul,\n    raw_prediction: prediction,\n    model: 'LSTM'\n};\n\nreturn msg;",
+        "outputs": 1,
+        "x": 640,
+        "y": 160,
+        "wires": [
+            [
+                "debug-lstm-result"
+            ]
+        ]
+    },
+    {
+        "id": "debug-lstm-result",
+        "type": "debug",
+        "z": "lstm-rul-tab",
+        "name": "RUL Prediction",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 840,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "cnn-lstm-rul-tab",
+        "type": "tab",
+        "label": "Example 21: CNN-LSTM RUL",
+        "disabled": false,
+        "info": "CNN-LSTM hybrid model for Remaining Useful Life prediction.\n\nCombines CNN feature extraction with LSTM temporal modeling.\n\nInput: 30 timesteps x 15 features\nOutput: RUL in days (0-125)"
+    },
+    {
+        "id": "comment-cnn-lstm-header",
+        "type": "comment",
+        "z": "cnn-lstm-rul-tab",
+        "name": "CNN-LSTM RUL - Hybrid Feature Extraction + Temporal Modeling",
+        "info": "This model combines:\n- **CNN**: Extract local patterns from sensor data\n- **LSTM**: Model temporal dependencies\n\nBetter for detecting both sudden changes and gradual degradation.",
+        "x": 290,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "inject-cnn-lstm-healthy",
+        "type": "inject",
+        "z": "cnn-lstm-rul-tab",
+        "name": "Healthy (expect RUL >100)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedRul",
+                "v": ">100 days",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37]]",
+        "payloadType": "json",
+        "x": 170,
+        "y": 120,
+        "wires": [
+            [
+                "ml-cnn-lstm-inference"
+            ]
+        ]
+    },
+    {
+        "id": "inject-cnn-lstm-critical",
+        "type": "inject",
+        "z": "cnn-lstm-rul-tab",
+        "name": "Critical (expect RUL <10)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedRul",
+                "v": "<10 days",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[[0.70,0.95,1.36,0.60,0.70,0.53,0.80,0.70,0.65,0.70,0.75,0.80,0.75,0.85,0.87],[0.72,0.97,1.35,0.62,0.72,0.55,0.82,0.72,0.67,0.72,0.77,0.82,0.77,0.87,0.89],[0.75,1.00,1.33,0.65,0.75,0.58,0.85,0.75,0.70,0.75,0.80,0.85,0.80,0.90,0.92],[0.78,1.00,1.28,0.68,0.78,0.61,0.88,0.78,0.73,0.78,0.83,0.88,0.83,0.93,0.95],[0.80,1.00,1.25,0.70,0.80,0.63,0.90,0.80,0.75,0.80,0.85,0.90,0.85,0.95,0.97],[0.82,1.00,1.22,0.72,0.82,0.65,0.92,0.82,0.77,0.82,0.87,0.92,0.87,0.97,0.99],[0.84,1.00,1.19,0.74,0.84,0.67,0.94,0.84,0.79,0.84,0.89,0.94,0.89,0.99,1.00],[0.86,1.00,1.16,0.76,0.86,0.69,0.96,0.86,0.81,0.86,0.91,0.96,0.91,1.00,1.00],[0.88,1.00,1.14,0.78,0.88,0.71,0.98,0.88,0.83,0.88,0.93,0.98,0.93,1.00,1.00],[0.90,1.00,1.11,0.80,0.90,0.73,1.00,0.90,0.85,0.90,0.95,1.00,0.95,1.00,1.00],[0.91,1.00,1.10,0.81,0.91,0.74,1.00,0.91,0.86,0.91,0.96,1.00,0.96,1.00,1.00],[0.92,1.00,1.09,0.82,0.92,0.75,1.00,0.92,0.87,0.92,0.97,1.00,0.97,1.00,1.00],[0.93,1.00,1.08,0.83,0.93,0.76,1.00,0.93,0.88,0.93,0.98,1.00,0.98,1.00,1.00],[0.94,1.00,1.06,0.84,0.94,0.77,1.00,0.94,0.89,0.94,0.99,1.00,0.99,1.00,1.00],[0.95,1.00,1.05,0.85,0.95,0.78,1.00,0.95,0.90,0.95,1.00,1.00,1.00,1.00,1.00],[0.95,1.00,1.05,0.85,0.95,0.78,1.00,0.95,0.90,0.95,1.00,1.00,1.00,1.00,1.00],[0.96,1.00,1.04,0.86,0.96,0.79,1.00,0.96,0.91,0.96,1.00,1.00,1.00,1.00,1.00],[0.96,1.00,1.04,0.86,0.96,0.79,1.00,0.96,0.91,0.96,1.00,1.00,1.00,1.00,1.00],[0.97,1.00,1.03,0.87,0.97,0.80,1.00,0.97,0.92,0.97,1.00,1.00,1.00,1.00,1.00],[0.97,1.00,1.03,0.87,0.97,0.80,1.00,0.97,0.92,0.97,1.00,1.00,1.00,1.00,1.00],[0.98,1.00,1.02,0.88,0.98,0.81,1.00,0.98,0.93,0.98,1.00,1.00,1.00,1.00,1.00],[0.98,1.00,1.02,0.88,0.98,0.81,1.00,0.98,0.93,0.98,1.00,1.00,1.00,1.00,1.00],[0.99,1.00,1.01,0.89,0.99,0.82,1.00,0.99,0.94,0.99,1.00,1.00,1.00,1.00,1.00],[0.99,1.00,1.01,0.89,0.99,0.82,1.00,0.99,0.94,0.99,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00]]",
+        "payloadType": "json",
+        "x": 170,
+        "y": 160,
+        "wires": [
+            [
+                "ml-cnn-lstm-inference"
+            ]
+        ]
+    },
+    {
+        "id": "ml-cnn-lstm-inference",
+        "type": "ml-inference",
+        "z": "cnn-lstm-rul-tab",
+        "name": "CNN-LSTM RUL Model",
+        "modelSource": "local",
+        "modelPath": "/data/models/cnn-lstm-rul/model.keras",
+        "modelType": "keras",
+        "inputShape": "[1,30,15]",
+        "inputProperty": "payload",
+        "outputProperty": "prediction",
+        "preprocessMode": "array",
+        "batchSize": 1,
+        "warmup": true,
+        "x": 450,
+        "y": 140,
+        "wires": [
+            [
+                "function-cnn-lstm-interpret"
+            ]
+        ]
+    },
+    {
+        "id": "function-cnn-lstm-interpret",
+        "type": "function",
+        "z": "cnn-lstm-rul-tab",
+        "name": "Interpret RUL",
+        "func": "var prediction = msg.prediction;\nvar maxRul = 125;\nvar rul = 0;\n\nif (Array.isArray(prediction)) {\n    rul = prediction[0];\n    if (Array.isArray(rul)) rul = rul[0];\n} else if (typeof prediction === 'number') {\n    rul = prediction;\n}\n\nrul = rul * maxRul;\n\nvar status = rul < 10 ? 'critical' : rul < 30 ? 'warning' : rul < 60 ? 'degrading' : 'healthy';\n\nmsg.payload = {\n    rul_days: Math.round(rul * 10) / 10,\n    status: status,\n    expected: msg.expectedRul,\n    model: 'CNN-LSTM'\n};\n\nreturn msg;",
+        "outputs": 1,
+        "x": 660,
+        "y": 140,
+        "wires": [
+            [
+                "debug-cnn-lstm-result"
+            ]
+        ]
+    },
+    {
+        "id": "debug-cnn-lstm-result",
+        "type": "debug",
+        "z": "cnn-lstm-rul-tab",
+        "name": "RUL Prediction",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 860,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "transformer-rul-tab",
+        "type": "tab",
+        "label": "Example 22: Transformer RUL",
+        "disabled": false,
+        "info": "Transformer model with self-attention for RUL prediction.\n\nBetter at capturing long-range dependencies in sensor sequences.\n\nInput: 30 timesteps x 15 features\nOutput: RUL in days (0-125)"
+    },
+    {
+        "id": "comment-transformer-header",
+        "type": "comment",
+        "z": "transformer-rul-tab",
+        "name": "Transformer RUL - Self-Attention for Degradation Patterns",
+        "info": "Transformer architecture uses self-attention to model relationships between all timesteps simultaneously.\n\nAdvantages:\n- Captures long-range dependencies\n- Parallel processing\n- Better gradient flow",
+        "x": 270,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "inject-transformer-healthy",
+        "type": "inject",
+        "z": "transformer-rul-tab",
+        "name": "Healthy (expect RUL >100)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedRul",
+                "v": ">100 days",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.24,0.38,1.58,0.14,0.24,0.10,0.34,0.24,0.19,0.24,0.29,0.24,0.19,0.34,0.39],[0.23,0.36,1.57,0.13,0.23,0.09,0.33,0.23,0.18,0.23,0.28,0.23,0.18,0.33,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37],[0.23,0.37,1.61,0.13,0.24,0.09,0.34,0.24,0.18,0.24,0.28,0.24,0.18,0.34,0.38],[0.22,0.35,1.59,0.12,0.22,0.08,0.32,0.22,0.17,0.22,0.27,0.22,0.17,0.32,0.37]]",
+        "payloadType": "json",
+        "x": 170,
+        "y": 120,
+        "wires": [
+            [
+                "ml-transformer-inference"
+            ]
+        ]
+    },
+    {
+        "id": "inject-transformer-critical",
+        "type": "inject",
+        "z": "transformer-rul-tab",
+        "name": "Critical (expect RUL <10)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedRul",
+                "v": "<10 days",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[[0.75,1.00,1.33,0.65,0.75,0.58,0.85,0.75,0.70,0.75,0.80,0.85,0.80,0.90,0.92],[0.78,1.00,1.28,0.68,0.78,0.61,0.88,0.78,0.73,0.78,0.83,0.88,0.83,0.93,0.95],[0.80,1.00,1.25,0.70,0.80,0.63,0.90,0.80,0.75,0.80,0.85,0.90,0.85,0.95,0.97],[0.82,1.00,1.22,0.72,0.82,0.65,0.92,0.82,0.77,0.82,0.87,0.92,0.87,0.97,0.99],[0.84,1.00,1.19,0.74,0.84,0.67,0.94,0.84,0.79,0.84,0.89,0.94,0.89,0.99,1.00],[0.86,1.00,1.16,0.76,0.86,0.69,0.96,0.86,0.81,0.86,0.91,0.96,0.91,1.00,1.00],[0.88,1.00,1.14,0.78,0.88,0.71,0.98,0.88,0.83,0.88,0.93,0.98,0.93,1.00,1.00],[0.90,1.00,1.11,0.80,0.90,0.73,1.00,0.90,0.85,0.90,0.95,1.00,0.95,1.00,1.00],[0.91,1.00,1.10,0.81,0.91,0.74,1.00,0.91,0.86,0.91,0.96,1.00,0.96,1.00,1.00],[0.92,1.00,1.09,0.82,0.92,0.75,1.00,0.92,0.87,0.92,0.97,1.00,0.97,1.00,1.00],[0.93,1.00,1.08,0.83,0.93,0.76,1.00,0.93,0.88,0.93,0.98,1.00,0.98,1.00,1.00],[0.94,1.00,1.06,0.84,0.94,0.77,1.00,0.94,0.89,0.94,0.99,1.00,0.99,1.00,1.00],[0.95,1.00,1.05,0.85,0.95,0.78,1.00,0.95,0.90,0.95,1.00,1.00,1.00,1.00,1.00],[0.96,1.00,1.04,0.86,0.96,0.79,1.00,0.96,0.91,0.96,1.00,1.00,1.00,1.00,1.00],[0.97,1.00,1.03,0.87,0.97,0.80,1.00,0.97,0.92,0.97,1.00,1.00,1.00,1.00,1.00],[0.97,1.00,1.03,0.87,0.97,0.80,1.00,0.97,0.92,0.97,1.00,1.00,1.00,1.00,1.00],[0.98,1.00,1.02,0.88,0.98,0.81,1.00,0.98,0.93,0.98,1.00,1.00,1.00,1.00,1.00],[0.98,1.00,1.02,0.88,0.98,0.81,1.00,0.98,0.93,0.98,1.00,1.00,1.00,1.00,1.00],[0.99,1.00,1.01,0.89,0.99,0.82,1.00,0.99,0.94,0.99,1.00,1.00,1.00,1.00,1.00],[0.99,1.00,1.01,0.89,0.99,0.82,1.00,0.99,0.94,0.99,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00],[1.00,1.00,1.00,0.90,1.00,0.83,1.00,1.00,0.95,1.00,1.00,1.00,1.00,1.00,1.00]]",
+        "payloadType": "json",
+        "x": 170,
+        "y": 160,
+        "wires": [
+            [
+                "ml-transformer-inference"
+            ]
+        ]
+    },
+    {
+        "id": "ml-transformer-inference",
+        "type": "ml-inference",
+        "z": "transformer-rul-tab",
+        "name": "Transformer RUL Model",
+        "modelSource": "local",
+        "modelPath": "/data/models/transformer-rul/model.keras",
+        "modelType": "keras",
+        "inputShape": "[1,30,15]",
+        "inputProperty": "payload",
+        "outputProperty": "prediction",
+        "preprocessMode": "array",
+        "batchSize": 1,
+        "warmup": true,
+        "x": 460,
+        "y": 140,
+        "wires": [
+            [
+                "function-transformer-interpret"
+            ]
+        ]
+    },
+    {
+        "id": "function-transformer-interpret",
+        "type": "function",
+        "z": "transformer-rul-tab",
+        "name": "Interpret RUL",
+        "func": "var prediction = msg.prediction;\nvar maxRul = 125;\nvar rul = 0;\n\nif (Array.isArray(prediction)) {\n    rul = prediction[0];\n    if (Array.isArray(rul)) rul = rul[0];\n} else if (typeof prediction === 'number') {\n    rul = prediction;\n}\n\nrul = rul * maxRul;\n\nvar status = rul < 10 ? 'critical' : rul < 30 ? 'warning' : rul < 60 ? 'degrading' : 'healthy';\n\nmsg.payload = {\n    rul_days: Math.round(rul * 10) / 10,\n    status: status,\n    expected: msg.expectedRul,\n    model: 'Transformer'\n};\n\nreturn msg;",
+        "outputs": 1,
+        "x": 680,
+        "y": 140,
+        "wires": [
+            [
+                "debug-transformer-result"
+            ]
+        ]
+    },
+    {
+        "id": "debug-transformer-result",
+        "type": "debug",
+        "z": "transformer-rul-tab",
+        "name": "RUL Prediction",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 880,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "autoencoder-tab",
+        "type": "tab",
+        "label": "Example 23: Autoencoder Anomaly",
+        "disabled": false,
+        "info": "Autoencoder-based anomaly detection using reconstruction error.\n\nAnomalies are detected when the reconstruction error exceeds a learned threshold.\n\nInput: 14 sensor features (normalized 0-1)\nOutput: Reconstruction error and anomaly status"
+    },
+    {
+        "id": "comment-autoencoder-header",
+        "type": "comment",
+        "z": "autoencoder-tab",
+        "name": "Autoencoder Anomaly Detection - Reconstruction Error",
+        "info": "The autoencoder learns to compress and reconstruct normal data.\n\n**Anomaly Detection:**\nAnomalies produce high reconstruction error because they differ from the learned normal patterns.\n\n**Features (14):**\ntemp, vibration, pressure, power, flow, temp_pressure, vib_power_ratio, mean, std, band_1-5",
+        "x": 260,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "inject-ae-normal",
+        "type": "inject",
+        "z": "autoencoder-tab",
+        "name": "Normal (low error expected)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedResult",
+                "v": "low_error",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.45, 0.25, 0.55, 0.50, 0.55, 0.25, 0.50, 0.46, 0.12, 0.50, 0.50, 0.50, 0.50, 0.50]",
+        "payloadType": "json",
+        "x": 180,
+        "y": 120,
+        "wires": [
+            [
+                "ml-autoencoder-inference"
+            ]
+        ]
+    },
+    {
+        "id": "inject-ae-anomaly",
+        "type": "inject",
+        "z": "autoencoder-tab",
+        "name": "Anomaly (high error expected)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedResult",
+                "v": "high_error",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.85, 0.78, 0.15, 0.90, 0.25, 0.13, 0.87, 0.55, 0.28, 0.75, 0.80, 0.72, 0.68, 0.82]",
+        "payloadType": "json",
+        "x": 190,
+        "y": 160,
+        "wires": [
+            [
+                "ml-autoencoder-inference"
+            ]
+        ]
+    },
+    {
+        "id": "ml-autoencoder-inference",
+        "type": "ml-inference",
+        "z": "autoencoder-tab",
+        "name": "Autoencoder Model",
+        "modelSource": "local",
+        "modelPath": "/data/models/autoencoder-anomaly/model.keras",
+        "modelType": "keras",
+        "inputShape": "[1,14]",
+        "inputProperty": "payload",
+        "outputProperty": "reconstruction",
+        "preprocessMode": "array",
+        "batchSize": 1,
+        "warmup": true,
+        "x": 450,
+        "y": 140,
+        "wires": [
+            [
+                "function-ae-interpret"
+            ]
+        ]
+    },
+    {
+        "id": "function-ae-interpret",
+        "type": "function",
+        "z": "autoencoder-tab",
+        "name": "Calculate Error & Detect",
+        "func": "var input = msg.payload;\nvar reconstruction = msg.reconstruction;\nvar threshold = 0.78;  // From training\n\n// Handle reconstruction format\nif (Array.isArray(reconstruction) && Array.isArray(reconstruction[0])) {\n    reconstruction = reconstruction[0];\n}\n\n// Calculate Mean Squared Error\nvar mse = 0;\nfor (var i = 0; i < input.length; i++) {\n    var diff = input[i] - (reconstruction[i] || 0);\n    mse += diff * diff;\n}\nmse = mse / input.length;\n\nvar isAnomaly = mse > threshold;\n\nmsg.payload = {\n    reconstructionError: mse.toFixed(4),\n    threshold: threshold,\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? 'ANOMALY' : 'Normal',\n    expected: msg.expectedResult,\n    model: 'Autoencoder'\n};\n\nreturn msg;",
+        "outputs": 1,
+        "x": 680,
+        "y": 140,
+        "wires": [
+            [
+                "debug-ae-result"
+            ]
+        ]
+    },
+    {
+        "id": "debug-ae-result",
+        "type": "debug",
+        "z": "autoencoder-tab",
+        "name": "Anomaly Result",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 900,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "cnn-classifier-tab",
+        "type": "tab",
+        "label": "Example 24: CNN Classifier",
+        "disabled": false,
+        "info": "1D-CNN for 4-class fault classification.\n\nClasses: normal, unbalance, bearing, misalignment\n\nInput: 13 features (normalized 0-1)\nOutput: Class probabilities"
+    },
+    {
+        "id": "comment-cnn-header",
+        "type": "comment",
+        "z": "cnn-classifier-tab",
+        "name": "CNN Fault Classification - 4 Classes",
+        "info": "**Classes:**\n- normal: Healthy machine\n- unbalance: Rotor imbalance (high 1x frequency)\n- bearing: Bearing fault (high kurtosis)\n- misalignment: Shaft misalignment (high 2x frequency)\n\n**Features (13):**\nrms, peak, crest_factor, kurtosis, skewness, freq_1x, freq_2x, freq_3x, harmonic_ratio, temperature, current, pressure, efficiency",
+        "x": 220,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "inject-cnn-normal",
+        "type": "inject",
+        "z": "cnn-classifier-tab",
+        "name": "Normal",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedClass",
+                "v": "normal",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.25, 0.35, 1.40, 0.20, 0.10, 0.30, 0.15, 0.08, 0.20, 0.40, 0.45, 0.55, 0.80]",
+        "payloadType": "json",
+        "x": 130,
+        "y": 120,
+        "wires": [
+            [
+                "ml-cnn-classifier"
+            ]
+        ]
+    },
+    {
+        "id": "inject-cnn-unbalance",
+        "type": "inject",
+        "z": "cnn-classifier-tab",
+        "name": "Unbalance",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedClass",
+                "v": "unbalance",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.55, 0.72, 1.31, 0.25, 0.15, 0.75, 0.20, 0.12, 0.38, 0.45, 0.50, 0.52, 0.65]",
+        "payloadType": "json",
+        "x": 140,
+        "y": 160,
+        "wires": [
+            [
+                "ml-cnn-classifier"
+            ]
+        ]
+    },
+    {
+        "id": "inject-cnn-bearing",
+        "type": "inject",
+        "z": "cnn-classifier-tab",
+        "name": "Bearing Fault",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedClass",
+                "v": "bearing",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.52, 0.78, 1.50, 0.62, 0.32, 0.35, 0.18, 0.10, 0.25, 0.65, 0.58, 0.52, 0.72]",
+        "payloadType": "json",
+        "x": 150,
+        "y": 200,
+        "wires": [
+            [
+                "ml-cnn-classifier"
+            ]
+        ]
+    },
+    {
+        "id": "inject-cnn-misalignment",
+        "type": "inject",
+        "z": "cnn-classifier-tab",
+        "name": "Misalignment",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedClass",
+                "v": "misalignment",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.48, 0.65, 1.35, 0.28, 0.18, 0.45, 0.68, 0.35, 0.32, 0.55, 0.52, 0.42, 0.70]",
+        "payloadType": "json",
+        "x": 150,
+        "y": 240,
+        "wires": [
+            [
+                "ml-cnn-classifier"
+            ]
+        ]
+    },
+    {
+        "id": "ml-cnn-classifier",
+        "type": "ml-inference",
+        "z": "cnn-classifier-tab",
+        "name": "CNN Classifier",
+        "modelSource": "local",
+        "modelPath": "/data/models/cnn-classifier/model.keras",
+        "modelType": "keras",
+        "inputShape": "[1,13]",
+        "inputProperty": "payload",
+        "outputProperty": "prediction",
+        "preprocessMode": "array",
+        "batchSize": 1,
+        "warmup": true,
+        "x": 380,
+        "y": 180,
+        "wires": [
+            [
+                "function-cnn-interpret"
+            ]
+        ]
+    },
+    {
+        "id": "function-cnn-interpret",
+        "type": "function",
+        "z": "cnn-classifier-tab",
+        "name": "Interpret Classification",
+        "func": "var prediction = msg.prediction;\nvar classes = ['normal', 'unbalance', 'bearing', 'misalignment'];\nvar probs = [];\n\n// Handle different output formats\nif (Array.isArray(prediction) && Array.isArray(prediction[0])) {\n    probs = prediction[0];\n} else if (Array.isArray(prediction)) {\n    probs = prediction;\n}\n\n// Find max probability class\nvar maxIdx = 0;\nvar maxProb = probs[0] || 0;\nfor (var i = 1; i < probs.length; i++) {\n    if (probs[i] > maxProb) {\n        maxProb = probs[i];\n        maxIdx = i;\n    }\n}\n\nmsg.payload = {\n    predictedClass: classes[maxIdx],\n    confidence: (maxProb * 100).toFixed(1) + '%',\n    probabilities: {\n        normal: (probs[0] * 100).toFixed(1) + '%',\n        unbalance: (probs[1] * 100).toFixed(1) + '%',\n        bearing: (probs[2] * 100).toFixed(1) + '%',\n        misalignment: (probs[3] * 100).toFixed(1) + '%'\n    },\n    expected: msg.expectedClass,\n    model: 'CNN'\n};\n\nreturn msg;",
+        "outputs": 1,
+        "x": 600,
+        "y": 180,
+        "wires": [
+            [
+                "debug-cnn-result"
+            ]
+        ]
+    },
+    {
+        "id": "debug-cnn-result",
+        "type": "debug",
+        "z": "cnn-classifier-tab",
+        "name": "Classification Result",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 840,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "iforest-new-tab",
+        "type": "tab",
+        "label": "Example 25: Isolation Forest 8-Sensor",
+        "disabled": false,
+        "info": "Isolation Forest anomaly detection for 8-sensor motor/pump monitoring.\n\nUnsupervised anomaly detection - trained only on normal data.\n\nInput: 8 features (normalized 0-1)\nOutput: Anomaly score and classification"
+    },
+    {
+        "id": "comment-iforest-header",
+        "type": "comment",
+        "z": "iforest-new-tab",
+        "name": "Isolation Forest - Unsupervised Anomaly Detection",
+        "info": "**How it works:**\nIsolation Forest isolates anomalies by randomly selecting features and split values. Anomalies require fewer splits to isolate.\n\n**Features (8):**\ntemp, vibration, pressure, power, speed, flow, current, humidity\n\n**Output:**\n- decision_function: Negative = anomaly, Positive = normal\n- predict: -1 = anomaly, 1 = normal",
+        "x": 260,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "inject-if-normal",
+        "type": "inject",
+        "z": "iforest-new-tab",
+        "name": "Normal",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedResult",
+                "v": "normal",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.45, 0.25, 0.55, 0.50, 0.60, 0.55, 0.45, 0.40]",
+        "payloadType": "json",
+        "x": 130,
+        "y": 120,
+        "wires": [
+            [
+                "ml-iforest-new"
+            ]
+        ]
+    },
+    {
+        "id": "inject-if-bearing",
+        "type": "inject",
+        "z": "iforest-new-tab",
+        "name": "Bearing Failure",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedResult",
+                "v": "anomaly",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.72, 0.82, 0.55, 0.55, 0.58, 0.53, 0.62, 0.40]",
+        "payloadType": "json",
+        "x": 160,
+        "y": 160,
+        "wires": [
+            [
+                "ml-iforest-new"
+            ]
+        ]
+    },
+    {
+        "id": "inject-if-overload",
+        "type": "inject",
+        "z": "iforest-new-tab",
+        "name": "Motor Overload",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedResult",
+                "v": "anomaly",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.78, 0.45, 0.50, 0.85, 0.30, 0.45, 0.88, 0.40]",
+        "payloadType": "json",
+        "x": 160,
+        "y": 200,
+        "wires": [
+            [
+                "ml-iforest-new"
+            ]
+        ]
+    },
+    {
+        "id": "ml-iforest-new",
+        "type": "ml-inference",
+        "z": "iforest-new-tab",
+        "name": "Isolation Forest Model",
+        "modelSource": "local",
+        "modelPath": "/data/models/isolation-forest-8sensor/model.joblib",
+        "modelType": "sklearn",
+        "inputShape": "[1,8]",
+        "inputProperty": "payload",
+        "outputProperty": "prediction",
+        "preprocessMode": "array",
+        "batchSize": 1,
+        "warmup": false,
+        "x": 420,
+        "y": 160,
+        "wires": [
+            [
+                "function-if-interpret"
+            ]
+        ]
+    },
+    {
+        "id": "function-if-interpret",
+        "type": "function",
+        "z": "iforest-new-tab",
+        "name": "Interpret Result",
+        "func": "var prediction = msg.prediction;\nvar label = 0;\n\n// Isolation Forest returns -1 for anomaly, 1 for normal\nif (Array.isArray(prediction)) {\n    label = prediction[0];\n    if (Array.isArray(label)) label = label[0];\n} else {\n    label = prediction;\n}\n\nvar isAnomaly = label === -1 || label === 1;  // sklearn returns 1 for anomaly class\n// Check if it's the raw prediction or decision function output\nif (typeof label === 'number' && label !== -1 && label !== 1) {\n    // It's likely a probability or score\n    isAnomaly = label > 0.5;\n}\n\nmsg.payload = {\n    rawPrediction: label,\n    isAnomaly: isAnomaly,\n    status: isAnomaly ? 'ANOMALY' : 'Normal',\n    expected: msg.expectedResult,\n    model: 'Isolation Forest'\n};\n\nreturn msg;",
+        "outputs": 1,
+        "x": 640,
+        "y": 160,
+        "wires": [
+            [
+                "debug-if-result"
+            ]
+        ]
+    },
+    {
+        "id": "debug-if-result",
+        "type": "debug",
+        "z": "iforest-new-tab",
+        "name": "Anomaly Result",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 860,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "xgboost-tab",
+        "type": "tab",
+        "label": "Example 26: XGBoost Classifier",
+        "disabled": false,
+        "info": "XGBoost gradient boosting for 4-class fault classification.\n\nFast and accurate for structured data.\n\nInput: 8 features (normalized 0-1)\nOutput: Class probabilities"
+    },
+    {
+        "id": "comment-xgb-header",
+        "type": "comment",
+        "z": "xgboost-tab",
+        "name": "XGBoost Fault Classification - Gradient Boosting",
+        "info": "**XGBoost advantages:**\n- Fast training and inference\n- Handles missing values\n- Built-in regularization\n- Feature importance\n\n**Classes:**\nnormal, unbalance, bearing, misalignment\n\n**Features (8):**\nrms, peak, crest_factor, kurtosis, skewness, freq_1x, freq_2x, freq_3x",
+        "x": 250,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "inject-xgb-normal",
+        "type": "inject",
+        "z": "xgboost-tab",
+        "name": "Normal",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedClass",
+                "v": "normal",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.25, 0.35, 1.40, 0.20, 0.10, 0.30, 0.15, 0.08]",
+        "payloadType": "json",
+        "x": 130,
+        "y": 120,
+        "wires": [
+            [
+                "ml-xgboost"
+            ]
+        ]
+    },
+    {
+        "id": "inject-xgb-unbalance",
+        "type": "inject",
+        "z": "xgboost-tab",
+        "name": "Unbalance",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedClass",
+                "v": "unbalance",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.55, 0.72, 1.31, 0.25, 0.15, 0.75, 0.20, 0.12]",
+        "payloadType": "json",
+        "x": 140,
+        "y": 160,
+        "wires": [
+            [
+                "ml-xgboost"
+            ]
+        ]
+    },
+    {
+        "id": "inject-xgb-bearing",
+        "type": "inject",
+        "z": "xgboost-tab",
+        "name": "Bearing Fault",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedClass",
+                "v": "bearing",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.52, 0.78, 1.50, 0.62, 0.32, 0.35, 0.18, 0.10]",
+        "payloadType": "json",
+        "x": 150,
+        "y": 200,
+        "wires": [
+            [
+                "ml-xgboost"
+            ]
+        ]
+    },
+    {
+        "id": "inject-xgb-misalignment",
+        "type": "inject",
+        "z": "xgboost-tab",
+        "name": "Misalignment",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "expectedClass",
+                "v": "misalignment",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "[0.48, 0.65, 1.35, 0.28, 0.18, 0.45, 0.68, 0.35]",
+        "payloadType": "json",
+        "x": 150,
+        "y": 240,
+        "wires": [
+            [
+                "ml-xgboost"
+            ]
+        ]
+    },
+    {
+        "id": "ml-xgboost",
+        "type": "ml-inference",
+        "z": "xgboost-tab",
+        "name": "XGBoost Classifier",
+        "modelSource": "local",
+        "modelPath": "/data/models/xgboost-classifier/model.joblib",
+        "modelType": "sklearn",
+        "inputShape": "[1,8]",
+        "inputProperty": "payload",
+        "outputProperty": "prediction",
+        "preprocessMode": "array",
+        "batchSize": 1,
+        "warmup": false,
+        "x": 390,
+        "y": 180,
+        "wires": [
+            [
+                "function-xgb-interpret"
+            ]
+        ]
+    },
+    {
+        "id": "function-xgb-interpret",
+        "type": "function",
+        "z": "xgboost-tab",
+        "name": "Interpret Classification",
+        "func": "var prediction = msg.prediction;\nvar classes = ['normal', 'unbalance', 'bearing', 'misalignment'];\nvar probs = [];\n\n// XGBoost returns probabilities [[p0, p1, p2, p3]]\nif (Array.isArray(prediction) && Array.isArray(prediction[0])) {\n    probs = prediction[0];\n} else if (Array.isArray(prediction)) {\n    probs = prediction;\n}\n\n// Find max probability class\nvar maxIdx = 0;\nvar maxProb = probs[0] || 0;\nfor (var i = 1; i < probs.length; i++) {\n    if (probs[i] > maxProb) {\n        maxProb = probs[i];\n        maxIdx = i;\n    }\n}\n\nmsg.payload = {\n    predictedClass: classes[maxIdx],\n    confidence: (maxProb * 100).toFixed(1) + '%',\n    probabilities: {\n        normal: (probs[0] * 100).toFixed(1) + '%',\n        unbalance: (probs[1] * 100).toFixed(1) + '%',\n        bearing: (probs[2] * 100).toFixed(1) + '%',\n        misalignment: (probs[3] * 100).toFixed(1) + '%'\n    },\n    expected: msg.expectedClass,\n    model: 'XGBoost'\n};\n\nreturn msg;",
+        "outputs": 1,
+        "x": 620,
+        "y": 180,
+        "wires": [
+            [
+                "debug-xgb-result"
+            ]
+        ]
+    },
+    {
+        "id": "debug-xgb-result",
+        "type": "debug",
+        "z": "xgboost-tab",
+        "name": "Classification Result",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 860,
+        "y": 180,
+        "wires": []
     }
 ]

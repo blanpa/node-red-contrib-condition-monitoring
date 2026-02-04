@@ -1,0 +1,33 @@
+{
+  "name": "autoencoder-anomaly-detector",
+  "version": "3.0.0",
+  "type": "keras",
+  "task": "anomaly_detection",
+  "inputShape": [
+    1,
+    14
+  ],
+  "encodingDim": 8,
+  "threshold": 0.008754268288612366,
+  "accuracy": 0.969921875,
+  "features": [
+    "temp",
+    "vibration",
+    "pressure",
+    "power",
+    "flow",
+    "temp_pressure",
+    "vib_power_ratio",
+    "mean",
+    "std",
+    "band_1",
+    "band_2",
+    "band_3",
+    "band_4",
+    "band_5"
+  ],
+  "description": "Autoencoder for anomaly detection via reconstruction error",
+  "usage": "Anomaly if reconstruction_error > threshold",
+  "realisticTraining": true,
+  "createdAt": "2026-02-04T12:22:40.895763"
+}

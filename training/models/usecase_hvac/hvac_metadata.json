@@ -1,0 +1,30 @@
+{
+  "features": [
+    "outdoor_temp",
+    "return_temp",
+    "mixed_temp",
+    "supply_temp",
+    "airflow",
+    "fan_power",
+    "filter_dp",
+    "fan_vibration",
+    "chw_valve",
+    "delta_t_coil",
+    "delta_t_room",
+    "fan_efficiency",
+    "filter_loading",
+    "specific_fan_power",
+    "economizer_eff",
+    "cooling_eff",
+    "vib_airflow_ratio"
+  ],
+  "classes": [
+    "normal",
+    "clogged_filter",
+    "damper_stuck",
+    "fan_belt_wear",
+    "refrigerant_leak"
+  ],
+  "accuracy": 0.805,
+  "realisticTraining": true
+}

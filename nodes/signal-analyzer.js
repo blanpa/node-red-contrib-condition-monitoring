@@ -1,20 +1,18 @@
 module.exports = function(RED) {
     "use strict";
-    
+
+    // Import shared statistics utilities
+    var stats = require('./utils/statistics');
+
+    // Import state persistence helper
+    var persistenceHelper = require('./utils/persistence-helper');
+
     // Load high-performance FFT library (Radix-4 Cooley-Tukey algorithm)
     var FFT = null;
     try {
         FFT = require('fft.js');
     } catch (err) {
         // Fallback to naive implementation if fft.js not available
-    }
-    
-    // Import state persistence
-    var StatePersistence = null;
-    try {
-        StatePersistence = require('./state-persistence');
-    } catch (err) {
-        // State persistence not available
     }
     
     function SignalAnalyzerNode(config) {
@@ -80,62 +78,54 @@ module.exports = function(RED) {
         this.sampleCount = 0;
         this.lastProcessedIndex = 0;
         
-        // State persistence manager
-        this.stateManager = null;
-        
-        // Helper to persist current state
-        function persistCurrentState() {
-            if (node.stateManager && node.buffer.length > 0) {
-                node.stateManager.setMultiple({
-                    buffer: node.buffer,
-                    timestamps: node.timestamps,
-                    sampleCount: node.sampleCount,
-                    lastProcessedIndex: node.lastProcessedIndex
-                });
-            }
-        }
-        
-        // Initialize state persistence if enabled
-        if (node.persistState && StatePersistence) {
-            node.stateManager = new StatePersistence.NodeStateManager(node, {
-                stateKey: 'signalAnalyzerState',
-                saveInterval: 30000 // Save every 30 seconds
-            });
-            
-            // Load persisted state on startup
-            node.stateManager.load().then(function(state) {
-                if (state.buffer && state.buffer.length > 0) {
-                    node.buffer = state.buffer;
-                    node.timestamps = state.timestamps || [];
-                    node.sampleCount = state.sampleCount || 0;
-                    node.lastProcessedIndex = state.lastProcessedIndex || 0;
-                    
-                    node.status({fill: "green", shape: "dot", text: node.mode + " - restored (" + node.buffer.length + " samples)"});
-                    node.debug && node.warn("[DEBUG] Restored signal buffer from persistence: " + node.buffer.length + " samples");
-                }
-            }).catch(function(err) {
-                node.debug && node.warn("[DEBUG] Failed to load persisted state: " + err.message);
-            });
-        }
-        
-        node.status({fill: "blue", shape: "ring", text: node.mode + " mode"});
-        
         // Debug logging helper
         var debugLog = function(message) {
             if (node.debug) {
                 node.warn("[DEBUG] " + message);
             }
         };
-        
-        // Helper functions
-        function calculateMean(data) {
-            return data.reduce((a, b) => a + b, 0) / data.length;
+
+        // Initialize state persistence using helper
+        var persistence = persistenceHelper.initializeStatePersistence(node, {
+            stateKey: 'signalAnalyzerState',
+            saveInterval: 30000,
+            debug: node.debug,
+            onStateLoaded: function(state) {
+                if (state.buffer && state.buffer.length > 0) {
+                    node.buffer = state.buffer;
+                    node.timestamps = state.timestamps || [];
+                    node.sampleCount = state.sampleCount || 0;
+                    node.lastProcessedIndex = state.lastProcessedIndex || 0;
+
+                    node.status({fill: "green", shape: "dot", text: node.mode + " - restored (" + node.buffer.length + " samples)"});
+                    debugLog("Restored signal buffer from persistence: " + node.buffer.length + " samples");
+                }
+            },
+            getStateToSave: function() {
+                if (node.buffer.length > 0) {
+                    return {
+                        buffer: node.buffer,
+                        timestamps: node.timestamps,
+                        sampleCount: node.sampleCount,
+                        lastProcessedIndex: node.lastProcessedIndex
+                    };
+                }
+                return null;
+            }
+        });
+
+        // Helper to persist current state
+        function persistCurrentState() {
+            if (persistence) {
+                persistence.saveNow();
+            }
         }
-        
-        function calculateStdDev(data, mean) {
-            var variance = data.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / data.length;
-            return Math.sqrt(variance);
-        }
+
+        node.status({fill: "blue", shape: "ring", text: node.mode + " mode"});
+
+        // Use shared statistics utilities
+        var calculateMean = stats.calculateMean;
+        var calculateStdDev = stats.calculateStdDev;
         
         // Window functions
         function applyWindow(signal, windowType) {
@@ -164,8 +154,23 @@ module.exports = function(RED) {
             return windowed;
         }
         
-        // FFT Implementation - uses fft.js (Radix-4 Cooley-Tukey) when available
-        // Performance: O(n log n) vs O(n²) for naive DFT
+        /**
+         * Perform Fast Fourier Transform on a signal.
+         *
+         * Uses fft.js (Radix-4 Cooley-Tukey algorithm) when available for
+         * O(n log n) performance. Falls back to naive DFT O(n²) otherwise.
+         *
+         * @param {number[]} signal - Time-domain signal values
+         * @param {number} fftSize - FFT size (will be rounded up to nearest power of 2)
+         * @param {number} samplingRate - Sampling rate in Hz
+         * @param {string} [windowType='hann'] - Window function: 'hann', 'hamming', 'blackman', 'rectangular'
+         * @returns {{frequencies: number[], magnitudes: number[]}} Frequency and magnitude arrays
+         *
+         * @example
+         * var result = performFFT(signalData, 256, 1000, 'hann');
+         * // result.frequencies = [0, 3.9, 7.8, ...] Hz
+         * // result.magnitudes = [0.5, 0.2, 0.8, ...]
+         */
         function performFFT(signal, fftSize, samplingRate, windowType) {
             var n = fftSize;
             
@@ -810,9 +815,27 @@ module.exports = function(RED) {
             return bandpassed;
         }
         
-        // Detect bearing fault frequencies in envelope spectrum
-        function detectBearingFaults(envelopePeaks, shaftFreq, bpfo, bpfi, bsf, ftf, tolerance) {
-            tolerance = tolerance || 0.05; // 5% frequency tolerance
+        /**
+         * Detect bearing fault frequencies in the envelope spectrum.
+         *
+         * Analyzes spectral peaks to identify characteristic bearing defect frequencies:
+         * - BPFO: Ball Pass Frequency Outer race
+         * - BPFI: Ball Pass Frequency Inner race
+         * - BSF: Ball Spin Frequency
+         * - FTF: Fundamental Train Frequency (cage)
+         * Also checks for shaft-related frequencies (1X imbalance, 2X misalignment).
+         *
+         * @param {Array<{frequency: number, magnitude: number}>} envelopePeaks - Peaks from envelope spectrum
+         * @param {number} shaftFreq - Shaft rotational frequency in Hz (RPM/60)
+         * @param {number} bpfo - Ball Pass Frequency Outer race (from bearing geometry)
+         * @param {number} bpfi - Ball Pass Frequency Inner race
+         * @param {number} bsf - Ball Spin Frequency
+         * @param {number} ftf - Fundamental Train Frequency
+         * @param {number} [frequencyTolerance=0.05] - Tolerance for frequency matching (5% default)
+         * @returns {Array<{type: string, harmonic: number, description: string, expectedFreq: number, detectedFreq: number, magnitude: number, severity: string}>}
+         */
+        function detectBearingFaults(envelopePeaks, shaftFreq, bpfo, bpfi, bsf, ftf, frequencyTolerance) {
+            frequencyTolerance = frequencyTolerance || 0.05; // 5% frequency tolerance
             var faults = [];
             
             var faultFreqs = [
@@ -831,8 +854,8 @@ module.exports = function(RED) {
                         for (var harmonic = 1; harmonic <= 3; harmonic++) {
                             var targetFreq = fault.freq * harmonic;
                             var freqDiff = Math.abs(peak.frequency - targetFreq) / targetFreq;
-                            
-                            if (freqDiff <= tolerance) {
+
+                            if (freqDiff <= frequencyTolerance) {
                                 faults.push({
                                     type: fault.name,
                                     harmonic: harmonic,
@@ -1268,41 +1291,41 @@ module.exports = function(RED) {
                 
                 if (activeMode === "fft") {
                     var value = parseFloat(msg.payload);
-                    if (isNaN(value)) {
-                        node.warn("Invalid payload: not a number");
+                    if (!Number.isFinite(value)) {
+                        node.warn("Invalid payload: not a finite number");
                         return;
                     }
                     result = processFFT(msg, value);
                     
                 } else if (activeMode === "vibration") {
                     var values = Array.isArray(msg.payload) ? msg.payload : [msg.payload];
-                    values = values.filter(function(v) { return typeof v === 'number' && !isNaN(v); });
+                    values = values.filter(function(v) { return typeof v === 'number' && Number.isFinite(v); });
                     if (values.length === 0) {
                         node.warn("No valid numeric values found");
                         return;
                     }
                     result = processVibrationWithConfig(msg, values, activeVibrationThreshold);
-                    
+
                 } else if (activeMode === "peaks") {
                     var value = parseFloat(msg.payload);
                     var timestamp = msg.timestamp || Date.now();
-                    if (isNaN(value)) {
-                        node.warn("Invalid payload: not a number");
+                    if (!Number.isFinite(value)) {
+                        node.warn("Invalid payload: not a finite number");
                         return;
                     }
                     result = processPeaksWithConfig(msg, value, timestamp, activePeakThreshold);
-                    
+
                 } else if (activeMode === "envelope") {
                     var value = parseFloat(msg.payload);
-                    if (isNaN(value)) {
-                        node.warn("Invalid payload: not a number");
+                    if (!Number.isFinite(value)) {
+                        node.warn("Invalid payload: not a finite number");
                         return;
                     }
                     result = processEnvelope(msg, value);
                 } else if (activeMode === "cepstrum") {
                     var value = parseFloat(msg.payload);
-                    if (isNaN(value)) {
-                        node.warn("Invalid payload: not a number");
+                    if (!Number.isFinite(value)) {
+                        node.warn("Invalid payload: not a finite number");
                         return;
                     }
                     result = processCepstrum(msg, value);
@@ -1324,21 +1347,16 @@ module.exports = function(RED) {
         
         node.on('close', async function(done) {
             // Save state before closing if persistence enabled
-            if (node.stateManager) {
-                try {
-                    persistCurrentState();
-                    await node.stateManager.close();
-                } catch (err) {
-                    // Ignore persistence errors during shutdown
-                }
+            if (persistence) {
+                await persistence.close();
             }
-            
+
             node.buffer = [];
             node.timestamps = [];
             node.sampleCount = 0;
             node.fftInstances = {}; // Clear FFT instance cache
             node.status({});
-            
+
             if (done) done();
         });
     }

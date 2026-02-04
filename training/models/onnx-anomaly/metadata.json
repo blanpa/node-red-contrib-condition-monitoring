@@ -1,0 +1,17 @@
+{
+  "name": "sensor-anomaly-10",
+  "version": "3.0.0",
+  "type": "onnx",
+  "inputShape": [1, 10],
+  "accuracy": 0.9997,
+  "rocAuc": 1.0,
+  "description": "10-sensor industrial monitoring with cross-correlation detection",
+  "sensorLabels": ["temp1", "temp2", "pressure1", "pressure2", "flow1", "flow2", "vibration1", "vibration2", "current", "voltage"],
+  "realisticTraining": true,
+  "expectedOutputs": {
+    "normal": "0.15-0.30",
+    "borderline": "0.40-0.60",
+    "clearAnomaly": "0.70-0.90"
+  },
+  "createdAt": "2026-02-04T12:17:53.382101"
+}

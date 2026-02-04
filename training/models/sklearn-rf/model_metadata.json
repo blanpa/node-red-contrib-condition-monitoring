@@ -1,0 +1,12 @@
+{
+  "name": "model.pkl",
+  "version": "1.0.0",
+  "type": "sklearn",
+  "path": "/data/models/sklearn-rf/model.pkl",
+  "source": "local",
+  "format": "sklearn",
+  "lastLoaded": "2026-02-04T15:07:12.584Z",
+  "stage": "production",
+  "inputShape": "[1,5]",
+  "metadata": {}
+}

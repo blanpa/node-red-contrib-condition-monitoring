@@ -78,9 +78,15 @@ module.exports = function(RED) {
         this.s3Bucket = config.s3Bucket || "";
         this.s3Prefix = config.s3Prefix || "training-data/";
         this.s3Region = config.s3Region || "eu-central-1";
-        // Credentials from node config or environment
-        this.s3AccessKeyId = config.s3AccessKeyId || process.env.AWS_ACCESS_KEY_ID || "";
-        this.s3SecretAccessKey = config.s3SecretAccessKey || process.env.AWS_SECRET_ACCESS_KEY || "";
+        // SECURITY: Credentials from environment variables only - never from node config
+        // This prevents accidental exposure of credentials in flow exports
+        this.s3AccessKeyId = process.env.AWS_ACCESS_KEY_ID || "";
+        this.s3SecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY || "";
+
+        // Warn if credentials were provided in config (deprecated)
+        if (config.s3AccessKeyId || config.s3SecretAccessKey) {
+            node.warn("S3 credentials in node config are deprecated and ignored for security. Use AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables instead.");
+        }
         
         // Data quality settings
         this.validateData = config.validateData !== false;
@@ -142,10 +148,46 @@ module.exports = function(RED) {
             }
         }
         
+        function sanitizePath(inputPath) {
+            // SECURITY: Prevent path traversal attacks
+            // Remove any parent directory references and normalize the path
+            if (!inputPath) return "";
+
+            // Replace backslashes with forward slashes
+            var normalized = inputPath.replace(/\\/g, '/');
+
+            // Remove any parent directory references (..)
+            normalized = normalized.replace(/\.\./g, '');
+
+            // Remove leading slashes (prevent absolute paths)
+            normalized = normalized.replace(/^\/+/, '');
+
+            // Remove any remaining dangerous characters
+            normalized = normalized.replace(/[<>:"|?*]/g, '');
+
+            // Split, filter empty parts and rejoin
+            var parts = normalized.split('/').filter(function(part) {
+                return part && part !== '.' && part !== '..';
+            });
+
+            return parts.join(path.sep);
+        }
+
         function getOutputDir() {
             var baseDir = getDataDir(RED);
             if (node.outputPath) {
-                return path.join(baseDir, node.outputPath);
+                var sanitized = sanitizePath(node.outputPath);
+                if (sanitized) {
+                    var fullPath = path.join(baseDir, sanitized);
+                    // SECURITY: Ensure the resolved path is still within baseDir
+                    var resolvedPath = path.resolve(fullPath);
+                    var resolvedBase = path.resolve(baseDir);
+                    if (!resolvedPath.startsWith(resolvedBase)) {
+                        node.warn("Output path attempted directory traversal. Using base directory.");
+                        return baseDir;
+                    }
+                    return fullPath;
+                }
             }
             return baseDir;
         }
@@ -833,20 +875,23 @@ module.exports = function(RED) {
                 
                 // Handle based on mode
                 if (node.mode === "streaming") {
-                    // Streaming mode: immediately append to file
+                    // Streaming mode: immediately append to file (async)
                     var outputDir = ensureOutputDir();
                     var streamFile = path.join(outputDir, node.datasetName + "_stream.jsonl");
-                    
+
                     var line = JSON.stringify({
                         timestamp: sample.timestamp,
                         features: values,
                         label: label,
                         severity: severity
                     }) + "\n";
-                    
-                    fs.appendFileSync(streamFile, line, 'utf8');
+
+                    // PERFORMANCE: Use async file I/O to avoid blocking the event loop
+                    fs.promises.appendFile(streamFile, line, 'utf8').catch(function(err) {
+                        node.warn("Failed to append to stream file: " + err.message);
+                    });
                     node.dataBuffer.push(sample);  // Also keep in buffer for stats
-                    
+
                     // Trim buffer to avoid memory issues
                     if (node.dataBuffer.length > node.bufferSize) {
                         node.dataBuffer.shift();

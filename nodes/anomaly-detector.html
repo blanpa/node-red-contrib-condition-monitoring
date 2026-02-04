@@ -40,7 +40,18 @@
             // Hysteresis
             hysteresisEnabled: { value: true },
             hysteresisPercent: { value: 10 },
-            consecutiveCount: { value: 1 }
+            consecutiveCount: { value: 1 },
+            // Adaptive Thresholds
+            adaptiveEnabled: { value: false },
+            adaptiveLearningRate: { value: 0.1 },
+            adaptiveMinSamples: { value: 10 },
+            targetFalsePositiveRate: { value: 0.05 },
+            // Batch Processing
+            batchMode: { value: false },
+            // WebSocket
+            websocketEnabled: { value: false },
+            websocketPort: { value: 1881 },
+            websocketTopic: { value: "anomaly-detector" }
         },
         inputs: 1,
         outputs: 2,
@@ -250,12 +261,12 @@
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
                         <label>Minimum Threshold</label>
-                        <input type="number" id="node-input-minThreshold" step="any" placeholder="z.B. 0">
+                        <input type="number" id="node-input-minThreshold" step="any" placeholder="e.g. 0">
                         <div class="cm-help-text">Values below this are anomalies (leave empty to disable)</div>
                     </div>
                     <div class="cm-config-item">
                         <label>Maximum Threshold</label>
-                        <input type="number" id="node-input-maxThreshold" step="any" placeholder="z.B. 100">
+                        <input type="number" id="node-input-maxThreshold" step="any" placeholder="e.g. 100">
                         <div class="cm-help-text">Values above this are anomalies (leave empty to disable)</div>
                     </div>
                     <div class="cm-config-item">
@@ -435,8 +446,122 @@
             
             <div class="cm-info-box">
                 <i class="fa fa-info-circle"></i>
-                <b>Example:</b> With Consecutive=2 and Exit=10%, anomaly triggers after 2 consecutive detections, 
+                <b>Example:</b> With Consecutive=2 and Exit=10%, anomaly triggers after 2 consecutive detections,
                 but needs 3 normal samples (2 × 1.1 = 2.2, rounded up) to clear.
+            </div>
+        </div>
+    </div>
+
+    <!-- Adaptive Thresholds -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-graduation-cap"></i> Adaptive Thresholds (Learning)</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-adaptiveEnabled">
+                    <i class="fa fa-toggle-on"></i> Enable Adaptive Learning
+                </label>
+                <input type="checkbox" id="node-input-adaptiveEnabled" style="width: auto; margin-top: 8px;">
+                <div class="cm-help-text">Automatically adjust thresholds based on operator feedback</div>
+            </div>
+
+            <div class="cm-config-grid" style="margin-top: 12px;">
+                <div class="cm-config-item">
+                    <label for="node-input-adaptiveLearningRate">
+                        <i class="fa fa-tachometer-alt"></i> Learning Rate
+                    </label>
+                    <input type="number" id="node-input-adaptiveLearningRate" step="0.01" min="0.01" max="1" value="0.1">
+                    <div class="cm-help-text">How fast to adjust (0.01-1.0, lower = slower)</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-adaptiveMinSamples">
+                        <i class="fa fa-database"></i> Min Feedback Samples
+                    </label>
+                    <input type="number" id="node-input-adaptiveMinSamples" min="5" max="100" value="10">
+                    <div class="cm-help-text">Minimum feedback before adjusting</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-targetFalsePositiveRate">
+                        <i class="fa fa-bullseye"></i> Target False Positive Rate
+                    </label>
+                    <input type="number" id="node-input-targetFalsePositiveRate" step="0.01" min="0.01" max="0.5" value="0.05">
+                    <div class="cm-help-text">Target FP rate (0.05 = 5%)</div>
+                </div>
+            </div>
+
+            <div class="cm-info-box" style="margin-top: 12px;">
+                <i class="fa fa-lightbulb"></i>
+                <b>Usage:</b> Send feedback via <code>msg.feedback = { predictedAnomaly: true, wasAnomaly: false, value: 25.5 }</code>
+                to tell the node if its prediction was correct.
+            </div>
+        </div>
+    </div>
+
+    <!-- Batch Processing -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-layer-group"></i> Batch Processing</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-batchMode">
+                    <i class="fa fa-toggle-on"></i> Enable Batch Mode
+                </label>
+                <input type="checkbox" id="node-input-batchMode" style="width: auto; margin-top: 8px;">
+                <div class="cm-help-text">Process arrays of historical data in one go</div>
+            </div>
+
+            <div class="cm-info-box" style="margin-top: 12px;">
+                <i class="fa fa-info-circle"></i>
+                <b>Batch Input:</b> Send <code>msg.payload = [1.2, 3.4, 5.6, ...]</code> or
+                <code>msg.payload = [{value: 1.2, timestamp: 123}, ...]</code><br>
+                Or set <code>msg.batch = true</code> to force batch processing.
+            </div>
+        </div>
+    </div>
+
+    <!-- WebSocket -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-broadcast-tower"></i> WebSocket (Real-Time Dashboard)</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="node-input-websocketEnabled">
+                    <i class="fa fa-toggle-on"></i> Enable WebSocket Broadcast
+                </label>
+                <input type="checkbox" id="node-input-websocketEnabled" style="width: auto; margin-top: 8px;">
+                <div class="cm-help-text">Broadcast results to external dashboards via WebSocket</div>
+            </div>
+
+            <div class="cm-config-grid" style="margin-top: 12px;">
+                <div class="cm-config-item">
+                    <label for="node-input-websocketPort">
+                        <i class="fa fa-plug"></i> WebSocket Port
+                    </label>
+                    <input type="number" id="node-input-websocketPort" min="1024" max="65535" value="1881">
+                    <div class="cm-help-text">Port for WebSocket server (default: 1881)</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-websocketTopic">
+                        <i class="fa fa-tag"></i> Topic
+                    </label>
+                    <input type="text" id="node-input-websocketTopic" value="anomaly-detector">
+                    <div class="cm-help-text">Topic for filtering subscriptions</div>
+                </div>
+            </div>
+
+            <div class="cm-info-box" style="margin-top: 12px;">
+                <i class="fa fa-code"></i>
+                <b>Connect:</b> <code>ws://localhost:1881/ws/condition-monitoring</code><br>
+                <b>Subscribe:</b> <code>{"type": "subscribe", "topics": ["anomaly-detector"]}</code>
             </div>
         </div>
     </div>
@@ -615,5 +740,117 @@ msg.payload = {
         <li><b>Process Control:</b> Use CUSUM to detect drift over time</li>
         <li><b>Sensor Validation:</b> Use Percentile for dynamic bounds</li>
         <li><b>Industrial Alarms:</b> Enable hysteresis to prevent nuisance alarms near boundaries</li>
+    </ul>
+
+    <h3>Adaptive Thresholds (Learning from Feedback)</h3>
+    <p>Enable adaptive mode to automatically adjust detection thresholds based on operator feedback.</p>
+
+    <h4>Sending Feedback</h4>
+    <pre>// Tell the node if its prediction was correct
+msg.feedback = {
+  predictedAnomaly: true,  // What the node predicted
+  wasAnomaly: false,       // What the operator says (ground truth)
+  value: 25.5              // The original value
+};
+    </pre>
+
+    <h4>How It Works</h4>
+    <ul>
+        <li>Tracks true positives, false positives, true negatives, false negatives</li>
+        <li>Calculates false positive rate and adjusts threshold accordingly</li>
+        <li>Too many false alarms → threshold loosens (less sensitive)</li>
+        <li>Too many missed anomalies → threshold tightens (more sensitive)</li>
+        <li>Adjustment limited to ±50% of original threshold</li>
+    </ul>
+
+    <h4>Output Properties (when adaptive enabled)</h4>
+    <dl>
+        <dt>msg.adaptive.feedbackCount</dt><dd>Total feedback samples received</dd>
+        <dt>msg.adaptive.truePositives/falsePositives</dt><dd>Confusion matrix counts</dd>
+        <dt>msg.adaptive.falsePositiveRate</dt><dd>Current FP rate</dd>
+        <dt>msg.adaptive.precision/recall</dt><dd>Model performance metrics</dd>
+        <dt>msg.adaptive.thresholdAdjustment</dt><dd>Current adjustment (-0.5 to +0.5)</dd>
+        <dt>msg.adaptive.adjustedThreshold</dt><dd>Actual threshold being used</dd>
+    </dl>
+
+    <h3>Batch Processing Mode</h3>
+    <p>Process arrays of historical data in a single pass for offline analysis.</p>
+
+    <h4>Batch Input</h4>
+    <pre>// Simple array of values
+msg.payload = [1.2, 3.4, 5.6, 7.8, 2.1, 9.5, ...];
+msg.batch = true;
+
+// Or array with timestamps
+msg.payload = [
+  { value: 1.2, timestamp: 1704067200000 },
+  { value: 3.4, timestamp: 1704067260000 },
+  ...
+];</pre>
+
+    <h4>Batch Output</h4>
+    <pre>{
+  "results": [
+    { "index": 0, "value": 1.2, "isAnomaly": false, "severity": "normal" },
+    { "index": 5, "value": 9.5, "isAnomaly": true, "severity": "critical" }
+  ],
+  "summary": {
+    "totalSamples": 100,
+    "anomalies": 3,
+    "warnings": 2,
+    "normal": 95,
+    "anomalyRate": 0.05,
+    "anomalyIndices": [5, 23, 87]
+  },
+  "statistics": {
+    "count": 100, "mean": 4.2, "stdDev": 1.8, "min": 0.5, "max": 9.5
+  },
+  "batchMode": true
+}</pre>
+
+    <h3>WebSocket Real-Time Dashboard</h3>
+    <p>Enable WebSocket to broadcast detection results to external dashboards in real-time.</p>
+
+    <h4>Connection</h4>
+    <pre>// JavaScript client example
+const ws = new WebSocket('ws://localhost:1881/ws/condition-monitoring');
+
+ws.onopen = () => {
+  // Subscribe to specific topics
+  ws.send(JSON.stringify({
+    type: 'subscribe',
+    topics: ['anomaly-detector', 'health']
+  }));
+};
+
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  if (data.type === 'data') {
+    console.log('Anomaly event:', data.data);
+  }
+};</pre>
+
+    <h4>Message Format</h4>
+    <pre>{
+  "type": "data",
+  "topic": "anomaly-detector",
+  "timestamp": 1704067200000,
+  "data": {
+    "nodeId": "abc123",
+    "nodeName": "Temperature Monitor",
+    "type": "single",
+    "value": 85.5,
+    "isAnomaly": true,
+    "severity": "warning",
+    "method": "zscore"
+  }
+}</pre>
+
+    <h4>Client Commands</h4>
+    <ul>
+        <li><code>{"type": "subscribe", "topics": ["topic1", "topic2"]}</code> - Subscribe to topics</li>
+        <li><code>{"type": "unsubscribe", "topics": ["topic1"]}</code> - Unsubscribe</li>
+        <li><code>{"type": "ping"}</code> - Heartbeat check</li>
+        <li><code>{"type": "getStats"}</code> - Get server statistics</li>
     </ul>
 </script>

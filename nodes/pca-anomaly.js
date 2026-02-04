@@ -1,6 +1,12 @@
 module.exports = function(RED) {
     "use strict";
-    
+
+    // Import shared statistics utilities
+    var stats = require('./utils/statistics');
+
+    // Import state persistence helper
+    var persistenceHelper = require('./utils/persistence-helper');
+
     // Import ml-pca and ml-matrix for robust PCA implementation
     var PCA = null;
     var Matrix = null;
@@ -9,14 +15,6 @@ module.exports = function(RED) {
         Matrix = require('ml-matrix').Matrix;
     } catch (err) {
         // Libraries not available - will show error on node creation
-    }
-    
-    // Import state persistence
-    var StatePersistence = null;
-    try {
-        StatePersistence = require('./state-persistence');
-    } catch (err) {
-        // State persistence not available
     }
     
     function PcaAnomalyNode(config) {
@@ -52,42 +50,20 @@ module.exports = function(RED) {
         this.t2Threshold = null;
         this.speThreshold = null;
         
-        // State persistence manager
-        this.stateManager = null;
-        
         // Debug logging helper
         var debugLog = function(message) {
             if (node.debug) {
                 node.warn("[DEBUG] " + message);
             }
         };
-        
-        // Helper to persist current state
+
+        // Initialize state persistence using helper
         // Note: ml-pca model can be serialized via toJSON()
-        function persistCurrentState() {
-            if (node.stateManager && node.isTrained && node.pcaModel) {
-                node.stateManager.setMultiple({
-                    dataBuffer: node.dataBuffer,
-                    mean: node.mean,
-                    stdDev: node.stdDev,
-                    pcaModelJSON: node.pcaModel.toJSON(),
-                    isTrained: node.isTrained,
-                    t2Threshold: node.t2Threshold,
-                    speThreshold: node.speThreshold,
-                    nComponents: node.nComponents
-                });
-            }
-        }
-        
-        // Initialize state persistence if enabled
-        if (node.persistState && StatePersistence) {
-            node.stateManager = new StatePersistence.NodeStateManager(node, {
-                stateKey: 'pcaAnomalyState',
-                saveInterval: 60000 // Save every 60 seconds
-            });
-            
-            // Load persisted state on startup
-            node.stateManager.load().then(function(state) {
+        var persistence = persistenceHelper.initializeStatePersistence(node, {
+            stateKey: 'pcaAnomalyState',
+            saveInterval: 60000,
+            debug: node.debug,
+            onStateLoaded: function(state) {
                 if (state.isTrained && state.pcaModelJSON) {
                     try {
                         node.dataBuffer = state.dataBuffer || [];
@@ -98,16 +74,36 @@ module.exports = function(RED) {
                         node.t2Threshold = state.t2Threshold;
                         node.speThreshold = state.speThreshold;
                         node.nComponents = state.nComponents || node.nComponents;
-                        
+
                         node.status({fill: "green", shape: "dot", text: "PCA - restored (trained)"});
                         debugLog("Restored trained PCA model from persistence");
                     } catch (err) {
                         debugLog("Failed to restore PCA model: " + err.message);
                     }
                 }
-            }).catch(function(err) {
-                debugLog("Failed to load persisted state: " + err.message);
-            });
+            },
+            getStateToSave: function() {
+                if (node.isTrained && node.pcaModel) {
+                    return {
+                        dataBuffer: node.dataBuffer,
+                        mean: node.mean,
+                        stdDev: node.stdDev,
+                        pcaModelJSON: node.pcaModel.toJSON(),
+                        isTrained: node.isTrained,
+                        t2Threshold: node.t2Threshold,
+                        speThreshold: node.speThreshold,
+                        nComponents: node.nComponents
+                    };
+                }
+                return null;
+            }
+        });
+
+        // Helper to persist current state
+        function persistCurrentState() {
+            if (persistence) {
+                persistence.saveNow();
+            }
         }
         
         node.status({fill: "blue", shape: "ring", text: "PCA - waiting for data"});
@@ -314,17 +310,20 @@ module.exports = function(RED) {
                 var valueNames = [];
                 
                 if (Array.isArray(msg.payload)) {
-                    values = msg.payload.filter(function(v) { return typeof v === 'number' && !isNaN(v); });
+                    values = msg.payload.filter(function(v) { return typeof v === 'number' && Number.isFinite(v); });
                     valueNames = values.map(function(v, i) { return "sensor" + i; });
                 } else if (typeof msg.payload === 'object' && msg.payload !== null) {
                     Object.keys(msg.payload).forEach(function(key) {
                         var val = msg.payload[key];
-                        if (typeof val === 'number' && !isNaN(val)) {
+                        if (typeof val === 'number' && Number.isFinite(val)) {
                             valueNames.push(key);
                             values.push(val);
-                        } else if (typeof val === 'string' && !isNaN(parseFloat(val))) {
-                            valueNames.push(key);
-                            values.push(parseFloat(val));
+                        } else if (typeof val === 'string') {
+                            var parsed = parseFloat(val);
+                            if (Number.isFinite(parsed)) {
+                                valueNames.push(key);
+                                values.push(parsed);
+                            }
                         }
                     });
                 } else {
@@ -479,22 +478,17 @@ module.exports = function(RED) {
         
         node.on('close', async function(done) {
             // Save state before closing if persistence enabled
-            if (node.stateManager) {
-                try {
-                    persistCurrentState();
-                    await node.stateManager.close();
-                } catch (err) {
-                    // Ignore persistence errors during shutdown
-                }
+            if (persistence) {
+                await persistence.close();
             }
-            
+
             node.dataBuffer = [];
             node.isTrained = false;
             node.pcaModel = null;
             node.mean = null;
             node.stdDev = null;
             node.status({});
-            
+
             if (done) done();
         });
     }

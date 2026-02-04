@@ -1,0 +1,12 @@
+{
+  "name": "model.joblib",
+  "version": "1.0.0",
+  "type": "sklearn",
+  "path": "/data/models/sklearn-gb/model.joblib",
+  "source": "local",
+  "format": "sklearn",
+  "lastLoaded": "2026-02-04T15:07:12.587Z",
+  "stage": "production",
+  "inputShape": "[1,5]",
+  "metadata": {}
+}

@@ -19,20 +19,24 @@ notebooks/*_executed.ipynb
 data/simulated/
 data/usecase_*/
 
+# Large training datasets (exceed GitHub 100 MB; regenerate or use Git LFS locally)
+training/data/usecase_hvac/hvac_dataset.csv
+training/data/usecase_pump/pump_dataset.csv
+
 # Node-RED data directory (Docker volumes) - except flows.json
 node-red-data/*
 !node-red-data/flows.json
 
 # Trained models (users should train their own or download)
-models/*.onnx
-models/*.tflite
-models/*.keras
-models/*.h5
-models/*.pkl
-models/*.joblib
-models/**/model.*
-models/**/saved_model/
-models/**/*.onnx.data
+training/models/*.onnx
+training/models/*.tflite
+training/models/*.keras
+training/models/*.h5
+training/models/*.pkl
+training/models/*.joblib
+training/models/**/model.*
+training/models/**/saved_model/
+training/models/**/*.onnx.data
 
 # Logs
 *.log

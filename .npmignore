@@ -44,10 +44,12 @@ venv/
 __pycache__/
 *.pyc
 *.pyo
-scripts/
+training/scripts/
 
-# Trained models (too large for npm)
-models/
+# Training resources (too large for npm)
+training/models/
+training/notebooks/
+training/data/
 
 # GitHub workflows
 .github/

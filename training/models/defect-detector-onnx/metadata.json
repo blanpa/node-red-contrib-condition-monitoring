@@ -1,0 +1,16 @@
+{
+  "name": "defect-detector",
+  "version": "3.0.0",
+  "type": "onnx",
+  "inputShape": [1, 64],
+  "accuracy": 0.846,
+  "rocAuc": 0.887,
+  "description": "8x8 feature map defect detection (Good, Scratch, Crack, Corrosion, Dent)",
+  "classes": ["good", "scratch", "crack", "corrosion", "dent"],
+  "realisticTraining": true,
+  "expectedOutputs": {
+    "good": "Class 0 probability > 0.5",
+    "defect": "Class 1-4 probability > 0.5"
+  },
+  "createdAt": "2026-02-04T12:19:29.000000"
+}

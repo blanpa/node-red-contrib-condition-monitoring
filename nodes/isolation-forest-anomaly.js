@@ -1,14 +1,12 @@
 module.exports = function(RED) {
     "use strict";
-    
-    // Import state persistence
-    var StatePersistence = null;
-    try {
-        StatePersistence = require('./state-persistence');
-    } catch (err) {
-        // State persistence not available
-    }
-    
+
+    // Import shared statistics utilities
+    var stats = require('./utils/statistics');
+
+    // Import state persistence helper
+    var persistenceHelper = require('./utils/persistence-helper');
+
     function IsolationForestAnomalyNode(config) {
         RED.nodes.createNode(this, config);
         var node = this;
@@ -49,48 +47,44 @@ module.exports = function(RED) {
             }
         };
         
-        // State persistence manager
-        this.stateManager = null;
-        
-        // Helper to persist current state (note: model itself can't be serialized, but buffer can)
-        function persistCurrentState() {
-            if (node.stateManager) {
-                node.stateManager.setMultiple({
-                    dataBuffer: node.dataBuffer,
-                    scoreBuffer: node.scoreBuffer,
-                    anomalyThreshold: node.anomalyThreshold,
-                    sampleCount: node.sampleCount,
-                    lastRetrainCount: node.lastRetrainCount,
-                    isTrained: node.isTrained
-                });
-            }
-        }
-        
-        // Initialize state persistence if enabled
-        if (node.persistState && StatePersistence) {
-            node.stateManager = new StatePersistence.NodeStateManager(node, {
-                stateKey: 'isolationForestState',
-                saveInterval: 60000
-            });
-            
-            // Load persisted state on startup
-            node.stateManager.load().then(function(state) {
+        // Initialize state persistence using helper
+        // Note: model itself can't be serialized, but buffer can be and model will be retrained
+        var persistence = persistenceHelper.initializeStatePersistence(node, {
+            stateKey: 'isolationForestState',
+            saveInterval: 60000,
+            debug: node.debug,
+            onStateLoaded: function(state) {
                 if (state.dataBuffer && state.dataBuffer.length > 0) {
                     node.dataBuffer = state.dataBuffer;
                     node.scoreBuffer = state.scoreBuffer || [];
                     node.anomalyThreshold = state.anomalyThreshold || 0.5;
                     node.sampleCount = state.sampleCount || 0;
                     node.lastRetrainCount = state.lastRetrainCount || 0;
-                    
+
                     // Re-train model from restored buffer
                     if (node.dataBuffer.length >= 10 && IsolationForest) {
                         trainModel(false);
                         debugLog("Restored and retrained Isolation Forest from " + node.dataBuffer.length + " buffered samples");
                     }
                 }
-            }).catch(function(err) {
-                debugLog("Failed to load persisted state: " + err.message);
-            });
+            },
+            getStateToSave: function() {
+                return {
+                    dataBuffer: node.dataBuffer,
+                    scoreBuffer: node.scoreBuffer,
+                    anomalyThreshold: node.anomalyThreshold,
+                    sampleCount: node.sampleCount,
+                    lastRetrainCount: node.lastRetrainCount,
+                    isTrained: node.isTrained
+                };
+            }
+        });
+
+        // Helper to persist current state
+        function persistCurrentState() {
+            if (persistence) {
+                persistence.saveNow();
+            }
         }
         
         function trainModel(isIncremental) {
@@ -178,9 +172,10 @@ module.exports = function(RED) {
             try {
                 // Extract value from message
                 var value = parseFloat(msg.payload);
-                
-                if (isNaN(value)) {
-                    node.error("Payload is not a valid number", msg);
+
+                // Validate value is a finite number (catches NaN, Infinity, -Infinity)
+                if (!Number.isFinite(value)) {
+                    node.error("Payload is not a valid finite number", msg);
                     return;
                 }
                 
@@ -210,17 +205,17 @@ module.exports = function(RED) {
                 
                 // If Isolation Forest is not available or not trained, use simple fallback method
                 if (!IsolationForest || !node.isTrained) {
-                    // Fallback: Z-Score based detection
+                    // Fallback: Z-Score based detection using shared utilities
                     if (node.dataBuffer.length < 2) {
                         node.send(msg);
                         return;
                     }
-                    
+
                     var values = node.dataBuffer.map(d => d.value);
-                    var mean = values.reduce((a, b) => a + b, 0) / values.length;
-                    var variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
-                    var stdDev = Math.sqrt(variance);
-                    var zScore = stdDev === 0 ? 0 : (value - mean) / stdDev;
+                    var zScoreResult = stats.calculateZScore(value, values);
+                    var zScore = zScoreResult.zScore;
+                    var mean = zScoreResult.mean;
+                    var stdDev = zScoreResult.stdDev;
                     var isAnomaly = Math.abs(zScore) > 3.0;
                     
                     var outputMsg = {
@@ -312,20 +307,15 @@ module.exports = function(RED) {
         
         node.on('close', async function(done) {
             // Save state before closing if persistence enabled
-            if (node.stateManager) {
-                try {
-                    persistCurrentState();
-                    await node.stateManager.close();
-                } catch (err) {
-                    // Ignore persistence errors during shutdown
-                }
+            if (persistence) {
+                await persistence.close();
             }
-            
+
             node.dataBuffer = [];
             node.scoreBuffer = [];
             node.model = null;
             node.isTrained = false;
-            
+
             if (done) done();
         });
     }

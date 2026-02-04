@@ -19,7 +19,7 @@ class PythonBridgeManager extends EventEmitter {
         super();
         
         this.pythonPath = options.pythonPath || 'python3';
-        this.bridgeScript = options.bridgeScript || path.join(__dirname, 'python_bridge.py');
+        this.bridgeScript = options.bridgeScript || path.join(__dirname, 'python', 'python_bridge.py');
         this.startupTimeout = options.startupTimeout || 30000;
         this.requestTimeout = options.requestTimeout || 60000;
         

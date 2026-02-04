@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir max 2>/dev/null || echo "MAX Engine not available
 WORKDIR /app
 
 # Copy the bridge script
-COPY nodes/max_bridge.py /app/max_bridge.py
+COPY nodes/python/max_bridge.py /app/max_bridge.py
 
 # Create models directory
 RUN mkdir -p /models

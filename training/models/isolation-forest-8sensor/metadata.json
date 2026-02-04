@@ -1,0 +1,47 @@
+{
+  "name": "isolation-forest-8sensor",
+  "version": "3.0.0",
+  "type": "sklearn",
+  "task": "anomaly_detection",
+  "inputShape": [
+    1,
+    8
+  ],
+  "accuracy": 0.850625,
+  "contamination": 0.15,
+  "nEstimators": 100,
+  "features": [
+    "temp",
+    "vibration",
+    "pressure",
+    "power",
+    "speed",
+    "flow",
+    "current",
+    "humidity"
+  ],
+  "normalExample": [
+    0.4916010797023773,
+    0.2697063386440277,
+    0.5451476573944092,
+    0.537122905254364,
+    0.5712044835090637,
+    0.5410032272338867,
+    0.441956490278244,
+    0.33815234899520874
+  ],
+  "anomalyExample": [
+    0.5150293111801147,
+    0.2505313754081726,
+    0.5800666213035583,
+    0.4606393575668335,
+    0.5272659659385681,
+    0.471940815448761,
+    0.5597027540206909,
+    0.40106239914894104
+  ],
+  "description": "Isolation Forest for 8-sensor motor/pump anomaly detection",
+  "output": "decision_function returns anomaly score (negative = anomaly)",
+  "realisticTraining": true,
+  "createdAt": "2026-02-04T12:22:53.720037"
+}

@@ -1,0 +1,17 @@
+{
+  "name": "sensor-anomaly-5",
+  "version": "3.0.0",
+  "type": "onnx",
+  "description": "5-sensor industrial anomaly detection (temp, pressure, vibration, flow, current)",
+  "inputShape": [
+    1,
+    5
+  ],
+  "trainedOn": "Realistic synthetic data with overlapping distributions",
+  "createdAt": "2026-02-04T12:17:07.251867",
+  "framework": "onnx",
+  "realisticTraining": true,
+  "expectedAccuracy": "75-85% (realistic, not overfit)",
+  "accuracy": 0.9975000023841858,
+  "rocAuc": 0.999956
+}

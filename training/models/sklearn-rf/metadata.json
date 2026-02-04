@@ -1,0 +1,17 @@
+{
+  "name": "random-forest-anomaly",
+  "version": "3.0.0",
+  "type": "sklearn-rf",
+  "description": "Random Forest classifier for sensor anomaly detection - REALISTIC",
+  "inputShape": [
+    1,
+    5
+  ],
+  "trainedOn": "Realistic synthetic data with overlapping distributions",
+  "createdAt": "2026-02-04T12:19:18.546025",
+  "framework": "sklearn",
+  "realisticTraining": true,
+  "expectedAccuracy": "75-85% (realistic, not overfit)",
+  "accuracy": 0.9965,
+  "rocAuc": 0.9999506666666667
+}

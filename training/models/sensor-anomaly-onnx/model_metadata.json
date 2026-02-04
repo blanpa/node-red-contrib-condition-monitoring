@@ -1,0 +1,56 @@
+{
+  "name": "motor-pump-anomaly-8sensor",
+  "version": "3.0.0",
+  "type": "onnx",
+  "inputShape": "[1,8]",
+  "accuracy": 0.9049999713897705,
+  "rocAuc": 0.9360694444444446,
+  "normalExample": [
+    0.4190489947795868,
+    0.2704735994338989,
+    0.46996814012527466,
+    0.4799124598503113,
+    0.5964959263801575,
+    0.6034093499183655,
+    0.40682557225227356,
+    0.406644344329834
+  ],
+  "anomalyExample": [
+    0.4713882505893707,
+    0.2591409683227539,
+    0.4312567412853241,
+    0.4829132854938507,
+    0.5472514033317566,
+    0.44621169567108154,
+    0.5087703466415405,
+    0.4429764449596405
+  ],
+  "description": "8-sensor motor/pump monitoring: bearing failure, overload, cavitation (REALISTIC)",
+  "anomalyTypes": [
+    "borderline",
+    "bearing_failure",
+    "motor_overload",
+    "pump_cavitation"
+  ],
+  "sensorLabels": [
+    "temp",
+    "vibration",
+    "pressure",
+    "power",
+    "speed",
+    "flow",
+    "current",
+    "humidity"
+  ],
+  "realisticTraining": true,
+  "expectedOutputs": {
+    "normal": "0.15-0.30",
+    "borderline": "0.40-0.60",
+    "clearAnomaly": "0.70-0.90"
+  },
+  "createdAt": "2026-02-04T12:18:55.011499",
+  "format": "onnx",
+  "lastLoaded": "2026-02-04T15:07:04.085Z",
+  "stage": "production",
+  "metadata": {}
+}

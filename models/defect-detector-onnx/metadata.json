@@ -1,8 +1,0 @@
-{
-  "name": "defect-detector",
-  "inputShape": [
-    1,
-    64
-  ],
-  "accuracy": 0.7730000019073486
-}

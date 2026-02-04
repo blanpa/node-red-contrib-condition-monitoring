@@ -15,7 +15,7 @@ services:
       - ./nodes:/data/node_modules/node-red-contrib-condition-monitoring/nodes:ro
       - ./package.json:/data/node_modules/node-red-contrib-condition-monitoring/package.json:ro
       # ML Models Verzeichnis
-      - ./models:/data/models:ro
+      - ./models:/data/models:rw
     environment:
       - NODE_OPTIONS=--max_old_space_size=4096
       - NODE_ENV=development
@@ -69,7 +69,7 @@ services:
       - "8765:8765"
     volumes:
       - ./models:/models:ro
-      - ./nodes/max_bridge.py:/app/max_bridge.py:ro
+      - ./nodes/python/max_bridge.py:/app/max_bridge.py:ro
       - max-cache:/root/.cache/max
     environment:
       - MAX_BRIDGE_PORT=8765

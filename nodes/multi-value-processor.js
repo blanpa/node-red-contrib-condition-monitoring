@@ -1,6 +1,9 @@
 module.exports = function(RED) {
     "use strict";
-    
+
+    // Import shared statistics utilities
+    var stats = require('./utils/statistics');
+
     // Import ml-matrix for robust matrix operations (Mahalanobis distance)
     var Matrix = null;
     try {
@@ -8,7 +11,7 @@ module.exports = function(RED) {
     } catch (err) {
         // ml-matrix not available - will use fallback implementation
     }
-    
+
     function MultiValueProcessorNode(config) {
         RED.nodes.createNode(this, config);
         var node = this;
@@ -55,88 +58,22 @@ module.exports = function(RED) {
         
         // Initial status
         node.status({fill: "blue", shape: "ring", text: node.mode + " mode"});
-        
-        // Helper functions
-        function calculateMean(values) {
-            return values.reduce((a, b) => a + b, 0) / values.length;
-        }
-        
-        function calculateStdDev(values, mean) {
-            var variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
-            return Math.sqrt(variance);
-        }
-        
-        function calculateZScore(value, values) {
-            if (values.length < 2) return { zScore: 0, mean: value, stdDev: 0 };
-            var mean = calculateMean(values);
-            var stdDev = calculateStdDev(values, mean);
-            var zScore = stdDev === 0 ? 0 : (value - mean) / stdDev;
-            return { zScore: zScore, mean: mean, stdDev: stdDev };
-        }
-        
+
+        // Use shared statistics utilities
+        var calculateMean = stats.calculateMean;
+        var calculateStdDev = stats.calculateStdDev;
+        var calculateZScore = stats.calculateZScore;
+        var calculatePearsonCorrelation = stats.calculatePearsonCorrelation;
+        var calculateSpearmanCorrelation = stats.calculateSpearmanCorrelation;
+
+        // IQR calculation (returns compatible format)
         function calculateIQR(values) {
-            var sorted = values.slice().sort((a, b) => a - b);
-            var q1Index = Math.floor(sorted.length * 0.25);
-            var q3Index = Math.floor(sorted.length * 0.75);
+            var quartiles = stats.calculateQuartiles(values);
             return {
-                q1: sorted[q1Index],
-                q3: sorted[q3Index],
-                iqr: sorted[q3Index] - sorted[q1Index]
+                q1: quartiles.q1,
+                q3: quartiles.q3,
+                iqr: quartiles.iqr
             };
-        }
-        
-        function calculatePearsonCorrelation(x, y) {
-            var n = x.length;
-            if (n !== y.length || n === 0) return null;
-            
-            var meanX = calculateMean(x);
-            var meanY = calculateMean(y);
-            
-            var covariance = 0;
-            var stdX = 0;
-            var stdY = 0;
-            
-            for (var i = 0; i < n; i++) {
-                var dx = x[i] - meanX;
-                var dy = y[i] - meanY;
-                covariance += dx * dy;
-                stdX += dx * dx;
-                stdY += dy * dy;
-            }
-            
-            stdX = Math.sqrt(stdX);
-            stdY = Math.sqrt(stdY);
-            
-            if (stdX === 0 || stdY === 0) return 0;
-            return covariance / (stdX * stdY);
-        }
-        
-        function getRanks(values) {
-            var indexed = values.map((value, index) => ({value, index}));
-            indexed.sort((a, b) => a.value - b.value);
-            
-            var ranks = new Array(values.length);
-            var i = 0;
-            
-            while (i < indexed.length) {
-                var j = i;
-                while (j < indexed.length && indexed[j].value === indexed[i].value) {
-                    j++;
-                }
-                var avgRank = (i + j + 1) / 2;
-                for (var k = i; k < j; k++) {
-                    ranks[indexed[k].index] = avgRank;
-                }
-                i = j;
-            }
-            
-            return ranks;
-        }
-        
-        function calculateSpearmanCorrelation(x, y) {
-            var ranksX = getRanks(x);
-            var ranksY = getRanks(y);
-            return calculatePearsonCorrelation(ranksX, ranksY);
         }
         
         // Cross-Correlation - finds time lag between two signals
@@ -192,63 +129,120 @@ module.exports = function(RED) {
             };
         }
         
-        // Mahalanobis distance calculation using ml-matrix (numerically stable)
-        function calculateMahalanobisDistance(sample, mean, covMatrix) {
-            var n = sample.length;
-            
-            // Calculate difference from mean
-            var diff = [];
-            for (var i = 0; i < n; i++) {
-                diff.push(sample[i] - mean[i]);
+        /**
+         * Calculate Mahalanobis distance for multivariate anomaly detection.
+         *
+         * Mahalanobis distance measures how far a point is from the center
+         * of a distribution, accounting for correlations between variables.
+         * Uses ml-matrix for numerically stable matrix inversion when available.
+         *
+         * @param {number[]} sample - Current sample values (one per sensor)
+         * @param {number[]} meanVector - Mean values for each dimension
+         * @param {number[][]} covMatrix - Covariance matrix (numDimensions x numDimensions)
+         * @returns {number|null} Mahalanobis distance, or null if calculation fails
+         *
+         * @example
+         * var distance = calculateMahalanobisDistance(
+         *     [25.5, 100.2, 45.0],  // Current sensor readings
+         *     [25.0, 100.0, 45.5],  // Historical means
+         *     [[1, 0.5, 0], [0.5, 2, 0.3], [0, 0.3, 1]]  // Covariance matrix
+         * );
+         */
+        function calculateMahalanobisDistance(sample, meanVector, covMatrix) {
+            var numDimensions = sample.length;
+
+            // STABILITY: Validate inputs
+            if (!sample || !meanVector || !covMatrix || numDimensions === 0) {
+                debugLog("Mahalanobis: Invalid inputs");
+                return null;
             }
-            
+
+            // Calculate difference from mean
+            var diffFromMean = [];
+            for (var dimIdx = 0; dimIdx < numDimensions; dimIdx++) {
+                var diff = sample[dimIdx] - meanVector[dimIdx];
+                // STABILITY: Check for NaN/Infinity in difference
+                if (!Number.isFinite(diff)) {
+                    debugLog("Mahalanobis: Non-finite difference at index " + dimIdx);
+                    return null;
+                }
+                diffFromMean.push(diff);
+            }
+
+            // STABILITY: Check covariance matrix for NaN/Infinity
+            for (var rowIdx = 0; rowIdx < numDimensions; rowIdx++) {
+                for (var colIdx = 0; colIdx < numDimensions; colIdx++) {
+                    if (!Number.isFinite(covMatrix[rowIdx][colIdx])) {
+                        debugLog("Mahalanobis: Non-finite covariance at [" + rowIdx + "][" + colIdx + "]");
+                        return null;
+                    }
+                }
+            }
+
             // Use ml-matrix for robust matrix inversion if available
             if (Matrix) {
                 try {
                     // Create Matrix objects
                     var covMat = new Matrix(covMatrix);
-                    var diffVec = Matrix.columnVector(diff);
-                    
-                    // Add regularization to avoid singular matrix issues
-                    var regularization = 1e-6;
-                    for (var i = 0; i < n; i++) {
-                        covMat.set(i, i, covMat.get(i, i) + regularization);
+                    var diffVec = Matrix.columnVector(diffFromMean);
+
+                    // STABILITY: Add regularization proportional to variance to avoid singular matrix
+                    // Use adaptive regularization based on matrix condition
+                    var maxDiagonalValue = 0;
+                    for (var idx = 0; idx < numDimensions; idx++) {
+                        maxDiagonalValue = Math.max(maxDiagonalValue, Math.abs(covMat.get(idx, idx)));
                     }
-                    
-                    // Use pseudoInverse for better numerical stability
-                    var invCov = covMat.pseudoInverse();
-                    
+                    var regularization = Math.max(1e-6, maxDiagonalValue * 1e-6);
+                    for (var idx = 0; idx < numDimensions; idx++) {
+                        covMat.set(idx, idx, covMat.get(idx, idx) + regularization);
+                    }
+
+                    // STABILITY: Always use pseudoInverse for robustness
+                    var inverseCov = covMat.pseudoInverse();
+
                     // Calculate (x-μ)' * Σ^-1 * (x-μ)
-                    var temp = invCov.mmul(diffVec);
-                    var d2 = diffVec.transpose().mmul(temp).get(0, 0);
-                    
-                    return Math.sqrt(Math.max(0, d2));
+                    var tempResult = inverseCov.mmul(diffVec);
+                    var squaredDistance = diffVec.transpose().mmul(tempResult).get(0, 0);
+
+                    // STABILITY: Ensure non-negative result
+                    if (!Number.isFinite(squaredDistance) || squaredDistance < 0) {
+                        debugLog("Mahalanobis: Invalid squared distance: " + squaredDistance);
+                        return null;
+                    }
+
+                    return Math.sqrt(squaredDistance);
                 } catch (err) {
                     // Fall back to manual implementation
                     debugLog("ml-matrix failed, using fallback: " + err.message);
                 }
             }
-            
-            // Fallback: Manual implementation
-            var invCov = invertMatrixFallback(covMatrix);
-            if (!invCov) return null;
-            
+
+            // Fallback: Manual implementation with improved stability
+            var inverseCov = invertMatrixFallback(covMatrix);
+            if (!inverseCov) return null;
+
             // Calculate (x-μ)' * Σ^-1 * (x-μ)
-            var temp = [];
-            for (var i = 0; i < n; i++) {
-                var sum = 0;
-                for (var j = 0; j < n; j++) {
-                    sum += diff[j] * invCov[j][i];
+            var tempVector = [];
+            for (var rowIdx = 0; rowIdx < numDimensions; rowIdx++) {
+                var rowSum = 0;
+                for (var colIdx = 0; colIdx < numDimensions; colIdx++) {
+                    rowSum += diffFromMean[colIdx] * inverseCov[colIdx][rowIdx];
                 }
-                temp.push(sum);
+                tempVector.push(rowSum);
             }
-            
-            var d2 = 0;
-            for (var i = 0; i < n; i++) {
-                d2 += temp[i] * diff[i];
+
+            var squaredDistance = 0;
+            for (var idx = 0; idx < numDimensions; idx++) {
+                squaredDistance += tempVector[idx] * diffFromMean[idx];
             }
-            
-            return Math.sqrt(Math.max(0, d2));
+
+            // STABILITY: Ensure non-negative and finite result
+            if (!Number.isFinite(squaredDistance) || squaredDistance < 0) {
+                debugLog("Mahalanobis fallback: Invalid squared distance: " + squaredDistance);
+                return null;
+            }
+
+            return Math.sqrt(squaredDistance);
         }
         
         // Fallback matrix inversion using Gauss-Jordan (for when ml-matrix is not available)
@@ -368,11 +362,8 @@ module.exports = function(RED) {
             return { means: means, covariance: cov };
         }
         
-        function calculateMedian(values) {
-            var sorted = values.slice().sort((a, b) => a - b);
-            var mid = Math.floor(sorted.length / 2);
-            return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-        }
+        // Use shared median calculation
+        var calculateMedian = stats.calculateMedian;
         
         // Aggregate mode - reduces multiple values to a single value
         function processAggregate(msg) {

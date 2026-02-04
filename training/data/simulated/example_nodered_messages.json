@@ -1,0 +1,57 @@
+[
+  {
+    "payload": 0.07884615600917738,
+    "topic": "vib_radial/mm/s",
+    "_msgid": "sim_20260118180957983871",
+    "config": {
+      "method": "zscore",
+      "windowSize": 50,
+      "zscoreThreshold": 3.0
+    },
+    "timestamp": 0.0
+  },
+  {
+    "payload": 0.6550611889145996,
+    "topic": "vib_radial/mm/s",
+    "_msgid": "sim_20260118180957983902",
+    "config": {
+      "method": "zscore",
+      "windowSize": 50,
+      "zscoreThreshold": 3.0
+    },
+    "timestamp": 1.0002000400080016
+  },
+  {
+    "payload": 0.35858769056944856,
+    "topic": "vib_radial/mm/s",
+    "_msgid": "sim_20260118180957983911",
+    "config": {
+      "method": "zscore",
+      "windowSize": 50,
+      "zscoreThreshold": 3.0
+    },
+    "timestamp": 2.000400080016003
+  },
+  {
+    "payload": -1.0023503693705953,
+    "topic": "vib_radial/mm/s",
+    "_msgid": "sim_20260118180957983916",
+    "config": {
+      "method": "zscore",
+      "windowSize": 50,
+      "zscoreThreshold": 3.0
+    },
+    "timestamp": 3.000600120024005
+  },
+  {
+    "payload": -0.07181523438419656,
+    "topic": "vib_radial/mm/s",
+    "_msgid": "sim_20260118180957983921",
+    "config": {
+      "method": "zscore",
+      "windowSize": 50,
+      "zscoreThreshold": 3.0
+    },
+    "timestamp": 4.000800160032006
+  }
+]

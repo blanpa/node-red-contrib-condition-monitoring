@@ -1,0 +1,40 @@
+{
+  "version": "3.0.0",
+  "inputShape": [
+    1,
+    5
+  ],
+  "inputFeatures": [
+    "temperature",
+    "vibration",
+    "pressure",
+    "rpm",
+    "current"
+  ],
+  "createdAt": "2026-01-31T20:02:19.620471",
+  "normalExample": {
+    "temperature": 45.0,
+    "vibration": 0.5,
+    "pressure": 100.0,
+    "rpm": 1500.0,
+    "current": 10.0
+  },
+  "borderlineExample": {
+    "temperature": 55.0,
+    "vibration": 0.9,
+    "pressure": 90.0,
+    "rpm": 1450.0,
+    "current": 12.0
+  },
+  "anomalyExample": {
+    "temperature": 70.0,
+    "vibration": 2.5,
+    "pressure": 65.0,
+    "rpm": 1350.0,
+    "current": 16.0
+  },
+  "name": "tflite-anomaly",
+  "type": "tflite",
+  "accuracy": 0.9139999747276306,
+  "requiresNormalization": true
+}

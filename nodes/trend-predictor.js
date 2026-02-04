@@ -1,14 +1,12 @@
 module.exports = function(RED) {
     "use strict";
-    
-    // Import state persistence
-    var StatePersistence = null;
-    try {
-        StatePersistence = require('./state-persistence');
-    } catch (err) {
-        // State persistence not available
-    }
-    
+
+    // Import shared statistics utilities
+    var stats = require('./utils/statistics');
+
+    // Import state persistence helper
+    var persistenceHelper = require('./utils/persistence-helper');
+
     function TrendPredictorNode(config) {
         RED.nodes.createNode(this, config);
         var node = this;
@@ -55,44 +53,39 @@ module.exports = function(RED) {
         this.previousTimestamp = null;
         this.rocHistory = [];
         
-        // State persistence manager
-        this.stateManager = null;
-        
-        // Helper to persist current state
-        function persistCurrentState() {
-            if (node.stateManager) {
-                node.stateManager.setMultiple({
-                    buffer: node.buffer,
-                    timestamps: node.timestamps,
-                    previousValue: node.previousValue,
-                    previousTimestamp: node.previousTimestamp,
-                    rocHistory: node.rocHistory
-                });
-            }
-        }
-        
-        // Initialize state persistence if enabled
-        if (node.persistState && StatePersistence) {
-            node.stateManager = new StatePersistence.NodeStateManager(node, {
-                stateKey: 'trendPredictorState',
-                saveInterval: 30000 // Save every 30 seconds
-            });
-            
-            // Load persisted state on startup
-            node.stateManager.load().then(function(state) {
+        // Initialize state persistence using helper
+        var persistence = persistenceHelper.initializeStatePersistence(node, {
+            stateKey: 'trendPredictorState',
+            saveInterval: 30000,
+            debug: node.debug,
+            onStateLoaded: function(state) {
                 if (state.buffer && state.buffer.length > 0) {
                     node.buffer = state.buffer;
                     node.timestamps = state.timestamps || [];
                     node.previousValue = state.previousValue;
                     node.previousTimestamp = state.previousTimestamp;
                     node.rocHistory = state.rocHistory || [];
-                    
+
                     debugLog("Restored " + node.buffer.length + " buffered values from persistence");
                     node.status({fill: "green", shape: "dot", text: node.mode + " - restored (" + node.buffer.length + ")"});
                 }
-            }).catch(function(err) {
-                debugLog("Failed to load persisted state: " + err.message);
-            });
+            },
+            getStateToSave: function() {
+                return {
+                    buffer: node.buffer,
+                    timestamps: node.timestamps,
+                    previousValue: node.previousValue,
+                    previousTimestamp: node.previousTimestamp,
+                    rocHistory: node.rocHistory
+                };
+            }
+        });
+
+        // Helper to persist current state
+        function persistCurrentState() {
+            if (persistence) {
+                persistence.saveNow();
+            }
         }
         
         node.status({fill: "blue", shape: "ring", text: node.mode + " mode"});
@@ -338,12 +331,73 @@ module.exports = function(RED) {
             return null;
         }
         
-        // Calculate RUL with confidence intervals
+        /**
+         * Calculate Remaining Useful Life (RUL) with confidence intervals.
+         *
+         * Estimates time until a monitored value reaches a failure threshold using
+         * one of several degradation models: linear, exponential, or Weibull.
+         *
+         * The function performs:
+         * 1. Input validation (rejects NaN/Infinity values)
+         * 2. Median filtering to remove outliers
+         * 3. Moving average smoothing to reduce noise
+         * 4. Robust slope estimation using Theil-Sen estimator
+         * 5. RUL calculation based on selected degradation model
+         * 6. Confidence interval estimation
+         *
+         * @param {number[]} data - Array of sensor readings (degradation indicator)
+         * @param {number[]} timestamps - Array of timestamps (ms since epoch)
+         * @param {number} failureThreshold - Value at which failure is defined
+         * @param {string} method - Degradation model: 'linear', 'exponential', or 'weibull'
+         * @param {number} confidenceLevel - Confidence level for intervals (e.g., 0.95)
+         * @returns {Object|null} RUL result object or null if calculation fails
+         * @returns {number} returns.rul - Estimated time to failure in ms
+         * @returns {number} returns.rulLower - Lower confidence bound
+         * @returns {number} returns.rulUpper - Upper confidence bound
+         * @returns {number} returns.confidence - Confidence score (0-1)
+         * @returns {string} returns.status - 'healthy', 'warning', 'critical', 'failed', or 'stable'
+         * @returns {number} returns.percentDegraded - Percentage of degradation (0-100)
+         * @returns {number} returns.degradationRate - Rate of degradation per sample
+         * @returns {string} returns.trend - Trend direction: 'improving', 'stable', 'degrading'
+         * @returns {Object} [returns.weibull] - Weibull-specific parameters (if method='weibull')
+         */
         function calculateRUL(data, timestamps, failureThreshold, method, confidenceLevel) {
             if (data.length < 5) return null;
-            
+
             var n = data.length;
             var currentValue = data[n - 1];
+
+            // STABILITY: Validate inputs to prevent NaN propagation
+            if (!Number.isFinite(currentValue)) {
+                debugLog("RUL: Current value is not finite: " + currentValue);
+                return null;
+            }
+
+            if (!Number.isFinite(failureThreshold)) {
+                debugLog("RUL: Failure threshold is not finite: " + failureThreshold);
+                return null;
+            }
+
+            // STABILITY: Filter out any NaN/Infinity values from data
+            var validData = [];
+            var validTimestamps = [];
+            for (var i = 0; i < data.length; i++) {
+                if (Number.isFinite(data[i]) && Number.isFinite(timestamps[i])) {
+                    validData.push(data[i]);
+                    validTimestamps.push(timestamps[i]);
+                }
+            }
+
+            if (validData.length < 5) {
+                debugLog("RUL: Not enough valid data points after filtering: " + validData.length);
+                return null;
+            }
+
+            // Use filtered data from here
+            data = validData;
+            timestamps = validTimestamps;
+            n = data.length;
+            currentValue = data[n - 1];
             
             // Already failed?
             if (currentValue >= failureThreshold) {
@@ -486,22 +540,34 @@ module.exports = function(RED) {
             var status = 'healthy';
             if (timeToFailure < avgInterval * 10) status = 'critical';
             else if (timeToFailure < avgInterval * 50) status = 'warning';
-            
-            return {
-                rul: timeToFailure,
-                rulLower: Math.max(0, rulLower),
-                rulUpper: rulUpper,
-                confidence: Math.max(0, Math.min(1, confidence)),
+
+            // STABILITY: Ensure all returned values are valid numbers
+            var rulResult = {
+                rul: Number.isFinite(timeToFailure) ? timeToFailure : null,
+                rulLower: Number.isFinite(rulLower) ? Math.max(0, rulLower) : null,
+                rulUpper: Number.isFinite(rulUpper) ? rulUpper : null,
+                confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
                 status: status,
-                percentDegraded: Math.min(100, (smoothedCurrentValue / failureThreshold) * 100),
-                degradationRate: slope,
+                percentDegraded: Number.isFinite(smoothedCurrentValue / failureThreshold) ?
+                    Math.min(100, (smoothedCurrentValue / failureThreshold) * 100) : null,
+                degradationRate: Number.isFinite(slope) ? slope : null,
                 trend: result.trend,
                 model: method,
                 weibull: weibullInfo,
-                smoothedValue: smoothedCurrentValue,
-                rawSlope: linearSlopeValue,
-                robustSlope: robustSlopeValue
+                smoothedValue: Number.isFinite(smoothedCurrentValue) ? smoothedCurrentValue : null,
+                rawSlope: Number.isFinite(linearSlopeValue) ? linearSlopeValue : null,
+                robustSlope: Number.isFinite(robustSlopeValue) ? robustSlopeValue : null
             };
+
+            // STABILITY: If RUL is null/invalid, treat as stable
+            if (rulResult.rul === null) {
+                rulResult.rul = Infinity;
+                rulResult.status = 'stable';
+                rulResult.confidence = 0.3; // Low confidence for fallback
+                debugLog("RUL: timeToFailure was invalid, treating as stable");
+            }
+
+            return rulResult;
         }
         
         // Process RUL mode (uses node defaults)
@@ -1010,15 +1076,10 @@ module.exports = function(RED) {
         
         node.on('close', async function(done) {
             // Save state before closing if persistence enabled
-            if (node.stateManager) {
-                try {
-                    persistCurrentState();
-                    await node.stateManager.close();
-                } catch (err) {
-                    // Ignore persistence errors during shutdown
-                }
+            if (persistence) {
+                await persistence.close();
             }
-            
+
             node.buffer = [];
             node.timestamps = [];
             node.previousValue = null;

@@ -20,49 +20,63 @@ module.exports = function(RED) {
     let pythonBridge = null;
     let pythonBridgeReady = false;
     let pythonBridgeError = null;
-    
+    let pythonBridgeStartPromise = null; // Track pending startup
+
     // Global MAX Engine bridge instance
     let maxBridge = null;
     let maxBridgeReady = false;
     let maxBridgeError = null;
-    
+
     // Initialize Python bridge on first node creation
     async function ensurePythonBridge() {
+        // Already ready - return immediately
         if (pythonBridge && pythonBridgeReady) {
             return pythonBridge;
         }
-        
+
+        // Previous startup failed - throw cached error
         if (pythonBridgeError) {
             throw pythonBridgeError;
         }
-        
+
+        // Startup in progress - wait for it
+        if (pythonBridgeStartPromise) {
+            await pythonBridgeStartPromise;
+            if (pythonBridgeReady) return pythonBridge;
+            if (pythonBridgeError) throw pythonBridgeError;
+        }
+
+        // Start the bridge
         if (!pythonBridge) {
             pythonBridge = getGlobalBridge();
-            
+
             pythonBridge.on('stderr', (msg) => {
                 // Log Python stderr for debugging
                 if (msg && !msg.includes('FutureWarning') && !msg.includes('DeprecationWarning')) {
                     RED.log.debug('[PythonBridge] ' + msg);
                 }
             });
-            
+
             pythonBridge.on('exit', (info) => {
                 RED.log.warn('[PythonBridge] Exited: ' + JSON.stringify(info));
                 pythonBridgeReady = false;
+                pythonBridgeStartPromise = null;
                 // Will auto-restart on next request
             });
-            
-            try {
-                await pythonBridge.start();
+
+            // Create a promise that all callers can await
+            pythonBridgeStartPromise = pythonBridge.start().then(() => {
                 pythonBridgeReady = true;
                 RED.log.info('[PythonBridge] Started successfully');
-            } catch (err) {
+            }).catch((err) => {
                 pythonBridgeError = err;
                 pythonBridge = null;
                 throw err;
-            }
+            });
+
+            await pythonBridgeStartPromise;
         }
-        
+
         return pythonBridge;
     }
     
@@ -1479,8 +1493,9 @@ module.exports = function(RED) {
                 
                 // Prepare input
                 const preparedInput = prepareInput(inputData, node.preprocessMode);
-                
+
                 // Run inference
+                node.status({ fill: "blue", shape: "dot", text: "inferencing..." });
                 let prediction;
                 const startTime = Date.now();
                 
@@ -1621,7 +1636,11 @@ module.exports = function(RED) {
                 
                 send(outputMsg);
                 done();
-                
+
+                // Update status with inference time
+                node.inferenceCount = (node.inferenceCount || 0) + 1;
+                node.status({ fill: "green", shape: "dot", text: inferenceTime + "ms | #" + node.inferenceCount });
+
             } catch (err) {
                 node.status({ fill: "red", shape: "dot", text: err.message.substring(0, 30) });
                 done(err);

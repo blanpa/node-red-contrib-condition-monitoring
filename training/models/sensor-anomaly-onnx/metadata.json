@@ -1,0 +1,18 @@
+{
+  "name": "motor-pump-anomaly-8sensor",
+  "version": "3.0.0",
+  "type": "onnx",
+  "inputShape": [1, 8],
+  "accuracy": 0.90,
+  "rocAuc": 0.94,
+  "description": "8-sensor motor/pump monitoring with realistic uncertainty",
+  "sensorLabels": ["temp", "vibration", "pressure", "power", "speed", "flow", "current", "humidity"],
+  "anomalyTypes": ["borderline", "bearing_failure", "motor_overload", "pump_cavitation"],
+  "realisticTraining": true,
+  "expectedOutputs": {
+    "normal": "0.15-0.40",
+    "borderline": "0.40-0.70",
+    "clearAnomaly": "0.70-0.90"
+  },
+  "createdAt": "2026-02-02T15:49:49.213031"
+}

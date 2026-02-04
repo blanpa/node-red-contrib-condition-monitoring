@@ -1,23 +1,24 @@
 module.exports = function(RED) {
     "use strict";
-    
-    // Import state persistence
-    var StatePersistence = null;
-    try {
-        StatePersistence = require('./state-persistence');
-    } catch (err) {
-        // State persistence not available
-    }
-    
+
+    // Import state persistence helper
+    var persistenceHelper = require('./utils/persistence-helper');
+
+    // Import error handling utilities (for sanitizeObject)
+    var errorHandler = require('./utils/error-handler');
+
     function HealthIndexNode(config) {
         RED.nodes.createNode(this, config);
         const node = this;
-        
-        // Configuration - parse sensor weights
+
+        // Configuration - parse sensor weights with prototype pollution protection
         const sensorWeights = {};
         try {
             const weightsConfig = config.sensorWeights || "{}";
-            Object.assign(sensorWeights, JSON.parse(weightsConfig));
+            const parsedWeights = JSON.parse(weightsConfig);
+            // SECURITY: Sanitize to prevent prototype pollution attacks
+            errorHandler.sanitizeObject(parsedWeights);
+            Object.assign(sensorWeights, parsedWeights);
         } catch(e) {
             node.warn("Invalid sensor weights configuration");
         }
@@ -32,45 +33,40 @@ module.exports = function(RED) {
         node.healthHistory = [];
         node.lastHealthIndex = null;
         node.lastStatus = null;
-        
-        // State persistence manager
-        node.stateManager = null;
-        
-        // Helper to persist current state
-        function persistCurrentState() {
-            if (node.stateManager) {
-                node.stateManager.setMultiple({
-                    healthHistory: node.healthHistory,
-                    lastHealthIndex: node.lastHealthIndex,
-                    lastStatus: node.lastStatus
-                });
-            }
-        }
-        
-        // Initialize state persistence if enabled
-        if (persistState && StatePersistence) {
-            node.stateManager = new StatePersistence.NodeStateManager(node, {
-                stateKey: 'healthIndexState',
-                saveInterval: 30000 // Save every 30 seconds
-            });
-            
-            // Load persisted state on startup
-            node.stateManager.load().then(function(state) {
+
+        // Initialize state persistence using helper
+        // Note: We need to set persistState on node for the helper to work
+        node.persistState = persistState;
+        var persistence = persistenceHelper.initializeStatePersistence(node, {
+            stateKey: 'healthIndexState',
+            saveInterval: 30000,
+            debug: debug,
+            onStateLoaded: function(state) {
                 if (state.healthHistory && state.healthHistory.length > 0) {
                     node.healthHistory = state.healthHistory;
                     node.lastHealthIndex = state.lastHealthIndex;
                     node.lastStatus = state.lastStatus;
-                    
+
                     if (debug) {
                         node.warn("[DEBUG] Restored " + node.healthHistory.length + " health history entries from persistence");
                     }
                     node.status({fill: "green", shape: "dot", text: "Restored (" + node.healthHistory.length + " entries)"});
                 }
-            }).catch(function(err) {
-                if (debug) {
-                    node.warn("[DEBUG] Failed to load persisted state: " + err.message);
-                }
-            });
+            },
+            getStateToSave: function() {
+                return {
+                    healthHistory: node.healthHistory,
+                    lastHealthIndex: node.lastHealthIndex,
+                    lastStatus: node.lastStatus
+                };
+            }
+        });
+
+        // Helper to persist current state
+        function persistCurrentState() {
+            if (persistence) {
+                persistence.saveNow();
+            }
         }
         
         // Scale conversion helper
@@ -279,20 +275,15 @@ module.exports = function(RED) {
         // Handle node close
         node.on('close', async function(done) {
             // Save state before closing if persistence enabled
-            if (node.stateManager) {
-                try {
-                    persistCurrentState();
-                    await node.stateManager.close();
-                } catch (err) {
-                    // Ignore persistence errors during shutdown
-                }
+            if (persistence) {
+                await persistence.close();
             }
-            
+
             node.healthHistory = [];
             node.lastHealthIndex = null;
             node.lastStatus = null;
             node.status({});
-            
+
             if (done) done();
         });
         

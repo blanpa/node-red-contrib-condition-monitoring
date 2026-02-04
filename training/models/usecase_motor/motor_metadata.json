@@ -1,0 +1,38 @@
+{
+  "model": "Random Forest Classifier",
+  "features": [
+    "Ia_rms",
+    "Ib_rms",
+    "Ic_rms",
+    "I_avg",
+    "current_imbalance",
+    "I_fundamental",
+    "THD",
+    "sideband_2pct",
+    "sideband_3pct",
+    "sideband_4pct",
+    "sideband_5pct",
+    "vib_rms",
+    "vib_peak",
+    "vib_crest",
+    "vib_kurtosis",
+    "vib_band_0_100",
+    "vib_band_100_500",
+    "vib_band_500_1000",
+    "vib_band_1000_3000",
+    "vib_band_3000_5000",
+    "vib_dominant_freq",
+    "load_factor"
+  ],
+  "classes": [
+    "normal",
+    "bearing_fault",
+    "broken_rotor_bar",
+    "eccentricity",
+    "misalignment",
+    "stator_fault",
+    "unbalance"
+  ],
+  "accuracy": 0.8533333333333334,
+  "realisticTraining": true
+}

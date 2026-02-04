@@ -1,0 +1,83 @@
+{
+  "timestamp": "2026-01-18T18:09:57.966787Z",
+  "machineId": "pump_01",
+  "sensors": {
+    "vib_axial": {
+      "value": 0.0086,
+      "unit": "mm/s"
+    },
+    "vib_radial": {
+      "value": -0.0514,
+      "unit": "mm/s"
+    },
+    "vib_tangential": {
+      "value": -0.0158,
+      "unit": "mm/s"
+    },
+    "temp_bearing": {
+      "value": 71.6291,
+      "unit": "\u00b0C"
+    },
+    "temp_motor": {
+      "value": 84.0729,
+      "unit": "\u00b0C"
+    },
+    "temp_oil": {
+      "value": 57.645,
+      "unit": "\u00b0C"
+    },
+    "temp_ambient": {
+      "value": 24.9795,
+      "unit": "\u00b0C"
+    },
+    "current_u": {
+      "value": 4.6079,
+      "unit": "A"
+    },
+    "current_v": {
+      "value": 22.6981,
+      "unit": "A"
+    },
+    "current_w": {
+      "value": 27.0106,
+      "unit": "A"
+    },
+    "voltage": {
+      "value": 398.8576,
+      "unit": "V"
+    },
+    "pressure_inlet": {
+      "value": 2.3489,
+      "unit": "bar"
+    },
+    "pressure_outlet": {
+      "value": 8.0472,
+      "unit": "bar"
+    },
+    "flow_rate": {
+      "value": 56.1835,
+      "unit": "m\u00b3/h"
+    },
+    "rpm": {
+      "value": 1505.2178,
+      "unit": "rpm"
+    },
+    "load": {
+      "value": 69.454,
+      "unit": "%"
+    },
+    "power": {
+      "value": 6.1383,
+      "unit": "kW"
+    }
+  },
+  "operatingConditions": {
+    "rpm": 1505.2,
+    "load": 69.5,
+    "ambientTemp": 25.0
+  },
+  "faultInfo": {
+    "type": "bearing",
+    "severity": 0.6
+  }
+}

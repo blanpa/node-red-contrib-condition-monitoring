@@ -1,0 +1,43 @@
+# Training container for ML models with realistic data generation
+# Includes: PyTorch, TensorFlow, imbalanced-learn (SMOTE/ADASYN)
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install ML frameworks and imbalanced-learn
+RUN pip install --no-cache-dir \
+    numpy \
+    scipy \
+    scikit-learn \
+    joblib \
+    imbalanced-learn \
+    tensorflow==2.15.0 \
+    onnx \
+    onnxruntime \
+    xgboost \
+    matplotlib
+
+# Install PyTorch CPU version separately with ONNX export support
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir onnxscript
+
+# Copy training scripts (from training/scripts/ when built from project root)
+COPY training/scripts/ /app/
+
+# Volumes for data and models
+VOLUME /data/models
+VOLUME /data/datasets
+
+# Environment variables for configuration
+ENV SMOTE_ENABLED=true
+ENV OVERLAP_RATIO=0.3
+ENV IMBALANCE_RATIO=0.2
+
+# Run training
+CMD ["python", "/app/train_realistic_models.py"]

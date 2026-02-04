@@ -1,0 +1,12 @@
+{
+  "name": "model.keras",
+  "version": "1.0.0",
+  "type": "keras",
+  "path": "/data/models/keras-anomaly/model.keras",
+  "source": "local",
+  "format": "keras",
+  "lastLoaded": "2026-02-04T15:07:12.429Z",
+  "stage": "production",
+  "inputShape": "[1,5]",
+  "metadata": {}
+}

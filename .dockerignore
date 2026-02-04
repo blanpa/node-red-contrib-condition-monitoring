@@ -1,5 +1,7 @@
 node_modules/
 node-red-data/
+notebooks_venv/
+training/
 .git/
 .gitignore
 *.log

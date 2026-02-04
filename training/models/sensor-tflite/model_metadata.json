@@ -1,0 +1,29 @@
+{
+  "name": "sensor-tflite",
+  "version": "3.0.0",
+  "type": "tflite",
+  "inputShape": "[1,5]",
+  "accuracy": 0.9725000262260437,
+  "rocAuc": 0.9981407407407408,
+  "normalExample": [
+    0.35751497745513916,
+    0.4468919336795807,
+    0.16793790459632874,
+    0.6154233813285828,
+    0.27881744503974915
+  ],
+  "anomalyExample": [
+    0.3903864622116089,
+    0.3477826416492462,
+    0.21684975922107697,
+    0.5244864821434021,
+    0.3451537787914276
+  ],
+  "description": "5-sensor anomaly detection optimized for edge devices - REALISTIC",
+  "realisticTraining": true,
+  "createdAt": "2026-02-04T12:19:18.264795",
+  "format": "tflite",
+  "lastLoaded": "2026-02-04T15:07:12.244Z",
+  "stage": "production",
+  "metadata": {}
+}

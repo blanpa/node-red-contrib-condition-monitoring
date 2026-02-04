@@ -1,0 +1,36 @@
+{
+  "name": "cnn-fault-classifier",
+  "version": "3.0.0",
+  "type": "keras",
+  "task": "classification",
+  "inputShape": [
+    1,
+    13
+  ],
+  "classes": [
+    "normal",
+    "unbalance",
+    "bearing",
+    "misalignment"
+  ],
+  "nClasses": 4,
+  "accuracy": 0.981249988079071,
+  "features": [
+    "rms",
+    "peak",
+    "crest_factor",
+    "kurtosis",
+    "skewness",
+    "freq_1x",
+    "freq_2x",
+    "freq_3x",
+    "harmonic_ratio",
+    "temperature",
+    "current",
+    "pressure",
+    "efficiency"
+  ],
+  "description": "1D-CNN for 4-class fault classification",
+  "realisticTraining": true,
+  "createdAt": "2026-02-04T12:22:53.365569"
+}

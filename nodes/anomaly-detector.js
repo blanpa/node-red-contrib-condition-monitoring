@@ -1,14 +1,23 @@
 module.exports = function(RED) {
     "use strict";
-    
-    // Import state persistence
-    var StatePersistence = null;
+
+    // Import shared statistics utilities
+    var stats = require('./utils/statistics');
+
+    // Import state persistence helper
+    var persistenceHelper = require('./utils/persistence-helper');
+
+    // Import error handling utilities
+    var errorHandler = require('./utils/error-handler');
+
+    // Import WebSocket manager for real-time dashboards
+    var WebSocketManager = null;
     try {
-        StatePersistence = require('./state-persistence');
+        WebSocketManager = require('./websocket-manager');
     } catch (err) {
-        // State persistence not available
+        // WebSocket support not available
     }
-    
+
     function AnomalyDetectorNode(config) {
         RED.nodes.createNode(this, config);
         var node = this;
@@ -60,13 +69,41 @@ module.exports = function(RED) {
         this.hysteresisEnabled = config.hysteresisEnabled !== false; // Default: enabled
         this.hysteresisPercent = parseFloat(config.hysteresisPercent) || 10; // 10% deadband
         this.consecutiveCount = parseInt(config.consecutiveCount) || 1; // Consecutive samples to confirm
-        
+
+        // Adaptive Thresholds - learns from operator feedback
+        this.adaptiveEnabled = config.adaptiveEnabled === true;
+        this.adaptiveLearningRate = parseFloat(config.adaptiveLearningRate) || 0.1; // How fast to adjust
+        this.adaptiveMinSamples = parseInt(config.adaptiveMinSamples) || 10; // Min feedback before adjusting
+        this.targetFalsePositiveRate = parseFloat(config.targetFalsePositiveRate) || 0.05; // 5% target
+
+        // Batch Processing Mode - for historical data analysis
+        this.batchMode = config.batchMode === true;
+
+        // WebSocket for real-time dashboards
+        this.websocketEnabled = config.websocketEnabled === true;
+        this.websocketPort = parseInt(config.websocketPort) || 1881;
+        this.websocketTopic = config.websocketTopic || "anomaly-detector";
+
         // State
         this.dataBuffer = [];
         this.lastAnomalyState = false; // Track previous anomaly state for hysteresis
         this.consecutiveAnomalies = 0; // Counter for consecutive anomalies
         this.consecutiveNormals = 0; // Counter for consecutive normal values
-        
+
+        // Adaptive Thresholds State
+        this.adaptiveState = {
+            feedbackHistory: [],       // { timestamp, predicted, actual, value }
+            truePositives: 0,
+            falsePositives: 0,
+            trueNegatives: 0,
+            falseNegatives: 0,
+            currentThresholdAdjustment: 0, // Cumulative adjustment to threshold
+            lastAdjustmentTime: null
+        };
+
+        // WebSocket manager reference
+        this.wsManager = null;
+
         // Debug logging helper
         var debugLog = function(message) {
             if (node.debug) {
@@ -78,18 +115,12 @@ module.exports = function(RED) {
         this.cusumNeg = 0;
         this.initialized = false;
         
-        // State persistence manager
-        this.stateManager = null;
-        
-        // Initialize state persistence if enabled
-        if (node.persistState && StatePersistence) {
-            node.stateManager = new StatePersistence.NodeStateManager(node, {
-                stateKey: 'anomalyDetectorState',
-                saveInterval: 30000 // Save every 30 seconds
-            });
-            
-            // Load persisted state on startup
-            node.stateManager.load().then(function(state) {
+        // Initialize state persistence using helper
+        var persistence = persistenceHelper.initializeStatePersistence(node, {
+            stateKey: 'anomalyDetectorState',
+            saveInterval: 30000,
+            debug: node.debug,
+            onStateLoaded: function(state) {
                 if (state.dataBuffer && Array.isArray(state.dataBuffer)) {
                     node.dataBuffer = state.dataBuffer;
                 }
@@ -105,63 +136,63 @@ module.exports = function(RED) {
                 if (state.initialized !== undefined) {
                     node.initialized = state.initialized;
                 }
-                
+
+                // Restore adaptive state
+                if (state.adaptiveState && node.adaptiveEnabled) {
+                    node.adaptiveState = state.adaptiveState;
+                    debugLog("Restored adaptive state with " +
+                             (state.adaptiveState.truePositives + state.adaptiveState.falsePositives +
+                              state.adaptiveState.trueNegatives + state.adaptiveState.falseNegatives) +
+                             " feedback samples");
+                }
+
                 if (node.dataBuffer.length > 0) {
                     debugLog("Restored " + node.dataBuffer.length + " buffered values from persistence");
                     node.status({fill: "green", shape: "dot", text: node.method + " - restored (" + node.dataBuffer.length + ")"});
                 }
-            }).catch(function(err) {
-                debugLog("Failed to load persisted state: " + err.message);
-            });
-        }
-        
-        // Helper to persist current state
-        function persistCurrentState() {
-            if (node.stateManager) {
-                node.stateManager.setMultiple({
+            },
+            getStateToSave: function() {
+                var state = {
                     dataBuffer: node.dataBuffer,
                     ema: node.ema,
                     cusumPos: node.cusumPos,
                     cusumNeg: node.cusumNeg,
                     initialized: node.initialized
-                });
+                };
+                if (node.adaptiveEnabled) {
+                    state.adaptiveState = node.adaptiveState;
+                }
+                return state;
+            }
+        });
+
+        // Helper to persist current state
+        function persistCurrentState() {
+            if (persistence) {
+                persistence.saveNow();
             }
         }
         
+        // Initialize WebSocket if enabled
+        if (node.websocketEnabled && WebSocketManager && WebSocketManager.isWebSocketAvailable()) {
+            node.wsManager = WebSocketManager.getWebSocketManager({ port: node.websocketPort });
+            if (!node.wsManager.isRunning) {
+                node.wsManager.start().then(function() {
+                    debugLog("WebSocket server started on port " + node.websocketPort);
+                }).catch(function(err) {
+                    node.warn("Failed to start WebSocket server: " + err.message);
+                });
+            }
+        }
+
         // Initial status
         node.status({fill: "blue", shape: "ring", text: node.method + " - waiting"});
         
-        // Helper functions
-        function calculateMean(values) {
-            return values.reduce((a, b) => a + b, 0) / values.length;
-        }
-        
-        function calculateStdDev(values, mean) {
-            var variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
-            return Math.sqrt(variance);
-        }
-        
-        function calculateQuartiles(values) {
-            var sorted = values.slice().sort((a, b) => a - b);
-            var q1Index = Math.floor(sorted.length * 0.25);
-            var q3Index = Math.floor(sorted.length * 0.75);
-            return {
-                q1: sorted[q1Index],
-                q3: sorted[q3Index],
-                iqr: sorted[q3Index] - sorted[q1Index],
-                median: sorted[Math.floor(sorted.length * 0.5)]
-            };
-        }
-        
-        function calculatePercentile(sorted, percentile) {
-            if (sorted.length === 0) return 0;
-            var index = (percentile / 100) * (sorted.length - 1);
-            var lower = Math.floor(index);
-            var upper = Math.ceil(index);
-            var weight = index - lower;
-            if (lower === upper) return sorted[lower];
-            return sorted[lower] * (1 - weight) + sorted[upper] * weight;
-        }
+        // Use shared statistics utilities
+        var calculateMean = stats.calculateMean;
+        var calculateStdDev = stats.calculateStdDev;
+        var calculateQuartiles = stats.calculateQuartiles;
+        var calculatePercentile = stats.calculatePercentileSorted;
         
         // Z-Score method (uses node defaults)
         function detectZScore(value, values) {
@@ -457,18 +488,30 @@ module.exports = function(RED) {
         node.sensorEma = {};
         node.sensorCusum = {};
         
-        // Process multi-sensor JSON input
+        /**
+         * Process multi-sensor JSON input for anomaly detection
+         * @param {Object} msg - The incoming message
+         * @param {Object} sensorData - Object with sensor names as keys and values
+         */
         function processMultiSensorInput(msg, sensorData) {
             var results = {};
             var anyAnomaly = false;
             var worstSeverity = "normal";
             var anomalySensors = [];
-            
+            var skippedSensors = [];
+
             var sensorNames = Object.keys(sensorData);
-            
+
             sensorNames.forEach(function(sensorName) {
-                var value = parseFloat(sensorData[sensorName]);
-                if (isNaN(value)) return;
+                var rawValue = sensorData[sensorName];
+                var value = parseFloat(rawValue);
+
+                // Validate value is a finite number (catches NaN, Infinity, -Infinity)
+                if (!Number.isFinite(value)) {
+                    skippedSensors.push({ name: sensorName, reason: 'not a finite number', value: rawValue });
+                    debugLog("Skipping sensor " + sensorName + ": value is not a finite number (" + rawValue + ")");
+                    return;
+                }
                 
                 // Initialize per-sensor buffers if needed
                 if (!node.sensorBuffers[sensorName]) {
@@ -580,23 +623,34 @@ module.exports = function(RED) {
                     }
                 }
             });
-            
+
+            // Check if any valid sensors were processed
+            var validSensorCount = Object.keys(results).length;
+            if (validSensorCount === 0) {
+                errorHandler.handleNodeError(node, "No valid sensor readings in input", msg, 'warn', {
+                    statusText: "no valid sensors"
+                });
+                return;
+            }
+
             // Build output message
             var outMsg = {
                 payload: results,
                 isAnomaly: anyAnomaly,
                 severity: anyAnomaly ? worstSeverity : "normal",
                 anomalySensors: anomalySensors,
-                sensorCount: sensorNames.length,
+                sensorCount: validSensorCount,
+                totalSensors: sensorNames.length,
+                skippedSensors: skippedSensors.length > 0 ? skippedSensors : undefined,
                 method: node.method,
                 windowSize: node.windowSize,
                 inputFormat: "multi-sensor",
                 _msgid: msg._msgid
             };
-            
+
             // Copy original message properties
             if (msg.topic) outMsg.topic = node.outputTopic || msg.topic;
-            
+
             // Update status
             if (anyAnomaly) {
                 node.status({
@@ -634,9 +688,339 @@ module.exports = function(RED) {
             }
             return result;
         }
-        
+
+        // ==========================================
+        // ADAPTIVE THRESHOLDS - Learn from Feedback
+        // ==========================================
+
+        /**
+         * Process operator feedback to adjust anomaly detection thresholds.
+         * Uses confusion matrix tracking to calculate false positive/negative rates
+         * and adjusts thresholds toward target error rate.
+         *
+         * @param {Object} feedback - Feedback object from operator
+         * @param {boolean} feedback.predictedAnomaly - What the detector predicted
+         * @param {boolean} feedback.wasAnomaly - What the operator confirms (ground truth)
+         * @param {number} [feedback.value] - The sensor value for this detection
+         * @returns {void}
+         *
+         * @example
+         * // Send feedback that a detection was a false positive
+         * msg.feedback = {
+         *     predictedAnomaly: true,
+         *     wasAnomaly: false,
+         *     value: 42.5
+         * };
+         */
+        function processAdaptiveFeedback(feedback) {
+            if (!node.adaptiveEnabled) return;
+
+            var state = node.adaptiveState;
+            var entry = {
+                timestamp: Date.now(),
+                predicted: feedback.predictedAnomaly,
+                actual: feedback.wasAnomaly,
+                value: feedback.value
+            };
+
+            state.feedbackHistory.push(entry);
+
+            // Keep only last 1000 feedback entries
+            if (state.feedbackHistory.length > 1000) {
+                state.feedbackHistory.shift();
+            }
+
+            // Update confusion matrix
+            if (feedback.predictedAnomaly && feedback.wasAnomaly) {
+                state.truePositives++;
+            } else if (feedback.predictedAnomaly && !feedback.wasAnomaly) {
+                state.falsePositives++;
+            } else if (!feedback.predictedAnomaly && feedback.wasAnomaly) {
+                state.falseNegatives++;
+            } else {
+                state.trueNegatives++;
+            }
+
+            // Calculate current false positive rate
+            var totalPositives = state.truePositives + state.falsePositives;
+            var totalNegatives = state.trueNegatives + state.falseNegatives;
+            var totalSamples = totalPositives + totalNegatives;
+
+            debugLog("Adaptive feedback: TP=" + state.truePositives + " FP=" + state.falsePositives +
+                     " TN=" + state.trueNegatives + " FN=" + state.falseNegatives);
+
+            // Only adjust after minimum samples
+            if (totalSamples < node.adaptiveMinSamples) {
+                debugLog("Adaptive: waiting for more samples (" + totalSamples + "/" + node.adaptiveMinSamples + ")");
+                return;
+            }
+
+            // Calculate false positive rate
+            var falsePositiveRate = totalPositives > 0 ? state.falsePositives / totalPositives : 0;
+            var falseNegativeRate = totalNegatives > 0 ? state.falseNegatives / (state.falseNegatives + state.trueNegatives) : 0;
+
+            // Adjust threshold based on error rates
+            var adjustment = 0;
+
+            if (falsePositiveRate > node.targetFalsePositiveRate) {
+                // Too many false positives - make threshold less sensitive (increase)
+                adjustment = node.adaptiveLearningRate * (falsePositiveRate - node.targetFalsePositiveRate);
+                debugLog("Adaptive: FP rate " + (falsePositiveRate * 100).toFixed(1) + "% > target, loosening threshold by " + adjustment.toFixed(3));
+            } else if (falseNegativeRate > node.targetFalsePositiveRate * 2) {
+                // Too many false negatives - make threshold more sensitive (decrease)
+                adjustment = -node.adaptiveLearningRate * (falseNegativeRate - node.targetFalsePositiveRate);
+                debugLog("Adaptive: FN rate " + (falseNegativeRate * 100).toFixed(1) + "% high, tightening threshold by " + (-adjustment).toFixed(3));
+            }
+
+            if (adjustment !== 0) {
+                state.currentThresholdAdjustment += adjustment;
+                // Limit adjustment range to ±50% of original threshold
+                state.currentThresholdAdjustment = Math.max(-0.5, Math.min(0.5, state.currentThresholdAdjustment));
+                state.lastAdjustmentTime = Date.now();
+
+                debugLog("Adaptive: total threshold adjustment = " + (state.currentThresholdAdjustment * 100).toFixed(1) + "%");
+            }
+        }
+
+        /**
+         * Get adaptive-adjusted threshold
+         */
+        function getAdaptiveThreshold(baseThreshold) {
+            if (!node.adaptiveEnabled) return baseThreshold;
+            var adjustment = node.adaptiveState.currentThresholdAdjustment;
+            return baseThreshold * (1 + adjustment);
+        }
+
+        /**
+         * Get adaptive statistics for output
+         */
+        function getAdaptiveStats() {
+            var state = node.adaptiveState;
+            var total = state.truePositives + state.falsePositives + state.trueNegatives + state.falseNegatives;
+
+            return {
+                enabled: node.adaptiveEnabled,
+                feedbackCount: total,
+                truePositives: state.truePositives,
+                falsePositives: state.falsePositives,
+                trueNegatives: state.trueNegatives,
+                falseNegatives: state.falseNegatives,
+                falsePositiveRate: total > 0 ? state.falsePositives / Math.max(1, state.truePositives + state.falsePositives) : 0,
+                precision: state.truePositives + state.falsePositives > 0
+                    ? state.truePositives / (state.truePositives + state.falsePositives) : 1,
+                recall: state.truePositives + state.falseNegatives > 0
+                    ? state.truePositives / (state.truePositives + state.falseNegatives) : 1,
+                thresholdAdjustment: state.currentThresholdAdjustment,
+                lastAdjustmentTime: state.lastAdjustmentTime
+            };
+        }
+
+        // ==========================================
+        // BATCH PROCESSING - Historical Data Analysis
+        // ==========================================
+
+        /**
+         * Process a batch of historical values
+         * @param {Array} values - Array of values or {timestamp, value} objects
+         * @returns {Object} Batch analysis results
+         */
+        function processBatch(values, method, threshold) {
+            var results = [];
+            var anomalyCount = 0;
+            var warningCount = 0;
+            var normalCount = 0;
+            var anomalyIndices = [];
+
+            // Build temporary buffer for analysis
+            var tempBuffer = [];
+            var minRequired = method === "iqr" ? 4 : 2;
+
+            for (var i = 0; i < values.length; i++) {
+                var item = values[i];
+                var value = typeof item === 'object' ? item.value : item;
+                var timestamp = typeof item === 'object' ? item.timestamp : Date.now();
+
+                value = parseFloat(value);
+                if (isNaN(value)) continue;
+
+                tempBuffer.push({ timestamp: timestamp, value: value });
+
+                // Keep buffer size limited
+                if (tempBuffer.length > node.windowSize) {
+                    tempBuffer.shift();
+                }
+
+                // Skip if not enough data
+                if (tempBuffer.length < minRequired) {
+                    results.push({
+                        index: i,
+                        value: value,
+                        timestamp: timestamp,
+                        isAnomaly: false,
+                        severity: "warmup"
+                    });
+                    continue;
+                }
+
+                var bufferValues = tempBuffer.map(function(d) { return d.value; });
+                var result;
+
+                // Use adaptive threshold if enabled
+                var activeThreshold = getAdaptiveThreshold(threshold || node.zscoreThreshold);
+
+                switch (method || node.method) {
+                    case "zscore":
+                        result = detectZScoreWithConfig(value, bufferValues, activeThreshold, activeThreshold * 0.67);
+                        break;
+                    case "iqr":
+                        result = detectIQRWithConfig(value, bufferValues, node.iqrMultiplier);
+                        break;
+                    case "threshold":
+                        result = detectThresholdWithConfig(value, node.minThreshold, node.maxThreshold);
+                        break;
+                    case "percentile":
+                        result = detectPercentile(value, bufferValues);
+                        break;
+                    default:
+                        result = detectZScoreWithConfig(value, bufferValues, activeThreshold, activeThreshold * 0.67);
+                }
+
+                var batchResult = {
+                    index: i,
+                    value: value,
+                    timestamp: timestamp,
+                    isAnomaly: result.isAnomaly,
+                    severity: result.severity,
+                    details: result.details
+                };
+
+                results.push(batchResult);
+
+                if (result.isAnomaly) {
+                    anomalyIndices.push(i);
+                    if (result.severity === "critical") {
+                        anomalyCount++;
+                    } else {
+                        warningCount++;
+                    }
+                } else {
+                    normalCount++;
+                }
+            }
+
+            // Calculate statistics
+            var allValues = values.map(function(v) {
+                return typeof v === 'object' ? parseFloat(v.value) : parseFloat(v);
+            }).filter(function(v) { return !isNaN(v); });
+
+            var stats = {
+                count: allValues.length,
+                mean: allValues.length > 0 ? calculateMean(allValues) : 0,
+                stdDev: allValues.length > 1 ? calculateStdDev(allValues, calculateMean(allValues)) : 0,
+                min: allValues.length > 0 ? Math.min.apply(null, allValues) : 0,
+                max: allValues.length > 0 ? Math.max.apply(null, allValues) : 0
+            };
+
+            return {
+                results: results,
+                summary: {
+                    totalSamples: values.length,
+                    anomalies: anomalyCount,
+                    warnings: warningCount,
+                    normal: normalCount,
+                    anomalyRate: values.length > 0 ? (anomalyCount + warningCount) / values.length : 0,
+                    anomalyIndices: anomalyIndices
+                },
+                statistics: stats,
+                method: method || node.method,
+                windowSize: node.windowSize,
+                batchMode: true
+            };
+        }
+
+        // ==========================================
+        // WEBSOCKET BROADCAST
+        // ==========================================
+
+        /**
+         * Broadcast result via WebSocket
+         */
+        function broadcastResult(result) {
+            if (!node.wsManager || !node.wsManager.isRunning) return;
+
+            try {
+                node.wsManager.broadcast(node.websocketTopic, {
+                    nodeId: node.id,
+                    nodeName: node.name || "Anomaly Detector",
+                    ...result
+                });
+            } catch (err) {
+                debugLog("WebSocket broadcast error: " + err.message);
+            }
+        }
+
         node.on('input', function(msg) {
             try {
+                // ==========================================
+                // FEEDBACK PROCESSING (Adaptive Thresholds)
+                // ==========================================
+                if (msg.feedback) {
+                    processAdaptiveFeedback(msg.feedback);
+                    var adaptiveStats = getAdaptiveStats();
+                    node.status({
+                        fill: "blue",
+                        shape: "dot",
+                        text: "Feedback: " + adaptiveStats.feedbackCount + " samples, adj=" +
+                              (adaptiveStats.thresholdAdjustment * 100).toFixed(1) + "%"
+                    });
+
+                    // Send feedback confirmation
+                    var feedbackMsg = {
+                        payload: adaptiveStats,
+                        topic: "adaptive-feedback",
+                        _msgid: msg._msgid
+                    };
+                    node.send([feedbackMsg, null]);
+                    return;
+                }
+
+                // ==========================================
+                // BATCH PROCESSING MODE
+                // ==========================================
+                if (msg.batch === true || (node.batchMode && Array.isArray(msg.payload) && msg.payload.length > 1 && typeof msg.payload[0] !== 'object')) {
+                    // Array of raw numbers for batch processing
+                    var batchResult = processBatch(msg.payload, msg.method || node.method, msg.threshold);
+
+                    var batchMsg = {
+                        payload: batchResult,
+                        topic: msg.topic || "batch-analysis",
+                        _msgid: msg._msgid
+                    };
+
+                    // Broadcast via WebSocket
+                    if (node.websocketEnabled) {
+                        broadcastResult({
+                            type: "batch",
+                            ...batchResult.summary,
+                            statistics: batchResult.statistics
+                        });
+                    }
+
+                    node.status({
+                        fill: batchResult.summary.anomalies > 0 ? "red" : "green",
+                        shape: "dot",
+                        text: "Batch: " + batchResult.summary.anomalies + "/" + batchResult.summary.totalSamples + " anomalies"
+                    });
+
+                    // Output batch results (anomalies found = output 2, no anomalies = output 1)
+                    if (batchResult.summary.anomalies > 0 || batchResult.summary.warnings > 0) {
+                        node.send([null, batchMsg]);
+                    } else {
+                        node.send([batchMsg, null]);
+                    }
+                    return;
+                }
+
                 // Dynamic configuration via msg.config
                 // Allows runtime override of node settings
                 var cfg = msg.config || {};
@@ -649,7 +1033,11 @@ module.exports = function(RED) {
                 var activeMaxThreshold = (cfg.maxThreshold !== undefined) ? parseFloat(cfg.maxThreshold) : node.maxThreshold;
                 var activeHysteresisEnabled = (cfg.hysteresisEnabled !== undefined) ? cfg.hysteresisEnabled : node.hysteresisEnabled;
                 var activeConsecutiveCount = (cfg.consecutiveCount !== undefined) ? parseInt(cfg.consecutiveCount) : node.consecutiveCount;
-                
+
+                // Apply adaptive threshold adjustment
+                activeZscoreThreshold = getAdaptiveThreshold(activeZscoreThreshold);
+                activeZscoreWarning = getAdaptiveThreshold(activeZscoreWarning);
+
                 // Reset function
                 if (msg.reset === true) {
                     node.dataBuffer = [];
@@ -662,6 +1050,20 @@ module.exports = function(RED) {
                     node.lastAnomalyState = false;
                     node.consecutiveAnomalies = 0;
                     node.consecutiveNormals = 0;
+
+                    // Reset adaptive state if requested
+                    if (msg.resetAdaptive === true) {
+                        node.adaptiveState = {
+                            feedbackHistory: [],
+                            truePositives: 0,
+                            falsePositives: 0,
+                            trueNegatives: 0,
+                            falseNegatives: 0,
+                            currentThresholdAdjustment: 0,
+                            lastAdjustmentTime: null
+                        };
+                    }
+
                     node.status({fill: "blue", shape: "ring", text: activeMethod + " - reset"});
                     return;
                 }
@@ -683,11 +1085,29 @@ module.exports = function(RED) {
                     return;
                 }
                 
-                var value = parseFloat(msg.payload);
-                
-                if (isNaN(value)) {
+                // SECURITY: Strict number validation
+                // parseFloat("123abc") returns 123 which can be misleading
+                var value;
+                if (typeof msg.payload === 'number') {
+                    value = msg.payload;
+                } else if (typeof msg.payload === 'string') {
+                    // Only accept strings that are purely numeric
+                    var trimmed = msg.payload.trim();
+                    if (trimmed === '' || !/^-?\d*\.?\d+(?:[eE][-+]?\d+)?$/.test(trimmed)) {
+                        node.status({fill: "red", shape: "ring", text: "invalid input"});
+                        node.error("Payload is not a valid number: " + msg.payload, msg);
+                        return;
+                    }
+                    value = parseFloat(trimmed);
+                } else {
                     node.status({fill: "red", shape: "ring", text: "invalid input"});
-                    node.error("Payload is not a valid number", msg);
+                    node.error("Payload must be a number or numeric string, got: " + typeof msg.payload, msg);
+                    return;
+                }
+
+                if (!Number.isFinite(value)) {
+                    node.status({fill: "red", shape: "ring", text: "invalid input"});
+                    node.error("Payload is not a finite number (NaN or Infinity)", msg);
                     return;
                 }
                 
@@ -806,8 +1226,28 @@ module.exports = function(RED) {
                         applied: hysteresisApplied,
                         consecutiveAnomalies: node.consecutiveAnomalies,
                         consecutiveNormals: node.consecutiveNormals
-                    }
+                    },
+                    timestamp: Date.now()
                 };
+
+                // Add adaptive threshold info
+                if (node.adaptiveEnabled) {
+                    outputMsg.adaptive = getAdaptiveStats();
+                    outputMsg.adaptive.adjustedThreshold = activeZscoreThreshold;
+                }
+
+                // Broadcast via WebSocket for real-time dashboards
+                if (node.websocketEnabled && node.wsManager) {
+                    broadcastResult({
+                        type: "single",
+                        value: value,
+                        isAnomaly: finalIsAnomaly,
+                        severity: result.severity,
+                        method: node.method,
+                        details: result.details,
+                        timestamp: outputMsg.timestamp
+                    });
+                }
                 
                 // Set topic if configured
                 if (node.outputTopic) {
@@ -843,15 +1283,13 @@ module.exports = function(RED) {
         
         node.on('close', async function(done) {
             // Save state before closing if persistence enabled
-            if (node.stateManager) {
-                try {
-                    persistCurrentState();
-                    await node.stateManager.close();
-                } catch (err) {
-                    // Ignore persistence errors during shutdown
-                }
+            if (persistence) {
+                await persistence.close();
             }
-            
+
+            // Note: Don't shutdown global WebSocket manager here as other nodes may use it
+            // The manager has its own cleanup via Node-RED lifecycle
+
             node.dataBuffer = [];
             node.ema = null;
             node.cusumPos = 0;
@@ -861,7 +1299,7 @@ module.exports = function(RED) {
             node.consecutiveAnomalies = 0;
             node.consecutiveNormals = 0;
             node.status({});
-            
+
             if (done) done();
         });
     }

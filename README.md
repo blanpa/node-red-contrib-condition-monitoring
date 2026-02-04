@@ -639,7 +639,7 @@ Or use the provided Docker image which includes all dependencies.
 
 ## Documentation
 
-- **[models/README.md](models/README.md)** - ML models guide and training instructions
+- **[training/models/README.md](training/models/README.md)** - ML models guide and training instructions
 - **[CHANGELOG.md](CHANGELOG.md)** - Version history and changes
 
 ---

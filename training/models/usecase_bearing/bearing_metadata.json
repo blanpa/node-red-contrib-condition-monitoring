@@ -1,0 +1,28 @@
+{
+  "models": {
+    "gradient_boosting": {
+      "file": "bearing_rul_gb.joblib",
+      "rmse": 27.342135215293315,
+      "mae": 21.399181456708387,
+      "r2": 0.7824077566215685
+    },
+    "lstm": {
+      "file": "bearing_rul_lstm.keras",
+      "seq_length": 30
+    }
+  },
+  "features": [
+    "vib_rms",
+    "vib_peak",
+    "crest_factor",
+    "kurtosis",
+    "defect_freq_amp",
+    "temperature",
+    "debris_count",
+    "hf_energy",
+    "rpm",
+    "load_factor"
+  ],
+  "max_rul": 200,
+  "realisticTraining": true
+}

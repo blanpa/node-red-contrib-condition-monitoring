@@ -1,0 +1,45 @@
+{
+  "name": "vibration-bearing-analysis",
+  "version": "3.0.0",
+  "type": "onnx",
+  "inputShape": "[1,8]",
+  "accuracy": 0.9933333396911621,
+  "rocAuc": 0.999687037037037,
+  "normalExample": [
+    0.15652711689472198,
+    0.17574189603328705,
+    0.2838844954967499,
+    0.13855449855327606,
+    0.11810749024152756,
+    0.24523141980171204,
+    0.25851893424987793,
+    0.45434778928756714
+  ],
+  "anomalyExample": [
+    0.23079413175582886,
+    0.22667427361011505,
+    0.25937822461128235,
+    0.16642124950885773,
+    0.3492714762687683,
+    0.4416435658931732,
+    0.4751867949962616,
+    0.5131490230560303
+  ],
+  "description": "Bearing fault detection from vibration features (RMS, Peak, Crest, Kurtosis, etc.)",
+  "features": [
+    "rms",
+    "peak",
+    "crest_factor",
+    "kurtosis",
+    "skewness",
+    "dominant_freq",
+    "spectral_centroid",
+    "band_energy"
+  ],
+  "realisticTraining": true,
+  "createdAt": "2026-02-04T12:18:35.119654",
+  "format": "onnx",
+  "lastLoaded": "2026-02-04T15:07:04.142Z",
+  "stage": "production",
+  "metadata": {}
+}
