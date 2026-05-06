@@ -15,17 +15,32 @@
 
 "use strict";
 
-const EventEmitter = require('events');
+const EventEmitter = require("events");
+const crypto = require("crypto");
 
 // Try to load ws module (optional dependency)
 let WebSocket = null;
 let WebSocketServer = null;
 try {
-    const ws = require('ws');
+    const ws = require("ws");
     WebSocket = ws;
     WebSocketServer = ws.Server;
 } catch (err) {
     // ws module not installed
+}
+
+/**
+ * Constant-time string comparison. Returns true only if both strings have the
+ * same length and the same content. Designed to avoid leaking the token via
+ * timing differences when an attacker probes multiple values.
+ */
+function timingSafeEqualStrings(a, b) {
+    if (typeof a !== "string" || typeof b !== "string") return false;
+    if (a.length !== b.length) return false;
+    const ba = Buffer.from(a, "utf8");
+    const bb = Buffer.from(b, "utf8");
+    if (ba.length !== bb.length) return false;
+    return crypto.timingSafeEqual(ba, bb);
 }
 
 class WebSocketManager extends EventEmitter {
@@ -34,13 +49,28 @@ class WebSocketManager extends EventEmitter {
      * @param {number} options.port - WebSocket server port (default: 1881)
      * @param {string} options.path - WebSocket path (default: /ws/condition-monitoring)
      * @param {number} options.heartbeatInterval - Heartbeat interval in ms (default: 30000)
+     * @param {string|null} [options.authToken=null]
+     *        Optional shared secret. When set, every connecting client must present the
+     *        same token via either:
+     *          - the `?token=...` query parameter on the WebSocket URL, or
+     *          - the `Sec-WebSocket-Protocol` header (handy when the URL is logged).
+     *        Connections without a matching token are closed with code 4401.
+     * @param {string[]|null} [options.allowedOrigins=null]
+     *        Optional list of allowed `Origin` header values. When set, browsers
+     *        served from any other origin are refused (CSWSH protection).
      */
     constructor(options = {}) {
         super();
 
         this.port = options.port || 1881;
-        this.path = options.path || '/ws/condition-monitoring';
+        this.path = options.path || "/ws/condition-monitoring";
         this.heartbeatInterval = options.heartbeatInterval || 30000;
+        this.authToken =
+            typeof options.authToken === "string" && options.authToken.length > 0 ? options.authToken : null;
+        this.allowedOrigins =
+            Array.isArray(options.allowedOrigins) && options.allowedOrigins.length > 0
+                ? options.allowedOrigins.slice()
+                : null;
 
         this.server = null;
         this.clients = new Map(); // clientId -> { ws, subscriptions, lastPing }
@@ -73,35 +103,86 @@ class WebSocketManager extends EventEmitter {
 
         return new Promise((resolve, reject) => {
             try {
-                this.server = new WebSocketServer({
+                const wsServerOptions = {
                     port: this.port,
                     path: this.path
-                });
+                };
+                // Origin allowlist: enforced *before* the WS upgrade completes.
+                if (this.allowedOrigins) {
+                    wsServerOptions.verifyClient = (info) => {
+                        const origin = info.origin || (info.req && info.req.headers && info.req.headers.origin);
+                        if (!origin) return false;
+                        return this.allowedOrigins.indexOf(origin) !== -1;
+                    };
+                }
+                this.server = new WebSocketServer(wsServerOptions);
 
-                this.server.on('listening', () => {
+                this.server.on("listening", () => {
                     this.isRunning = true;
                     this.stats.startTime = Date.now();
                     this._startHeartbeat();
-                    this.emit('started', { port: this.port, path: this.path });
+                    this.emit("started", { port: this.port, path: this.path });
                     resolve();
                 });
 
-                this.server.on('connection', (ws, req) => {
+                this.server.on("connection", (ws, req) => {
+                    if (!this._authorize(ws, req)) {
+                        // _authorize already closed the socket and bumped stats.errors
+                        return;
+                    }
                     this._handleConnection(ws, req);
                 });
 
-                this.server.on('error', (err) => {
+                this.server.on("error", (err) => {
                     this.stats.errors++;
-                    this.emit('error', err);
+                    this.emit("error", err);
                     if (!this.isRunning) {
                         reject(err);
                     }
                 });
-
             } catch (err) {
                 reject(err);
             }
         });
+    }
+
+    /**
+     * Authorize an incoming connection. Closes the socket on failure and returns false.
+     *
+     * Token sources, in order of preference:
+     *   1. `Sec-WebSocket-Protocol` header (`?token=foo` would be logged in proxies).
+     *   2. URL query parameter `?token=foo`.
+     *
+     * Tokens are compared with a constant-time comparator to avoid timing oracles.
+     */
+    _authorize(ws, req) {
+        if (!this.authToken) return true;
+
+        let presented = null;
+        const subProto = req.headers["sec-websocket-protocol"];
+        if (typeof subProto === "string" && subProto.length > 0) {
+            presented = subProto.split(",")[0].trim();
+        }
+        if (!presented && req.url) {
+            try {
+                const u = new URL(req.url, "ws://localhost");
+                presented = u.searchParams.get("token");
+            } catch (_) {
+                presented = null;
+            }
+        }
+
+        if (!presented || !timingSafeEqualStrings(presented, this.authToken)) {
+            this.stats.errors++;
+            try {
+                ws.close(4401, "Unauthorized");
+            } catch (_) {
+                /* ignore */
+            }
+            this.emit("authFailed", { ip: req.socket && req.socket.remoteAddress });
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -115,7 +196,7 @@ class WebSocketManager extends EventEmitter {
             ws: ws,
             id: clientId,
             ip: clientIp,
-            subscriptions: new Set(['*']), // Subscribe to all by default
+            subscriptions: new Set(["*"]), // Subscribe to all by default
             lastPing: Date.now(),
             connectedAt: Date.now()
         };
@@ -124,37 +205,37 @@ class WebSocketManager extends EventEmitter {
         this.stats.clientsTotal++;
         this.stats.clientsCurrent = this.clients.size;
 
-        this.emit('clientConnected', { clientId, ip: clientIp });
+        this.emit("clientConnected", { clientId, ip: clientIp });
 
         // Send welcome message
         this._sendToClient(clientId, {
-            type: 'welcome',
+            type: "welcome",
             clientId: clientId,
             serverTime: Date.now(),
-            message: 'Connected to Condition Monitoring WebSocket'
+            message: "Connected to Condition Monitoring WebSocket"
         });
 
         // Handle incoming messages
-        ws.on('message', (data) => {
+        ws.on("message", (data) => {
             this._handleMessage(clientId, data);
         });
 
         // Handle pong (heartbeat response)
-        ws.on('pong', () => {
+        ws.on("pong", () => {
             clientInfo.lastPing = Date.now();
         });
 
         // Handle disconnect
-        ws.on('close', () => {
+        ws.on("close", () => {
             this.clients.delete(clientId);
             this.stats.clientsCurrent = this.clients.size;
-            this.emit('clientDisconnected', { clientId });
+            this.emit("clientDisconnected", { clientId });
         });
 
         // Handle errors
-        ws.on('error', (err) => {
+        ws.on("error", (err) => {
             this.stats.errors++;
-            this.emit('clientError', { clientId, error: err.message });
+            this.emit("clientError", { clientId, error: err.message });
         });
     }
 
@@ -169,58 +250,57 @@ class WebSocketManager extends EventEmitter {
             const message = JSON.parse(data.toString());
 
             switch (message.type) {
-                case 'subscribe':
+                case "subscribe":
                     // Subscribe to specific topics
                     if (Array.isArray(message.topics)) {
-                        message.topics.forEach(topic => {
+                        message.topics.forEach((topic) => {
                             client.subscriptions.add(topic);
                         });
                     } else if (message.topic) {
                         client.subscriptions.add(message.topic);
                     }
                     this._sendToClient(clientId, {
-                        type: 'subscribed',
+                        type: "subscribed",
                         subscriptions: Array.from(client.subscriptions)
                     });
                     break;
 
-                case 'unsubscribe':
+                case "unsubscribe":
                     // Unsubscribe from topics
                     if (Array.isArray(message.topics)) {
-                        message.topics.forEach(topic => {
+                        message.topics.forEach((topic) => {
                             client.subscriptions.delete(topic);
                         });
                     } else if (message.topic) {
                         client.subscriptions.delete(message.topic);
                     }
                     this._sendToClient(clientId, {
-                        type: 'unsubscribed',
+                        type: "unsubscribed",
                         subscriptions: Array.from(client.subscriptions)
                     });
                     break;
 
-                case 'ping':
+                case "ping":
                     this._sendToClient(clientId, {
-                        type: 'pong',
+                        type: "pong",
                         timestamp: Date.now()
                     });
                     break;
 
-                case 'getStats':
+                case "getStats":
                     this._sendToClient(clientId, {
-                        type: 'stats',
+                        type: "stats",
                         stats: this.getStats()
                     });
                     break;
 
                 default:
-                    this.emit('clientMessage', { clientId, message });
+                    this.emit("clientMessage", { clientId, message });
             }
-
         } catch (err) {
             this._sendToClient(clientId, {
-                type: 'error',
-                message: 'Invalid JSON message'
+                type: "error",
+                message: "Invalid JSON message"
             });
         }
     }
@@ -250,7 +330,7 @@ class WebSocketManager extends EventEmitter {
         if (!this.isRunning) return;
 
         const message = {
-            type: 'data',
+            type: "data",
             topic: topic,
             timestamp: Date.now(),
             data: data
@@ -259,9 +339,9 @@ class WebSocketManager extends EventEmitter {
         const messageStr = JSON.stringify(message);
         this.stats.messagesPublished++;
 
-        for (const [clientId, client] of this.clients) {
+        for (const client of this.clients.values()) {
             // Check if client is subscribed to this topic or to '*' (all)
-            if (client.subscriptions.has('*') || client.subscriptions.has(topic)) {
+            if (client.subscriptions.has("*") || client.subscriptions.has(topic)) {
                 if (client.ws.readyState === WebSocket.OPEN) {
                     try {
                         client.ws.send(messageStr);
@@ -279,9 +359,9 @@ class WebSocketManager extends EventEmitter {
      * @param {Object} anomalyData - Anomaly detection result
      */
     broadcastAnomaly(anomalyData) {
-        this.broadcast('anomaly', {
+        this.broadcast("anomaly", {
             ...anomalyData,
-            eventType: 'anomaly'
+            eventType: "anomaly"
         });
     }
 
@@ -290,9 +370,9 @@ class WebSocketManager extends EventEmitter {
      * @param {Object} healthData - Health index or status data
      */
     broadcastHealth(healthData) {
-        this.broadcast('health', {
+        this.broadcast("health", {
             ...healthData,
-            eventType: 'health'
+            eventType: "health"
         });
     }
 
@@ -301,9 +381,9 @@ class WebSocketManager extends EventEmitter {
      * @param {Object} signalData - Signal analysis result
      */
     broadcastSignal(signalData) {
-        this.broadcast('signal', {
+        this.broadcast("signal", {
             ...signalData,
-            eventType: 'signal'
+            eventType: "signal"
         });
     }
 
@@ -325,7 +405,7 @@ class WebSocketManager extends EventEmitter {
                     client.ws.terminate();
                     this.clients.delete(clientId);
                     this.stats.clientsCurrent = this.clients.size;
-                    this.emit('clientTimeout', { clientId });
+                    this.emit("clientTimeout", { clientId });
                 } else if (client.ws.readyState === WebSocket.OPEN) {
                     // Send ping
                     client.ws.ping();
@@ -368,9 +448,9 @@ class WebSocketManager extends EventEmitter {
             }
 
             // Close all client connections
-            for (const [clientId, client] of this.clients) {
+            for (const client of this.clients.values()) {
                 try {
-                    client.ws.close(1000, 'Server shutting down');
+                    client.ws.close(1000, "Server shutting down");
                 } catch (err) {
                     // Ignore close errors
                 }
@@ -380,7 +460,7 @@ class WebSocketManager extends EventEmitter {
             if (this.server) {
                 this.server.close(() => {
                     this.isRunning = false;
-                    this.emit('stopped');
+                    this.emit("stopped");
                     resolve();
                 });
             } else {
@@ -395,12 +475,32 @@ class WebSocketManager extends EventEmitter {
 let globalWsManager = null;
 
 /**
- * Get or create the global WebSocket manager
+ * Get or create the global WebSocket manager.
+ *
+ * The first caller wins for security-sensitive options (`authToken`,
+ * `allowedOrigins`, `port`). Later callers that pass a *different* value emit
+ * a warning event so the operator notices misconfiguration instead of
+ * silently inheriting the first node's settings.
+ *
  * @param {Object} options - Configuration options
  */
 function getWebSocketManager(options = {}) {
     if (!globalWsManager) {
         globalWsManager = new WebSocketManager(options);
+        return globalWsManager;
+    }
+    const sensitive = ["authToken", "allowedOrigins", "port", "path"];
+    for (const key of sensitive) {
+        if (
+            Object.prototype.hasOwnProperty.call(options, key) &&
+            JSON.stringify(options[key]) !== JSON.stringify(globalWsManager[key])
+        ) {
+            globalWsManager.emit("optionMismatch", {
+                key,
+                requested: options[key],
+                inUse: globalWsManager[key]
+            });
+        }
     }
     return globalWsManager;
 }

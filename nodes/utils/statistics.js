@@ -18,13 +18,13 @@
  */
 function calculateMean(values) {
     if (!values || values.length === 0) {
-        throw new Error('Cannot calculate mean of empty array');
+        throw new Error("Cannot calculate mean of empty array");
     }
     return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
 /**
- * Calculate the standard deviation of an array of numbers
+ * Calculate the standard deviation of an array of numbers (population variance)
  * @param {number[]} values - Array of numeric values
  * @param {number} [mean] - Pre-calculated mean (optional, will be calculated if not provided)
  * @returns {number} The standard deviation
@@ -32,8 +32,12 @@ function calculateMean(values) {
 function calculateStdDev(values, mean) {
     if (!values || values.length === 0) return 0;
     const m = mean !== undefined ? mean : calculateMean(values);
-    const variance = values.reduce((sum, val) => sum + Math.pow(val - m, 2), 0) / values.length;
-    return Math.sqrt(variance);
+    let sumSq = 0;
+    for (let i = 0; i < values.length; i++) {
+        const d = values[i] - m;
+        sumSq += d * d;
+    }
+    return Math.sqrt(sumSq / values.length);
 }
 
 /**
@@ -45,12 +49,16 @@ function calculateStdDev(values, mean) {
 function calculateSampleStdDev(values, mean) {
     if (!values || values.length < 2) return 0;
     const m = mean !== undefined ? mean : calculateMean(values);
-    const variance = values.reduce((sum, val) => sum + Math.pow(val - m, 2), 0) / (values.length - 1);
-    return Math.sqrt(variance);
+    let sumSq = 0;
+    for (let i = 0; i < values.length; i++) {
+        const d = values[i] - m;
+        sumSq += d * d;
+    }
+    return Math.sqrt(sumSq / (values.length - 1));
 }
 
 /**
- * Calculate variance of an array of numbers
+ * Calculate variance of an array of numbers (population variance)
  * @param {number[]} values - Array of numeric values
  * @param {number} [mean] - Pre-calculated mean (optional)
  * @returns {number} The variance
@@ -58,7 +66,12 @@ function calculateSampleStdDev(values, mean) {
 function calculateVariance(values, mean) {
     if (!values || values.length === 0) return 0;
     const m = mean !== undefined ? mean : calculateMean(values);
-    return values.reduce((sum, val) => sum + Math.pow(val - m, 2), 0) / values.length;
+    let sumSq = 0;
+    for (let i = 0; i < values.length; i++) {
+        const d = values[i] - m;
+        sumSq += d * d;
+    }
+    return sumSq / values.length;
 }
 
 /**
@@ -150,8 +163,8 @@ function calculateIQRBounds(values, multiplier = 1.5) {
     const quartiles = calculateQuartiles(values);
     return {
         ...quartiles,
-        lowerBound: quartiles.q1 - (multiplier * quartiles.iqr),
-        upperBound: quartiles.q3 + (multiplier * quartiles.iqr)
+        lowerBound: quartiles.q1 - multiplier * quartiles.iqr,
+        upperBound: quartiles.q3 + multiplier * quartiles.iqr
     };
 }
 
@@ -238,7 +251,11 @@ function calculateSkewness(values) {
     const stdDev = calculateStdDev(values, mean);
     if (stdDev === 0) return 0;
 
-    const sum = values.reduce((acc, val) => acc + Math.pow((val - mean) / stdDev, 3), 0);
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+        const z = (values[i] - mean) / stdDev;
+        sum += z * z * z;
+    }
     return (n / ((n - 1) * (n - 2))) * sum;
 }
 
@@ -254,9 +271,15 @@ function calculateKurtosis(values) {
     const stdDev = calculateStdDev(values, mean);
     if (stdDev === 0) return 0;
 
-    const sum = values.reduce((acc, val) => acc + Math.pow((val - mean) / stdDev, 4), 0);
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+        const z = (values[i] - mean) / stdDev;
+        const z2 = z * z;
+        sum += z2 * z2;
+    }
     const factor = (n * (n + 1)) / ((n - 1) * (n - 2) * (n - 3));
-    const correction = (3 * Math.pow(n - 1, 2)) / ((n - 2) * (n - 3));
+    const nm1 = n - 1;
+    const correction = (3 * nm1 * nm1) / ((n - 2) * (n - 3));
 
     return factor * sum - correction;
 }
@@ -268,7 +291,10 @@ function calculateKurtosis(values) {
  */
 function calculateRMS(values) {
     if (!values || values.length === 0) return 0;
-    const sumSquares = values.reduce((sum, val) => sum + val * val, 0);
+    let sumSquares = 0;
+    for (let i = 0; i < values.length; i++) {
+        sumSquares += values[i] * values[i];
+    }
     return Math.sqrt(sumSquares / values.length);
 }
 
@@ -281,23 +307,31 @@ function calculateCrestFactor(values) {
     if (!values || values.length === 0) return 0;
     const rms = calculateRMS(values);
     if (rms === 0) return 0;
-    const peak = Math.max(...values.map(Math.abs));
+    let peak = 0;
+    for (let i = 0; i < values.length; i++) {
+        const a = values[i] < 0 ? -values[i] : values[i];
+        if (a > peak) peak = a;
+    }
     return peak / rms;
 }
 
 /**
- * Calculate moving average
+ * Calculate moving average using a rolling-sum (O(n) total)
  * @param {number[]} values - Array of numeric values
  * @param {number} windowSize - Size of the moving window
- * @returns {number[]} Array of moving averages
+ * @returns {number[]} Array of moving averages, one per input position
  */
 function calculateMovingAverage(values, windowSize) {
     if (!values || values.length === 0 || windowSize < 1) return [];
-    const result = [];
+    const result = new Array(values.length);
+    let sum = 0;
     for (let i = 0; i < values.length; i++) {
-        const start = Math.max(0, i - windowSize + 1);
-        const window = values.slice(start, i + 1);
-        result.push(calculateMean(window));
+        sum += values[i];
+        if (i >= windowSize) {
+            sum -= values[i - windowSize];
+        }
+        const count = i < windowSize ? i + 1 : windowSize;
+        result[i] = sum / count;
     }
     return result;
 }
@@ -318,12 +352,100 @@ function calculateEMA(values, alpha) {
 }
 
 /**
+ * Online running statistics (Welford's algorithm).
+ *
+ * Maintains count, mean and variance of a stream in O(1) per update.
+ * Numerically stable and avoids re-iterating a sliding buffer for every sample.
+ *
+ * @example
+ * const r = new RunningStats();
+ * r.push(42);
+ * r.push(43);
+ * r.mean();    // 42.5
+ * r.stdDev();  // population std dev
+ */
+class RunningStats {
+    constructor() {
+        this.n = 0;
+        this._mean = 0;
+        this._m2 = 0; // sum of squared differences from current mean
+    }
+
+    /** Add a sample. Non-finite values are ignored. */
+    push(value) {
+        if (typeof value !== "number" || !Number.isFinite(value)) return;
+        this.n++;
+        const delta = value - this._mean;
+        this._mean += delta / this.n;
+        const delta2 = value - this._mean;
+        this._m2 += delta * delta2;
+    }
+
+    /**
+     * Remove a previously pushed sample (Welford's reverse update).
+     *
+     * Be aware: the reverse update is *less* numerically stable than the
+     * forward update. On streams whose magnitude varies sharply (e.g. a
+     * single large value followed by many zeros) the std-dev can drift
+     * by a few ULPs of the magnitude over thousands of remove operations.
+     * Property-based tests in `test/utils-statistics-prop_spec.js` allow a
+     * relative tolerance of ~1e-3 for that reason.
+     *
+     * Callers that need bit-exact reproducibility on a sliding window can
+     * call `reset()` once the buffer fully turns over and re-push the live
+     * window from scratch.
+     */
+    remove(value) {
+        if (typeof value !== "number" || !Number.isFinite(value)) return;
+        if (this.n <= 1) {
+            this.n = 0;
+            this._mean = 0;
+            this._m2 = 0;
+            return;
+        }
+        const newN = this.n - 1;
+        const newMean = (this._mean * this.n - value) / newN;
+        // m2_new = m2_old - (x - mean_old) * (x - mean_new)
+        this._m2 -= (value - this._mean) * (value - newMean);
+        if (this._m2 < 0) this._m2 = 0; // guard against floating-point drift
+        this._mean = newMean;
+        this.n = newN;
+    }
+
+    count() {
+        return this.n;
+    }
+    mean() {
+        return this.n === 0 ? 0 : this._mean;
+    }
+    /** Population variance (1/n). */
+    variance() {
+        return this.n === 0 ? 0 : this._m2 / this.n;
+    }
+    /** Sample variance (1/(n-1), Bessel-corrected). */
+    sampleVariance() {
+        return this.n < 2 ? 0 : this._m2 / (this.n - 1);
+    }
+    stdDev() {
+        return Math.sqrt(this.variance());
+    }
+    sampleStdDev() {
+        return Math.sqrt(this.sampleVariance());
+    }
+    reset() {
+        this.n = 0;
+        this._mean = 0;
+        this._m2 = 0;
+    }
+}
+
+/**
  * Validate that a value is a finite number
  * @param {*} value - Value to validate
  * @returns {boolean} True if value is a finite number
  */
 function isValidNumber(value) {
-    return typeof value === 'number' && isFinite(value);
+    return typeof value === "number" && isFinite(value);
 }
 
 /**
@@ -365,6 +487,9 @@ module.exports = {
     calculateCrestFactor,
     calculateMovingAverage,
     calculateEMA,
+
+    // Streaming
+    RunningStats,
 
     // Validation
     isValidNumber,

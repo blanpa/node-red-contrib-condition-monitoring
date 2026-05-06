@@ -1,78 +1,82 @@
-module.exports = function(RED) {
+module.exports = function (RED) {
     "use strict";
-    
-    const fs = require('fs');
-    const path = require('path');
-    const zlib = require('zlib');
-    const { promisify } = require('util');
-    
+
+    const fs = require("fs");
+    const path = require("path");
+    const zlib = require("zlib");
+    const { promisify } = require("util");
+
     const gzip = promisify(zlib.gzip);
-    const gunzip = promisify(zlib.gunzip);
-    
+
     // Optional S3 support
     let S3Client = null;
     let PutObjectCommand = null;
     try {
-        const awsSdk = require('@aws-sdk/client-s3');
+        const awsSdk = require("@aws-sdk/client-s3");
         S3Client = awsSdk.S3Client;
         PutObjectCommand = awsSdk.PutObjectCommand;
     } catch (err) {
         // S3 not available - optional dependency
     }
-    
+
     // Data directory relative to Node-RED userDir
     function getDataDir(RED) {
-        return path.join(RED.settings.userDir || process.cwd(), 'training-data');
+        return path.join(RED.settings.userDir || process.cwd(), "training-data");
     }
-    
+
     /**
      * Training Data Collector Node
      * Collects sensor data in formats suitable for ML training
      */
     function TrainingDataCollectorNode(config) {
         RED.nodes.createNode(this, config);
-        var node = this;
-        
+        const node = this;
+
         // ========================================
         // Configuration
         // ========================================
-        
+
         // Dataset settings
         this.datasetName = config.datasetName || "dataset";
-        this.outputPath = config.outputPath || "";  // Relative to userDir/training-data
-        this.mode = config.mode || "batch";  // streaming, batch, timeseries
+        this.outputPath = config.outputPath || ""; // Relative to userDir/training-data
+        this.mode = config.mode || "batch"; // streaming, batch, timeseries
         this.autoSave = config.autoSave !== false;
-        
+
         // Feature configuration
-        this.featureSource = config.featureSource || "payload";  // payload, payload.features, custom
-        this.featureFields = config.featureFields ? 
-            (Array.isArray(config.featureFields) ? config.featureFields : config.featureFields.split(',').map(s => s.trim()).filter(s => s)) : 
-            [];
+        this.featureSource = config.featureSource || "payload"; // payload, payload.features, custom
+        this.featureFields = config.featureFields
+            ? Array.isArray(config.featureFields)
+                ? config.featureFields
+                : config.featureFields
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter((s) => s)
+            : [];
         this.includeTimestamp = config.includeTimestamp !== false;
-        this.timestampFormat = config.timestampFormat || "iso";  // iso, unix, unix_ms
-        
+        this.timestampFormat = config.timestampFormat || "iso"; // iso, unix, unix_ms
+
         // Label configuration
-        this.labelMode = config.labelMode || "manual";  // manual, fromMessage, rul, unlabeled
+        this.labelMode = config.labelMode || "manual"; // manual, fromMessage, rul, unlabeled
         this.labelField = config.labelField || "label";
         this.severityField = config.severityField || "severity";
         this.rulStartValue = parseFloat(config.rulStartValue) || 100;
-        this.rulUnit = config.rulUnit || "samples";  // samples, seconds, hours, days
+        this.rulUnit = config.rulUnit || "samples"; // samples, seconds, hours, days
         this.defaultLabel = config.defaultLabel || "normal";
-        
+
         // Buffer settings
         this.bufferSize = parseInt(config.bufferSize) || 1000;
-        this.windowSize = parseInt(config.windowSize) || 100;  // For timeseries mode
-        this.windowOverlap = parseInt(config.windowOverlap) || 50;  // Percent
+        this.windowSize = parseInt(config.windowSize) || 100; // For timeseries mode
+        this.windowOverlap = parseInt(config.windowOverlap) || 50; // Percent
         this.flushOnDeploy = config.flushOnDeploy !== false;
-        
+
         // Export settings
-        this.exportFormat = config.exportFormat || "csv";  // csv, jsonl, json, npy
+        this.exportFormat = config.exportFormat || "csv"; // csv, jsonl, json, npy
         this.compressionEnabled = config.compressionEnabled !== false;
-        this.compressionThreshold = parseInt(config.compressionThreshold) || 10000;  // Samples before compression
+        this.compressionThreshold = parseInt(config.compressionThreshold) || 10000; // Samples before compression
         this.splitRatio = config.splitRatio || { train: 0.8, val: 0.1, test: 0.1 };
         this.shuffleOnExport = config.shuffleOnExport !== false;
         this.includeMetadata = config.includeMetadata !== false;
-        
+
         // S3 settings
         this.s3Enabled = config.s3Enabled === true;
         this.s3Bucket = config.s3Bucket || "";
@@ -85,18 +89,20 @@ module.exports = function(RED) {
 
         // Warn if credentials were provided in config (deprecated)
         if (config.s3AccessKeyId || config.s3SecretAccessKey) {
-            node.warn("S3 credentials in node config are deprecated and ignored for security. Use AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables instead.");
+            node.warn(
+                "S3 credentials in node config are deprecated and ignored for security. Use AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables instead."
+            );
         }
-        
+
         // Data quality settings
         this.validateData = config.validateData !== false;
         this.removeOutliers = config.removeOutliers === true;
-        this.outlierThreshold = parseFloat(config.outlierThreshold) || 5.0;  // Z-score threshold
-        
+        this.outlierThreshold = parseFloat(config.outlierThreshold) || 5.0; // Z-score threshold
+
         // ========================================
         // State
         // ========================================
-        
+
         this.dataBuffer = [];
         this.featureNames = [];
         this.labelClasses = new Set();
@@ -106,11 +112,11 @@ module.exports = function(RED) {
         this.isPaused = false;
         this.currentRul = this.rulStartValue;
         this.lastTimestamp = null;
-        
+
         // Time-series window state
         this.windowBuffer = [];
         this.windowLabels = [];
-        
+
         // S3 client
         this.s3Client = null;
         if (this.s3Enabled && S3Client && this.s3AccessKeyId && this.s3SecretAccessKey) {
@@ -129,59 +135,63 @@ module.exports = function(RED) {
         } else if (this.s3Enabled && !S3Client) {
             node.warn("S3 upload enabled but @aws-sdk/client-s3 not installed. Run: npm install @aws-sdk/client-s3");
         }
-        
+
         // Initial status
         updateStatus();
-        
+
         // ========================================
         // Helper Functions
         // ========================================
-        
+
         function updateStatus() {
             if (node.isPaused) {
                 node.status({ fill: "yellow", shape: "ring", text: "paused - " + node.dataBuffer.length + " samples" });
             } else if (node.dataBuffer.length >= node.bufferSize) {
                 node.status({ fill: "yellow", shape: "dot", text: "buffer full - " + node.dataBuffer.length });
             } else {
-                var classInfo = node.labelClasses.size > 0 ? " | " + node.labelClasses.size + " classes" : "";
-                node.status({ fill: "green", shape: "dot", text: node.dataBuffer.length + "/" + node.bufferSize + classInfo });
+                const classInfo = node.labelClasses.size > 0 ? " | " + node.labelClasses.size + " classes" : "";
+                node.status({
+                    fill: "green",
+                    shape: "dot",
+                    text: node.dataBuffer.length + "/" + node.bufferSize + classInfo
+                });
             }
         }
-        
+
         function sanitizePath(inputPath) {
             // SECURITY: Prevent path traversal attacks
             // Remove any parent directory references and normalize the path
             if (!inputPath) return "";
 
             // Replace backslashes with forward slashes
-            var normalized = inputPath.replace(/\\/g, '/');
+            let normalized = inputPath.replace(/\\/g, "/");
 
             // Remove any parent directory references (..)
-            normalized = normalized.replace(/\.\./g, '');
+            normalized = normalized.replace(/\.\./g, "");
 
             // Remove leading slashes (prevent absolute paths)
-            normalized = normalized.replace(/^\/+/, '');
+            normalized = normalized.replace(/^\/+/, "");
 
             // Remove any remaining dangerous characters
-            normalized = normalized.replace(/[<>:"|?*]/g, '');
+            normalized = normalized.replace(/[<>:"|?*]/g, "");
 
             // Split, filter empty parts and rejoin
-            var parts = normalized.split('/').filter(function(part) {
-                return part && part !== '.' && part !== '..';
+            const parts = normalized.split("/").filter(function (part) {
+                return part && part !== "." && part !== "..";
             });
 
             return parts.join(path.sep);
         }
 
         function getOutputDir() {
-            var baseDir = getDataDir(RED);
+            const baseDir = getDataDir(RED);
             if (node.outputPath) {
-                var sanitized = sanitizePath(node.outputPath);
+                const sanitized = sanitizePath(node.outputPath);
                 if (sanitized) {
-                    var fullPath = path.join(baseDir, sanitized);
+                    const fullPath = path.join(baseDir, sanitized);
                     // SECURITY: Ensure the resolved path is still within baseDir
-                    var resolvedPath = path.resolve(fullPath);
-                    var resolvedBase = path.resolve(baseDir);
+                    const resolvedPath = path.resolve(fullPath);
+                    const resolvedBase = path.resolve(baseDir);
                     if (!resolvedPath.startsWith(resolvedBase)) {
                         node.warn("Output path attempted directory traversal. Using base directory.");
                         return baseDir;
@@ -191,15 +201,15 @@ module.exports = function(RED) {
             }
             return baseDir;
         }
-        
+
         function ensureOutputDir() {
-            var dir = getOutputDir();
+            const dir = getOutputDir();
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
             return dir;
         }
-        
+
         function formatTimestamp(date) {
             switch (node.timestampFormat) {
                 case "unix":
@@ -211,165 +221,191 @@ module.exports = function(RED) {
                     return date.toISOString();
             }
         }
-        
+
+        let parseWarned = false;
+        function safeParseFloat(v, fieldName) {
+            const parsed = parseFloat(v);
+            if (isNaN(parsed)) {
+                if (!parseWarned) {
+                    node.warn(
+                        "Non-numeric value in training data" +
+                            (fieldName ? " (field: " + fieldName + ")" : "") +
+                            ": " +
+                            JSON.stringify(v).substring(0, 50) +
+                            " — replaced with 0"
+                    );
+                    parseWarned = true;
+                }
+                return 0;
+            }
+            return parsed;
+        }
+
         function extractFeatures(msg) {
-            var features = {};
-            var values = [];
-            
+            const features = {};
+            let values = [];
+
             if (node.featureSource === "custom" && node.featureFields.length > 0) {
                 // Extract specific fields
-                node.featureFields.forEach(function(field) {
-                    var value = getNestedValue(msg, field);
+                node.featureFields.forEach(function (field) {
+                    const value = getNestedValue(msg, field);
                     if (value !== undefined && value !== null) {
-                        features[field] = parseFloat(value) || 0;
+                        features[field] = safeParseFloat(value, field);
                         values.push(features[field]);
                     }
                 });
             } else if (node.featureSource === "payload.features") {
                 // Features are in msg.payload.features
-                var featData = msg.payload && msg.payload.features;
+                const featData = msg.payload && msg.payload.features;
                 if (Array.isArray(featData)) {
-                    values = featData.map(function(v) { return parseFloat(v) || 0; });
-                    featData.forEach(function(v, i) {
-                        features["feature_" + i] = parseFloat(v) || 0;
+                    values = featData.map(function (v, i) {
+                        return safeParseFloat(v, "feature_" + i);
                     });
-                } else if (typeof featData === 'object') {
-                    Object.keys(featData).forEach(function(key) {
-                        features[key] = parseFloat(featData[key]) || 0;
+                    featData.forEach(function (v, i) {
+                        features["feature_" + i] = safeParseFloat(v, "feature_" + i);
+                    });
+                } else if (typeof featData === "object") {
+                    Object.keys(featData).forEach(function (key) {
+                        features[key] = safeParseFloat(featData[key], key);
                         values.push(features[key]);
                     });
                 }
             } else {
                 // Features are directly in payload
                 if (Array.isArray(msg.payload)) {
-                    values = msg.payload.map(function(v) { return parseFloat(v) || 0; });
-                    msg.payload.forEach(function(v, i) {
-                        features["feature_" + i] = parseFloat(v) || 0;
+                    values = msg.payload.map(function (v, i) {
+                        return safeParseFloat(v, "feature_" + i);
                     });
-                } else if (typeof msg.payload === 'object' && msg.payload !== null) {
-                    Object.keys(msg.payload).forEach(function(key) {
-                        var val = msg.payload[key];
-                        if (typeof val === 'number' || (typeof val === 'string' && !isNaN(parseFloat(val)))) {
-                            features[key] = parseFloat(val) || 0;
+                    msg.payload.forEach(function (v, i) {
+                        features["feature_" + i] = safeParseFloat(v, "feature_" + i);
+                    });
+                } else if (typeof msg.payload === "object" && msg.payload !== null) {
+                    Object.keys(msg.payload).forEach(function (key) {
+                        const val = msg.payload[key];
+                        if (typeof val === "number" || (typeof val === "string" && !isNaN(parseFloat(val)))) {
+                            features[key] = safeParseFloat(val, key);
                             values.push(features[key]);
                         }
                     });
-                } else if (typeof msg.payload === 'number') {
+                } else if (typeof msg.payload === "number") {
                     features["value"] = msg.payload;
                     values.push(msg.payload);
                 }
             }
-            
+
             // Update feature names if not set
             if (node.featureNames.length === 0 && Object.keys(features).length > 0) {
                 node.featureNames = Object.keys(features);
             }
-            
+
             return { features: features, values: values };
         }
-        
+
         function getNestedValue(obj, path) {
-            var parts = path.split('.');
-            var current = obj;
-            for (var i = 0; i < parts.length; i++) {
+            const parts = path.split(".");
+            let current = obj;
+            for (let i = 0; i < parts.length; i++) {
                 if (current === undefined || current === null) return undefined;
                 current = current[parts[i]];
             }
             return current;
         }
-        
+
         function extractLabel(msg) {
             switch (node.labelMode) {
-                case "fromMessage":
+                case "fromMessage": {
                     // Get label from message field
-                    var label = getNestedValue(msg, node.labelField);
+                    let label = getNestedValue(msg, node.labelField);
                     if (label === undefined || label === null) {
                         // Try common fields
-                        label = msg.label || msg.class || msg.category || 
-                                (msg.isAnomaly ? "anomaly" : null) ||
-                                (msg.anomaly && msg.anomaly.isAnomaly ? "anomaly" : null);
+                        label =
+                            msg.label ||
+                            msg.class ||
+                            msg.category ||
+                            (msg.isAnomaly ? "anomaly" : null) ||
+                            (msg.anomaly && msg.anomaly.isAnomaly ? "anomaly" : null);
                     }
                     return label !== undefined && label !== null ? String(label) : node.defaultLabel;
-                    
+                }
+
                 case "rul":
                     // Return current RUL value
                     return node.currentRul;
-                    
+
                 case "unlabeled":
                     return null;
-                    
+
                 case "manual":
                 default:
                     // Use default label or msg.label if provided
                     return msg.label !== undefined ? String(msg.label) : node.defaultLabel;
             }
         }
-        
+
         function extractSeverity(msg) {
-            var severity = getNestedValue(msg, node.severityField);
+            let severity = getNestedValue(msg, node.severityField);
             if (severity === undefined || severity === null) {
-                severity = msg.severity || msg.score || 
-                           (msg.anomaly && msg.anomaly.severity) || 0;
+                severity = msg.severity || msg.score || (msg.anomaly && msg.anomaly.severity) || 0;
             }
             return parseFloat(severity) || 0;
         }
-        
-        function updateRul(msg) {
+
+        function updateRul(_msg) {
             if (node.labelMode !== "rul") return;
-            
+
             switch (node.rulUnit) {
                 case "samples":
                     node.currentRul = Math.max(0, node.currentRul - 1);
                     break;
                 case "seconds":
                     if (node.lastTimestamp) {
-                        var elapsed = (Date.now() - node.lastTimestamp) / 1000;
+                        const elapsed = (Date.now() - node.lastTimestamp) / 1000;
                         node.currentRul = Math.max(0, node.currentRul - elapsed);
                     }
                     break;
                 case "hours":
                     if (node.lastTimestamp) {
-                        var elapsed = (Date.now() - node.lastTimestamp) / 3600000;
+                        const elapsed = (Date.now() - node.lastTimestamp) / 3600000;
                         node.currentRul = Math.max(0, node.currentRul - elapsed);
                     }
                     break;
                 case "days":
                     if (node.lastTimestamp) {
-                        var elapsed = (Date.now() - node.lastTimestamp) / 86400000;
+                        const elapsed = (Date.now() - node.lastTimestamp) / 86400000;
                         node.currentRul = Math.max(0, node.currentRul - elapsed);
                     }
                     break;
             }
             node.lastTimestamp = Date.now();
         }
-        
+
         function validateSample(features, values) {
             if (!node.validateData) return { valid: true };
-            
-            var issues = [];
-            
+
+            const issues = [];
+
             // Check for NaN/Infinity
-            for (var i = 0; i < values.length; i++) {
+            for (let i = 0; i < values.length; i++) {
                 if (isNaN(values[i]) || !isFinite(values[i])) {
                     issues.push("Invalid value at index " + i);
                 }
             }
-            
+
             // Check feature count consistency
             if (node.featureNames.length > 0 && values.length !== node.featureNames.length) {
                 issues.push("Feature count mismatch: expected " + node.featureNames.length + ", got " + values.length);
             }
-            
+
             return {
                 valid: issues.length === 0,
                 issues: issues
             };
         }
-        
+
         function updateStatistics(features) {
-            Object.keys(features).forEach(function(key) {
-                var value = features[key];
-                
+            Object.keys(features).forEach(function (key) {
+                const value = features[key];
+
                 if (!node.statistics[key]) {
                     node.statistics[key] = {
                         count: 0,
@@ -379,8 +415,8 @@ module.exports = function(RED) {
                         max: -Infinity
                     };
                 }
-                
-                var stats = node.statistics[key];
+
+                const stats = node.statistics[key];
                 stats.count++;
                 stats.sum += value;
                 stats.sumSquares += value * value;
@@ -388,16 +424,16 @@ module.exports = function(RED) {
                 stats.max = Math.max(stats.max, value);
             });
         }
-        
+
         function getStatisticsSummary() {
-            var summary = {};
-            
-            Object.keys(node.statistics).forEach(function(key) {
-                var stats = node.statistics[key];
-                var mean = stats.sum / stats.count;
-                var variance = (stats.sumSquares / stats.count) - (mean * mean);
-                var std = Math.sqrt(Math.max(0, variance));
-                
+            const summary = {};
+
+            Object.keys(node.statistics).forEach(function (key) {
+                const stats = node.statistics[key];
+                const mean = stats.sum / stats.count;
+                const variance = stats.sumSquares / stats.count - mean * mean;
+                const std = Math.sqrt(Math.max(0, variance));
+
                 summary[key] = {
                     count: stats.count,
                     mean: mean,
@@ -406,69 +442,69 @@ module.exports = function(RED) {
                     max: stats.max
                 };
             });
-            
+
             return summary;
         }
-        
+
         function getLabelDistribution() {
-            var distribution = {};
-            node.dataBuffer.forEach(function(sample) {
-                var label = sample.label;
+            const distribution = {};
+            node.dataBuffer.forEach(function (sample) {
+                const label = sample.label;
                 if (label !== null && label !== undefined) {
                     distribution[label] = (distribution[label] || 0) + 1;
                 }
             });
             return distribution;
         }
-        
+
         function shuffleArray(array) {
-            var result = array.slice();
-            for (var i = result.length - 1; i > 0; i--) {
-                var j = Math.floor(Math.random() * (i + 1));
-                var temp = result[i];
+            const result = array.slice();
+            for (let i = result.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                const temp = result[i];
                 result[i] = result[j];
                 result[j] = temp;
             }
             return result;
         }
-        
+
         function splitData(data, ratio) {
-            var shuffled = node.shuffleOnExport ? shuffleArray(data) : data;
-            var total = shuffled.length;
-            
-            var trainSize = Math.floor(total * ratio.train);
-            var valSize = Math.floor(total * ratio.val);
-            
+            const shuffled = node.shuffleOnExport ? shuffleArray(data) : data;
+            const total = shuffled.length;
+
+            const trainSize = Math.floor(total * ratio.train);
+            const valSize = Math.floor(total * ratio.val);
+
             return {
                 train: shuffled.slice(0, trainSize),
                 val: shuffled.slice(trainSize, trainSize + valSize),
                 test: shuffled.slice(trainSize + valSize)
             };
         }
-        
+
         // ========================================
         // Export Functions
         // ========================================
-        
+
         async function exportToCSV(data, filename) {
             if (data.length === 0) return null;
-            
-            var outputDir = ensureOutputDir();
-            var headers = node.includeTimestamp ? ["timestamp"] : [];
+
+            const outputDir = ensureOutputDir();
+            let headers = node.includeTimestamp ? ["timestamp"] : [];
             headers = headers.concat(node.featureNames);
             if (node.labelMode !== "unlabeled") {
                 headers.push("label");
                 headers.push("severity");
             }
-            
-            var lines = [headers.join(",")];
-            
-            data.forEach(function(sample) {
-                var row = [];
+
+            const lines = [headers.join(",")];
+
+            data.forEach(function (sample) {
+                const row = [];
                 if (node.includeTimestamp) {
                     row.push(sample.timestamp);
                 }
-                node.featureNames.forEach(function(name) {
+                node.featureNames.forEach(function (name) {
                     row.push(sample.features[name] !== undefined ? sample.features[name] : "");
                 });
                 if (node.labelMode !== "unlabeled") {
@@ -477,28 +513,28 @@ module.exports = function(RED) {
                 }
                 lines.push(row.join(","));
             });
-            
-            var content = lines.join("\n");
-            var filePath = path.join(outputDir, filename);
-            
+
+            const content = lines.join("\n");
+            let filePath = path.join(outputDir, filename);
+
             // Compress if enabled and over threshold
             if (node.compressionEnabled && data.length >= node.compressionThreshold) {
-                var compressed = await gzip(Buffer.from(content, 'utf8'));
-                filePath += '.gz';
+                const compressed = await gzip(Buffer.from(content, "utf8"));
+                filePath += ".gz";
                 fs.writeFileSync(filePath, compressed);
             } else {
-                fs.writeFileSync(filePath, content, 'utf8');
+                fs.writeFileSync(filePath, content, "utf8");
             }
-            
+
             return filePath;
         }
-        
+
         async function exportToJSONL(data, filename) {
             if (data.length === 0) return null;
-            
-            var outputDir = ensureOutputDir();
-            var lines = data.map(function(sample) {
-                var obj = {
+
+            const outputDir = ensureOutputDir();
+            const lines = data.map(function (sample) {
+                const obj = {
                     features: sample.values || Object.values(sample.features)
                 };
                 if (node.includeTimestamp) {
@@ -512,27 +548,27 @@ module.exports = function(RED) {
                 }
                 return JSON.stringify(obj);
             });
-            
-            var content = lines.join("\n");
-            var filePath = path.join(outputDir, filename);
-            
+
+            const content = lines.join("\n");
+            let filePath = path.join(outputDir, filename);
+
             if (node.compressionEnabled && data.length >= node.compressionThreshold) {
-                var compressed = await gzip(Buffer.from(content, 'utf8'));
-                filePath += '.gz';
+                const compressed = await gzip(Buffer.from(content, "utf8"));
+                filePath += ".gz";
                 fs.writeFileSync(filePath, compressed);
             } else {
-                fs.writeFileSync(filePath, content, 'utf8');
+                fs.writeFileSync(filePath, content, "utf8");
             }
-            
+
             return filePath;
         }
-        
+
         async function exportToJSON(data, filename) {
             if (data.length === 0) return null;
-            
-            var outputDir = ensureOutputDir();
-            
-            var output = {
+
+            const outputDir = ensureOutputDir();
+
+            const output = {
                 datasetInfo: {
                     name: node.datasetName,
                     created: new Date().toISOString(),
@@ -542,8 +578,8 @@ module.exports = function(RED) {
                     featureDimension: node.featureNames.length,
                     statistics: getStatisticsSummary()
                 },
-                data: data.map(function(sample) {
-                    var obj = {
+                data: data.map(function (sample) {
+                    const obj = {
                         x: sample.values || Object.values(sample.features)
                     };
                     if (node.labelMode !== "unlabeled" && sample.label !== null) {
@@ -555,25 +591,25 @@ module.exports = function(RED) {
                     return obj;
                 })
             };
-            
-            var content = JSON.stringify(output, null, 2);
-            var filePath = path.join(outputDir, filename);
-            
+
+            const content = JSON.stringify(output, null, 2);
+            let filePath = path.join(outputDir, filename);
+
             if (node.compressionEnabled && data.length >= node.compressionThreshold) {
-                var compressed = await gzip(Buffer.from(content, 'utf8'));
-                filePath += '.gz';
+                const compressed = await gzip(Buffer.from(content, "utf8"));
+                filePath += ".gz";
                 fs.writeFileSync(filePath, compressed);
             } else {
-                fs.writeFileSync(filePath, content, 'utf8');
+                fs.writeFileSync(filePath, content, "utf8");
             }
-            
+
             return filePath;
         }
-        
+
         async function exportMetadata(filename) {
-            var outputDir = ensureOutputDir();
-            
-            var metadata = {
+            const outputDir = ensureOutputDir();
+
+            const metadata = {
                 datasetInfo: {
                     name: node.datasetName,
                     created: new Date().toISOString(),
@@ -604,37 +640,37 @@ module.exports = function(RED) {
                     validationEnabled: node.validateData
                 }
             };
-            
-            var filePath = path.join(outputDir, filename);
-            fs.writeFileSync(filePath, JSON.stringify(metadata, null, 2), 'utf8');
-            
+
+            const filePath = path.join(outputDir, filename);
+            fs.writeFileSync(filePath, JSON.stringify(metadata, null, 2), "utf8");
+
             return filePath;
         }
-        
+
         async function uploadToS3(filePath, s3Key) {
             if (!node.s3Client || !node.s3Bucket) {
                 throw new Error("S3 client not configured");
             }
-            
-            var fileContent = fs.readFileSync(filePath);
-            var contentType = 'application/octet-stream';
-            
-            if (filePath.endsWith('.csv')) contentType = 'text/csv';
-            else if (filePath.endsWith('.json')) contentType = 'application/json';
-            else if (filePath.endsWith('.jsonl')) contentType = 'application/x-ndjson';
-            else if (filePath.endsWith('.gz')) contentType = 'application/gzip';
-            
-            var command = new PutObjectCommand({
+
+            const fileContent = fs.readFileSync(filePath);
+            let contentType = "application/octet-stream";
+
+            if (filePath.endsWith(".csv")) contentType = "text/csv";
+            else if (filePath.endsWith(".json")) contentType = "application/json";
+            else if (filePath.endsWith(".jsonl")) contentType = "application/x-ndjson";
+            else if (filePath.endsWith(".gz")) contentType = "application/gzip";
+
+            const command = new PutObjectCommand({
                 Bucket: node.s3Bucket,
                 Key: node.s3Prefix + s3Key,
                 Body: fileContent,
                 ContentType: contentType
             });
-            
+
             await node.s3Client.send(command);
             return "s3://" + node.s3Bucket + "/" + node.s3Prefix + s3Key;
         }
-        
+
         async function performExport(msg) {
             if (node.dataBuffer.length === 0) {
                 return {
@@ -643,30 +679,33 @@ module.exports = function(RED) {
                     samples: 0
                 };
             }
-            
-            var timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-            var baseFilename = node.datasetName + "_" + timestamp;
-            var exportedFiles = [];
-            var s3Urls = [];
-            
+
+            const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+            const baseFilename = node.datasetName + "_" + timestamp;
+            const exportedFiles = [];
+            const s3Urls = [];
+
             try {
                 node.status({ fill: "yellow", shape: "dot", text: "exporting..." });
-                
+
                 // Split data if ratio is configured
-                var splits = {};
-                if (node.splitRatio && (node.splitRatio.train < 1 || node.splitRatio.val > 0 || node.splitRatio.test > 0)) {
+                let splits = {};
+                if (
+                    node.splitRatio &&
+                    (node.splitRatio.train < 1 || node.splitRatio.val > 0 || node.splitRatio.test > 0)
+                ) {
                     splits = splitData(node.dataBuffer, node.splitRatio);
                 } else {
                     splits.train = node.dataBuffer;
                 }
-                
+
                 // Export each split
-                for (var splitName in splits) {
+                for (const splitName in splits) {
                     if (splits[splitName].length === 0) continue;
-                    
-                    var filename = baseFilename + (Object.keys(splits).length > 1 ? "_" + splitName : "");
-                    var filePath = null;
-                    
+
+                    const filename = baseFilename + (Object.keys(splits).length > 1 ? "_" + splitName : "");
+                    let filePath = null;
+
                     switch (node.exportFormat) {
                         case "csv":
                             filePath = await exportToCSV(splits[splitName], filename + ".csv");
@@ -680,15 +719,15 @@ module.exports = function(RED) {
                         default:
                             filePath = await exportToCSV(splits[splitName], filename + ".csv");
                     }
-                    
+
                     if (filePath) {
                         exportedFiles.push(filePath);
-                        
+
                         // Upload to S3 if enabled
                         if (node.s3Enabled && node.s3Client) {
                             try {
-                                var s3Key = path.basename(filePath);
-                                var s3Url = await uploadToS3(filePath, s3Key);
+                                const s3Key = path.basename(filePath);
+                                const s3Url = await uploadToS3(filePath, s3Key);
                                 s3Urls.push(s3Url);
                             } catch (s3Err) {
                                 node.warn("S3 upload failed: " + s3Err.message);
@@ -696,23 +735,23 @@ module.exports = function(RED) {
                         }
                     }
                 }
-                
+
                 // Export metadata
                 if (node.includeMetadata) {
-                    var metaPath = await exportMetadata(baseFilename + "_metadata.json");
+                    const metaPath = await exportMetadata(baseFilename + "_metadata.json");
                     exportedFiles.push(metaPath);
-                    
+
                     if (node.s3Enabled && node.s3Client) {
                         try {
-                            var s3Url = await uploadToS3(metaPath, path.basename(metaPath));
+                            const s3Url = await uploadToS3(metaPath, path.basename(metaPath));
                             s3Urls.push(s3Url);
                         } catch (s3Err) {
                             node.warn("S3 metadata upload failed: " + s3Err.message);
                         }
                     }
                 }
-                
-                var result = {
+
+                const result = {
                     success: true,
                     samples: node.dataBuffer.length,
                     files: exportedFiles,
@@ -726,19 +765,18 @@ module.exports = function(RED) {
                     features: node.featureNames,
                     classes: Array.from(node.labelClasses)
                 };
-                
+
                 if (s3Urls.length > 0) {
                     result.s3Urls = s3Urls;
                 }
-                
+
                 // Clear buffer after successful export if autoSave
                 if (msg && msg.clearAfterExport !== false) {
                     node.dataBuffer = [];
                 }
-                
+
                 updateStatus();
                 return result;
-                
             } catch (err) {
                 node.error("Export failed: " + err.message);
                 updateStatus();
@@ -749,20 +787,28 @@ module.exports = function(RED) {
                 };
             }
         }
-        
+
         // ========================================
         // Message Processing
         // ========================================
-        
-        node.on('input', async function(msg, send, done) {
-            send = send || function() { node.send.apply(node, arguments); };
-            done = done || function(err) { if (err) node.error(err, msg); };
-            
+
+        node.on("input", async function (msg, send, done) {
+            send =
+                send ||
+                function () {
+                    node.send.apply(node, arguments);
+                };
+            done =
+                done ||
+                function (err) {
+                    if (err) node.error(err, msg);
+                };
+
             try {
                 // Handle control actions
                 if (msg.action) {
-                    var result = null;
-                    
+                    let result = null;
+
                     switch (msg.action) {
                         case "save":
                         case "export":
@@ -770,7 +816,7 @@ module.exports = function(RED) {
                             send({ payload: result, topic: "export" });
                             done();
                             return;
-                            
+
                         case "clear":
                             node.dataBuffer = [];
                             node.windowBuffer = [];
@@ -783,7 +829,7 @@ module.exports = function(RED) {
                             send({ payload: { success: true, action: "clear" }, topic: "control" });
                             done();
                             return;
-                            
+
                         case "stats":
                             result = {
                                 samples: node.dataBuffer.length,
@@ -792,54 +838,57 @@ module.exports = function(RED) {
                                 classes: Array.from(node.labelClasses),
                                 labelDistribution: getLabelDistribution(),
                                 statistics: getStatisticsSummary(),
-                                bufferUsage: (node.dataBuffer.length / node.bufferSize * 100).toFixed(1) + "%",
+                                bufferUsage: ((node.dataBuffer.length / node.bufferSize) * 100).toFixed(1) + "%",
                                 sessionDuration: Date.now() - node.sessionStart
                             };
                             send({ payload: result, topic: "stats" });
                             done();
                             return;
-                            
+
                         case "pause":
                             node.isPaused = true;
                             updateStatus();
                             send({ payload: { success: true, action: "pause" }, topic: "control" });
                             done();
                             return;
-                            
+
                         case "resume":
                             node.isPaused = false;
                             updateStatus();
                             send({ payload: { success: true, action: "resume" }, topic: "control" });
                             done();
                             return;
-                            
+
                         case "resetRul":
                             node.currentRul = msg.rulValue !== undefined ? msg.rulValue : node.rulStartValue;
-                            send({ payload: { success: true, action: "resetRul", rul: node.currentRul }, topic: "control" });
+                            send({
+                                payload: { success: true, action: "resetRul", rul: node.currentRul },
+                                topic: "control"
+                            });
                             done();
                             return;
                     }
                 }
-                
+
                 // Skip if paused
                 if (node.isPaused) {
                     done();
                     return;
                 }
-                
+
                 // Extract features and label
-                var extracted = extractFeatures(msg);
-                var features = extracted.features;
-                var values = extracted.values;
-                
+                const extracted = extractFeatures(msg);
+                const features = extracted.features;
+                const values = extracted.values;
+
                 if (Object.keys(features).length === 0) {
                     node.warn("No features extracted from message");
                     done();
                     return;
                 }
-                
+
                 // Validate data
-                var validation = validateSample(features, values);
+                const validation = validateSample(features, values);
                 if (!validation.valid) {
                     if (node.validateData) {
                         node.warn("Invalid sample: " + validation.issues.join(", "));
@@ -847,106 +896,109 @@ module.exports = function(RED) {
                         return;
                     }
                 }
-                
+
                 // Update RUL if in RUL mode
                 updateRul(msg);
-                
+
                 // Extract label
-                var label = extractLabel(msg);
-                var severity = extractSeverity(msg);
-                
+                const label = extractLabel(msg);
+                const severity = extractSeverity(msg);
+
                 // Track label classes
                 if (label !== null && label !== undefined) {
                     node.labelClasses.add(String(label));
                 }
-                
+
                 // Create sample
-                var sample = {
+                const sample = {
                     timestamp: formatTimestamp(new Date()),
                     features: features,
                     values: values,
                     label: label,
                     severity: severity
                 };
-                
+
                 // Update statistics
                 updateStatistics(features);
                 node.sampleCount++;
-                
+
                 // Handle based on mode
                 if (node.mode === "streaming") {
                     // Streaming mode: immediately append to file (async)
-                    var outputDir = ensureOutputDir();
-                    var streamFile = path.join(outputDir, node.datasetName + "_stream.jsonl");
+                    const outputDir = ensureOutputDir();
+                    const streamFile = path.join(outputDir, node.datasetName + "_stream.jsonl");
 
-                    var line = JSON.stringify({
-                        timestamp: sample.timestamp,
-                        features: values,
-                        label: label,
-                        severity: severity
-                    }) + "\n";
+                    const line =
+                        JSON.stringify({
+                            timestamp: sample.timestamp,
+                            features: values,
+                            label: label,
+                            severity: severity
+                        }) + "\n";
 
                     // PERFORMANCE: Use async file I/O to avoid blocking the event loop
-                    fs.promises.appendFile(streamFile, line, 'utf8').catch(function(err) {
+                    fs.promises.appendFile(streamFile, line, "utf8").catch(function (err) {
                         node.warn("Failed to append to stream file: " + err.message);
                     });
-                    node.dataBuffer.push(sample);  // Also keep in buffer for stats
+                    node.dataBuffer.push(sample); // Also keep in buffer for stats
 
                     // Trim buffer to avoid memory issues
                     if (node.dataBuffer.length > node.bufferSize) {
                         node.dataBuffer.shift();
                     }
-                    
                 } else if (node.mode === "timeseries") {
                     // Time-series mode: collect windows
                     node.windowBuffer.push(values);
                     node.windowLabels.push(label);
-                    
+
                     if (node.windowBuffer.length >= node.windowSize) {
                         // Create window sample
-                        var windowSample = {
+                        const windowSample = {
                             timestamp: formatTimestamp(new Date()),
                             features: node.windowBuffer.slice(),
-                            label: node.windowLabels[node.windowLabels.length - 1],  // Use last label
+                            label: node.windowLabels[node.windowLabels.length - 1], // Use last label
                             severity: severity
                         };
-                        
+
                         node.dataBuffer.push(windowSample);
-                        
+
                         // Slide window with overlap
-                        var slideAmount = Math.floor(node.windowSize * (1 - node.windowOverlap / 100));
+                        const slideAmount = Math.floor(node.windowSize * (1 - node.windowOverlap / 100));
                         node.windowBuffer = node.windowBuffer.slice(slideAmount);
                         node.windowLabels = node.windowLabels.slice(slideAmount);
                     }
-                    
                 } else {
                     // Batch mode: collect in buffer
                     node.dataBuffer.push(sample);
                 }
-                
+
                 // Auto-save when buffer is full
                 if (node.autoSave && node.dataBuffer.length >= node.bufferSize) {
-                    var exportResult = await performExport({ clearAfterExport: true });
+                    const exportResult = await performExport({ clearAfterExport: true });
                     if (exportResult.success) {
-                        node.log("Auto-saved " + exportResult.samples + " samples to " + (exportResult.files || []).join(", "));
+                        node.log(
+                            "Auto-saved " +
+                                exportResult.samples +
+                                " samples to " +
+                                (exportResult.files || []).join(", ")
+                        );
                     }
                 }
-                
+
                 updateStatus();
                 done();
-                
             } catch (err) {
                 node.status({ fill: "red", shape: "ring", text: "error" });
                 done(err);
             }
         });
-        
+
         // Cleanup on close
-        node.on('close', async function(removed, done) {
+        node.on("close", async function (removed, done) {
             // Save remaining data if configured
             if (node.flushOnDeploy && node.dataBuffer.length > 0) {
                 try {
-                    var result = await performExport({ clearAfterExport: false });
+                    const result = await performExport({ clearAfterExport: false });
                     if (result.success) {
                         node.log("Saved " + result.samples + " samples on close");
                     }
@@ -954,71 +1006,79 @@ module.exports = function(RED) {
                     node.warn("Failed to save on close: " + err.message);
                 }
             }
-            
+
             node.dataBuffer = [];
             node.windowBuffer = [];
             node.windowLabels = [];
             node.status({});
-            
+
             if (done) done();
         });
     }
-    
+
     RED.nodes.registerType("training-data-collector", TrainingDataCollectorNode);
-    
+
     // ========================================
     // HTTP Admin Endpoints
     // ========================================
-    
+
     // Get available datasets
-    RED.httpAdmin.get("/training-data-collector/datasets", function(req, res) {
+    RED.httpAdmin.get("/training-data-collector/datasets", function (req, res) {
         try {
-            var dataDir = getDataDir(RED);
+            const dataDir = getDataDir(RED);
             if (!fs.existsSync(dataDir)) {
                 return res.json({ datasets: [], path: dataDir });
             }
-            
-            var files = fs.readdirSync(dataDir);
-            var datasets = files.filter(function(f) {
-                return f.endsWith('.csv') || f.endsWith('.json') || f.endsWith('.jsonl') || 
-                       f.endsWith('.csv.gz') || f.endsWith('.json.gz') || f.endsWith('.jsonl.gz');
-            }).map(function(f) {
-                var filePath = path.join(dataDir, f);
-                var stats = fs.statSync(filePath);
-                return {
-                    name: f,
-                    path: filePath,
-                    size: stats.size,
-                    modified: stats.mtime,
-                    compressed: f.endsWith('.gz')
-                };
-            });
-            
+
+            const files = fs.readdirSync(dataDir);
+            const datasets = files
+                .filter(function (f) {
+                    return (
+                        f.endsWith(".csv") ||
+                        f.endsWith(".json") ||
+                        f.endsWith(".jsonl") ||
+                        f.endsWith(".csv.gz") ||
+                        f.endsWith(".json.gz") ||
+                        f.endsWith(".jsonl.gz")
+                    );
+                })
+                .map(function (f) {
+                    const filePath = path.join(dataDir, f);
+                    const stats = fs.statSync(filePath);
+                    return {
+                        name: f,
+                        path: filePath,
+                        size: stats.size,
+                        modified: stats.mtime,
+                        compressed: f.endsWith(".gz")
+                    };
+                });
+
             res.json({ datasets: datasets, path: dataDir });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
     });
-    
+
     // Check S3 availability
-    RED.httpAdmin.get("/training-data-collector/s3-status", function(req, res) {
+    RED.httpAdmin.get("/training-data-collector/s3-status", function (req, res) {
         res.json({
             available: S3Client !== null,
             message: S3Client ? "AWS SDK available" : "Install @aws-sdk/client-s3 for S3 support"
         });
     });
-    
+
     // Download dataset
-    RED.httpAdmin.get("/training-data-collector/download/:filename", function(req, res) {
+    RED.httpAdmin.get("/training-data-collector/download/:filename", function (req, res) {
         try {
-            var dataDir = getDataDir(RED);
-            var filename = req.params.filename;
-            var filePath = path.join(dataDir, filename);
-            
+            const dataDir = getDataDir(RED);
+            const filename = req.params.filename;
+            const filePath = path.join(dataDir, filename);
+
             if (!fs.existsSync(filePath)) {
                 return res.status(404).json({ error: "File not found" });
             }
-            
+
             res.download(filePath);
         } catch (err) {
             res.status(500).json({ error: err.message });

@@ -1,12 +1,12 @@
 /**
  * State Persistence Manager
  * =========================
- * 
+ *
  * Provides persistent state storage for condition monitoring nodes.
  * Uses Node-RED's context storage API which supports:
  * - Memory (default)
  * - File-based persistence (if configured in settings.js)
- * 
+ *
  * This allows nodes to survive Node-RED restarts and maintain
  * their training state, buffers, and calculated statistics.
  */
@@ -27,40 +27,42 @@ class NodeStateManager {
     constructor(node, options = {}) {
         this.node = node;
         this.storeName = options.storeName || this._detectStoreName();
-        this.stateKey = options.stateKey || 'persistedState';
+        this.stateKey = options.stateKey || "persistedState";
         this.saveInterval = options.saveInterval || 30000; // 30 seconds
         this.autoSave = options.autoSave !== false;
         this.saveOnChange = options.saveOnChange === true;
-        
+
         this.state = {};
         this.isDirty = false;
         this.saveTimer = null;
         this.isLoaded = false;
-        
+
         // Start auto-save timer if enabled
         if (this.autoSave) {
             this._startAutoSave();
         }
     }
-    
+
     /**
-     * Detect the best available context store
+     * Default Node-RED context store.
+     *
+     * Returns the 'default' store, which uses whatever store the user wired up in
+     * `settings.js` (`contextStorage.default`). For state to actually survive a
+     * restart, the user must register a file-backed store, e.g.:
+     *
+     *     contextStorage: {
+     *         default: { module: 'localfilesystem' }
+     *     }
+     *
+     * Callers that want to target a specific store can pass `options.storeName`
+     * to the constructor.
+     *
+     * @returns {string} Store name to use with context.get/set
      */
     _detectStoreName() {
-        try {
-            // Try to use 'file' store if available (for persistence)
-            const context = this.node.context();
-            if (context.flow && typeof context.flow.keys === 'function') {
-                // Check if file store is configured
-                // Return 'default' which will use whatever is configured
-                return 'default';
-            }
-        } catch (err) {
-            // Ignore
-        }
-        return 'default';
+        return "default";
     }
-    
+
     /**
      * Start periodic auto-save
      */
@@ -68,19 +70,19 @@ class NodeStateManager {
         if (this.saveTimer) {
             clearInterval(this.saveTimer);
         }
-        
+
         this.saveTimer = setInterval(() => {
             if (this.isDirty) {
                 this.save();
             }
         }, this.saveInterval);
-        
+
         // Unref the timer so it doesn't keep the process alive during shutdown
         if (this.saveTimer.unref) {
             this.saveTimer.unref();
         }
     }
-    
+
     /**
      * Load state from context storage
      * @returns {Promise<Object>} Loaded state or empty object
@@ -90,8 +92,8 @@ class NodeStateManager {
             try {
                 const context = this.node.context();
                 const stored = context.get(this.stateKey, this.storeName);
-                
-                if (stored && typeof stored === 'object') {
+
+                if (stored && typeof stored === "object") {
                     this.state = this._deserializeState(stored);
                     this.isLoaded = true;
                     this.node.debug(`[Persistence] Loaded state: ${Object.keys(this.state).length} keys`);
@@ -99,7 +101,7 @@ class NodeStateManager {
                     this.state = {};
                     this.isLoaded = true;
                 }
-                
+
                 resolve(this.state);
             } catch (err) {
                 this.node.warn(`[Persistence] Failed to load state: ${err.message}`);
@@ -109,7 +111,7 @@ class NodeStateManager {
             }
         });
     }
-    
+
     /**
      * Save state to context storage
      * @returns {Promise<boolean>} Success
@@ -119,7 +121,7 @@ class NodeStateManager {
             try {
                 const context = this.node.context();
                 const serialized = this._serializeState(this.state);
-                
+
                 context.set(this.stateKey, serialized, this.storeName, (err) => {
                     if (err) {
                         this.node.warn(`[Persistence] Failed to save state: ${err.message}`);
@@ -136,7 +138,7 @@ class NodeStateManager {
             }
         });
     }
-    
+
     /**
      * Get a value from state
      * @param {string} key - State key
@@ -146,7 +148,7 @@ class NodeStateManager {
     get(key, defaultValue = undefined) {
         return key in this.state ? this.state[key] : defaultValue;
     }
-    
+
     /**
      * Set a value in state
      * @param {string} key - State key
@@ -155,12 +157,12 @@ class NodeStateManager {
     set(key, value) {
         this.state[key] = value;
         this.isDirty = true;
-        
+
         if (this.saveOnChange) {
             this.save();
         }
     }
-    
+
     /**
      * Set multiple values
      * @param {Object} values - Key-value pairs
@@ -168,12 +170,12 @@ class NodeStateManager {
     setMultiple(values) {
         Object.assign(this.state, values);
         this.isDirty = true;
-        
+
         if (this.saveOnChange) {
             this.save();
         }
     }
-    
+
     /**
      * Delete a key from state
      * @param {string} key - State key
@@ -182,25 +184,25 @@ class NodeStateManager {
         if (key in this.state) {
             delete this.state[key];
             this.isDirty = true;
-            
+
             if (this.saveOnChange) {
                 this.save();
             }
         }
     }
-    
+
     /**
      * Clear all state
      */
     clear() {
         this.state = {};
         this.isDirty = true;
-        
+
         if (this.saveOnChange) {
             this.save();
         }
     }
-    
+
     /**
      * Check if a key exists
      * @param {string} key - State key
@@ -209,7 +211,7 @@ class NodeStateManager {
     has(key) {
         return key in this.state;
     }
-    
+
     /**
      * Get all keys
      * @returns {string[]}
@@ -217,7 +219,7 @@ class NodeStateManager {
     keys() {
         return Object.keys(this.state);
     }
-    
+
     /**
      * Get the entire state object
      * @returns {Object}
@@ -225,46 +227,46 @@ class NodeStateManager {
     getAll() {
         return { ...this.state };
     }
-    
+
     /**
      * Serialize state for storage (handle special types)
      */
     _serializeState(state) {
         const serialized = {};
-        
+
         for (const [key, value] of Object.entries(state)) {
             if (value instanceof Float32Array || value instanceof Float64Array) {
                 serialized[key] = {
                     __type: value.constructor.name,
                     data: Array.from(value)
                 };
-            } else if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') {
+            } else if (Array.isArray(value) && value.length > 0 && typeof value[0] === "object") {
                 // Handle arrays of objects (like buffers with timestamps)
                 serialized[key] = {
-                    __type: 'ObjectArray',
+                    __type: "ObjectArray",
                     data: value
                 };
             } else {
                 serialized[key] = value;
             }
         }
-        
+
         return serialized;
     }
-    
+
     /**
      * Deserialize state from storage
      */
     _deserializeState(stored) {
         const state = {};
-        
+
         for (const [key, value] of Object.entries(stored)) {
-            if (value && typeof value === 'object' && value.__type) {
-                if (value.__type === 'Float32Array') {
+            if (value && typeof value === "object" && value.__type) {
+                if (value.__type === "Float32Array") {
                     state[key] = new Float32Array(value.data);
-                } else if (value.__type === 'Float64Array') {
+                } else if (value.__type === "Float64Array") {
                     state[key] = new Float64Array(value.data);
-                } else if (value.__type === 'ObjectArray') {
+                } else if (value.__type === "ObjectArray") {
                     state[key] = value.data;
                 } else {
                     state[key] = value;
@@ -273,10 +275,10 @@ class NodeStateManager {
                 state[key] = value;
             }
         }
-        
+
         return state;
     }
-    
+
     /**
      * Clean up resources
      */
@@ -285,7 +287,7 @@ class NodeStateManager {
             clearInterval(this.saveTimer);
             this.saveTimer = null;
         }
-        
+
         // Final save on close
         if (this.isDirty) {
             await this.save();
@@ -299,11 +301,11 @@ class NodeStateManager {
  */
 function createAnomalyStateManager(node, config = {}) {
     const manager = new NodeStateManager(node, {
-        stateKey: 'anomalyState',
+        stateKey: "anomalyState",
         saveInterval: config.saveInterval || 60000,
         ...config
     });
-    
+
     return manager;
 }
 
@@ -313,11 +315,11 @@ function createAnomalyStateManager(node, config = {}) {
  */
 function createMLStateManager(node, config = {}) {
     const manager = new NodeStateManager(node, {
-        stateKey: 'mlState',
+        stateKey: "mlState",
         saveInterval: config.saveInterval || 120000, // 2 minutes
         ...config
     });
-    
+
     return manager;
 }
 
@@ -327,11 +329,11 @@ function createMLStateManager(node, config = {}) {
  */
 function createSignalStateManager(node, config = {}) {
     const manager = new NodeStateManager(node, {
-        stateKey: 'signalState',
+        stateKey: "signalState",
         saveInterval: config.saveInterval || 60000,
         ...config
     });
-    
+
     return manager;
 }
 

@@ -11,9 +11,9 @@
 "use strict";
 
 // Import state persistence module
-var StatePersistence = null;
+let StatePersistence = null;
 try {
-    StatePersistence = require('../state-persistence');
+    StatePersistence = require("../state-persistence");
 } catch (err) {
     // State persistence not available
 }
@@ -50,7 +50,7 @@ try {
  */
 function initializeStatePersistence(node, options) {
     if (!options || !options.stateKey) {
-        throw new Error('stateKey is required for state persistence');
+        throw new Error("stateKey is required for state persistence");
     }
 
     // Check if persistence is enabled for this node and available
@@ -58,21 +58,25 @@ function initializeStatePersistence(node, options) {
         return null;
     }
 
-    var stateKey = options.stateKey;
-    var saveInterval = options.saveInterval || 30000;
-    var onStateLoaded = options.onStateLoaded || function() {};
-    var getStateToSave = options.getStateToSave || function() { return {}; };
-    var debug = options.debug || false;
+    const stateKey = options.stateKey;
+    const saveInterval = options.saveInterval || 30000;
+    const onStateLoaded = options.onStateLoaded || function () {};
+    const getStateToSave =
+        options.getStateToSave ||
+        function () {
+            return {};
+        };
+    const debug = options.debug || false;
 
     // Debug logging helper
-    var debugLog = function(message) {
+    const debugLog = function (message) {
         if (debug) {
-            node.warn("[DEBUG] " + message);
+            node.debug(message);
         }
     };
 
     // Create state manager
-    var stateManager = new StatePersistence.NodeStateManager(node, {
+    const stateManager = new StatePersistence.NodeStateManager(node, {
         stateKey: stateKey,
         saveInterval: saveInterval
     });
@@ -81,18 +85,21 @@ function initializeStatePersistence(node, options) {
     node.stateManager = stateManager;
 
     // Load persisted state on startup
-    stateManager.load().then(function(state) {
-        if (state && Object.keys(state).length > 0) {
-            try {
-                onStateLoaded(state);
-                debugLog("Loaded persisted state for " + stateKey);
-            } catch (err) {
-                debugLog("Error processing loaded state: " + err.message);
+    stateManager
+        .load()
+        .then(function (state) {
+            if (state && Object.keys(state).length > 0) {
+                try {
+                    onStateLoaded(state);
+                    debugLog("Loaded persisted state for " + stateKey);
+                } catch (err) {
+                    debugLog("Error processing loaded state: " + err.message);
+                }
             }
-        }
-    }).catch(function(err) {
-        debugLog("Failed to load persisted state: " + err.message);
-    });
+        })
+        .catch(function (err) {
+            debugLog("Failed to load persisted state: " + err.message);
+        });
 
     // Return an enhanced state manager with helper methods
     return {
@@ -104,10 +111,10 @@ function initializeStatePersistence(node, options) {
         /**
          * Save current state immediately
          */
-        saveNow: function() {
+        saveNow: function () {
             try {
-                var state = getStateToSave();
-                if (state && typeof state === 'object') {
+                const state = getStateToSave();
+                if (state && typeof state === "object") {
                     stateManager.setMultiple(state);
                 }
             } catch (err) {
@@ -120,7 +127,7 @@ function initializeStatePersistence(node, options) {
          * @param {number} counter - Current sample counter
          * @param {number} [interval=10] - Save every N samples
          */
-        saveIfNeeded: function(counter, interval) {
+        saveIfNeeded: function (counter, interval) {
             interval = interval || 10;
             if (counter % interval === 0) {
                 this.saveNow();
@@ -132,7 +139,7 @@ function initializeStatePersistence(node, options) {
          * @param {string} key - State key
          * @param {*} value - State value
          */
-        set: function(key, value) {
+        set: function (key, value) {
             stateManager.set(key, value);
         },
 
@@ -140,7 +147,7 @@ function initializeStatePersistence(node, options) {
          * Set multiple state values
          * @param {Object} values - Object with key-value pairs
          */
-        setMultiple: function(values) {
+        setMultiple: function (values) {
             stateManager.setMultiple(values);
         },
 
@@ -148,7 +155,7 @@ function initializeStatePersistence(node, options) {
          * Close the state manager (call on node close)
          * @returns {Promise}
          */
-        close: async function() {
+        close: async function () {
             try {
                 this.saveNow();
                 await stateManager.close();
@@ -182,14 +189,14 @@ function isPersistenceAvailable() {
  * }));
  */
 function createCloseHandler(node, persistence, cleanupFn) {
-    return async function(done) {
+    return async function (done) {
         // Save state before closing if persistence enabled
         if (persistence) {
             await persistence.close();
         }
 
         // Run additional cleanup
-        if (typeof cleanupFn === 'function') {
+        if (typeof cleanupFn === "function") {
             cleanupFn();
         }
 

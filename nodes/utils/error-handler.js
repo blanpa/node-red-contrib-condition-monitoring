@@ -15,9 +15,9 @@
  * @enum {string}
  */
 const ErrorLevel = {
-    ERROR: 'error',
-    WARN: 'warn',
-    INFO: 'info'
+    ERROR: "error",
+    WARN: "warn",
+    INFO: "info"
 };
 
 /**
@@ -49,33 +49,33 @@ function handleNodeError(node, errorMsg, msg, level, options) {
     options = options || {};
 
     // Determine status color based on level
-    var statusColor = options.statusColor;
+    let statusColor = options.statusColor;
     if (!statusColor) {
         switch (level) {
             case ErrorLevel.ERROR:
-                statusColor = 'red';
+                statusColor = "red";
                 break;
             case ErrorLevel.WARN:
-                statusColor = 'yellow';
+                statusColor = "yellow";
                 break;
             case ErrorLevel.INFO:
-                statusColor = 'grey';
+                statusColor = "grey";
                 break;
             default:
-                statusColor = 'red';
+                statusColor = "red";
         }
     }
 
     // Truncate status text to fit in Node-RED UI
-    var statusText = options.statusText || errorMsg;
+    let statusText = options.statusText || errorMsg;
     if (statusText.length > 25) {
-        statusText = statusText.substring(0, 22) + '...';
+        statusText = statusText.substring(0, 22) + "...";
     }
 
     // Update node status
     node.status({
         fill: statusColor,
-        shape: options.statusShape || 'ring',
+        shape: options.statusShape || "ring",
         text: statusText
     });
 
@@ -112,18 +112,22 @@ function handleNodeError(node, errorMsg, msg, level, options) {
  * }
  */
 function createValidationError(fieldName, expectedType, actualValue) {
-    var actualType = actualValue === null ? 'null' :
-                     actualValue === undefined ? 'undefined' :
-                     Array.isArray(actualValue) ? 'array' :
-                     typeof actualValue;
+    const actualType =
+        actualValue === null
+            ? "null"
+            : actualValue === undefined
+              ? "undefined"
+              : Array.isArray(actualValue)
+                ? "array"
+                : typeof actualValue;
 
-    var actualStr = actualType;
-    if (actualType === 'string' && actualValue.length > 20) {
+    let actualStr = actualType;
+    if (actualType === "string" && actualValue.length > 20) {
         actualStr = 'string("' + actualValue.substring(0, 17) + '...")';
-    } else if (actualType === 'string') {
+    } else if (actualType === "string") {
         actualStr = 'string("' + actualValue + '")';
-    } else if (actualType === 'number') {
-        actualStr = 'number(' + actualValue + ')';
+    } else if (actualType === "number") {
+        actualStr = "number(" + actualValue + ")";
     }
 
     return {
@@ -151,31 +155,31 @@ function createValidationError(fieldName, expectedType, actualValue) {
  * const value = result.value;
  */
 function validateFiniteNumber(value, fieldName) {
-    fieldName = fieldName || 'value';
+    fieldName = fieldName || "value";
 
-    if (typeof value === 'number') {
+    if (typeof value === "number") {
         if (Number.isFinite(value)) {
             return { valid: true, error: null, value: value };
         } else {
             return {
                 valid: false,
-                error: createValidationError(fieldName, 'finite number', value + ' (NaN or Infinity)'),
+                error: createValidationError(fieldName, "finite number", value + " (NaN or Infinity)"),
                 value: null
             };
         }
     }
 
-    if (typeof value === 'string') {
-        var trimmed = value.trim();
+    if (typeof value === "string") {
+        const trimmed = value.trim();
         // Strict numeric format check
-        if (trimmed === '' || !/^-?\d*\.?\d+(?:[eE][-+]?\d+)?$/.test(trimmed)) {
+        if (trimmed === "" || !/^-?\d*\.?\d+(?:[eE][-+]?\d+)?$/.test(trimmed)) {
             return {
                 valid: false,
-                error: createValidationError(fieldName, 'numeric string', value),
+                error: createValidationError(fieldName, "numeric string", value),
                 value: null
             };
         }
-        var parsed = parseFloat(trimmed);
+        const parsed = parseFloat(trimmed);
         if (Number.isFinite(parsed)) {
             return { valid: true, error: null, value: parsed };
         }
@@ -183,7 +187,7 @@ function validateFiniteNumber(value, fieldName) {
 
     return {
         valid: false,
-        error: createValidationError(fieldName, 'number', value),
+        error: createValidationError(fieldName, "number", value),
         value: null
     };
 }
@@ -214,34 +218,34 @@ function validateFiniteNumber(value, fieldName) {
  */
 function validateSensorArray(items, options) {
     options = options || {};
-    var valueField = options.valueField || 'value';
-    var nameField = options.nameField || 'name';
-    var logInvalid = options.logInvalid || false;
-    var node = options.node;
+    const valueField = options.valueField || "value";
+    const nameField = options.nameField || "name";
+    const logInvalid = options.logInvalid || false;
+    const node = options.node;
 
-    var valid = [];
-    var invalid = [];
+    const valid = [];
+    const invalid = [];
 
     if (!Array.isArray(items)) {
         return {
             valid: [],
-            invalid: [{ item: items, reason: 'not an array' }],
+            invalid: [{ item: items, reason: "not an array" }],
             count: { total: 0, valid: 0, invalid: 1 }
         };
     }
 
-    items.forEach(function(item, index) {
-        if (typeof item === 'object' && item !== null) {
-            var value = item[valueField];
-            var name = item[nameField] || ('sensor' + index);
+    items.forEach(function (item, index) {
+        if (typeof item === "object" && item !== null) {
+            const value = item[valueField];
+            const name = item[nameField] || "sensor" + index;
 
             if (value === undefined || value === null) {
-                invalid.push({ item: item, reason: 'missing ' + valueField, index: index });
+                invalid.push({ item: item, reason: "missing " + valueField, index: index });
                 if (logInvalid && node) {
                     node.warn("Skipping sensor " + name + ": missing " + valueField);
                 }
             } else {
-                var validation = validateFiniteNumber(value, valueField);
+                const validation = validateFiniteNumber(value, valueField);
                 if (validation.valid) {
                     valid.push({
                         name: name,
@@ -255,18 +259,18 @@ function validateSensorArray(items, options) {
                     }
                 }
             }
-        } else if (typeof item === 'number') {
+        } else if (typeof item === "number") {
             if (Number.isFinite(item)) {
                 valid.push({
-                    name: 'sensor' + index,
+                    name: "sensor" + index,
                     value: item,
                     originalItem: item
                 });
             } else {
-                invalid.push({ item: item, reason: 'not a finite number', index: index });
+                invalid.push({ item: item, reason: "not a finite number", index: index });
             }
         } else {
-            invalid.push({ item: item, reason: 'invalid type: ' + typeof item, index: index });
+            invalid.push({ item: item, reason: "invalid type: " + typeof item, index: index });
         }
     });
 
@@ -293,7 +297,7 @@ function validateSensorArray(items, options) {
  * sanitizeObject(config);
  */
 function sanitizeObject(obj) {
-    if (obj && typeof obj === 'object') {
+    if (obj && typeof obj === "object") {
         delete obj.__proto__;
         delete obj.constructor;
         delete obj.prototype;
@@ -314,8 +318,8 @@ function sanitizeObject(obj) {
  * safeProcess(msg); // Errors are caught and node status updated
  */
 function wrapWithErrorHandler(node, fn, errorPrefix) {
-    errorPrefix = errorPrefix || 'Error';
-    return function() {
+    errorPrefix = errorPrefix || "Error";
+    return function () {
         try {
             return fn.apply(this, arguments);
         } catch (err) {
