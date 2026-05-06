@@ -38,6 +38,9 @@ jest.config.js
 # Documentation build files
 docs/
 
+# Spike / proof-of-concept scripts (not part of the published palette)
+experiments/
+
 # Python / Training scripts
 .venv/
 venv/
