@@ -24,7 +24,8 @@
       "health-index": "nodes/health-index.js",
       "ml-inference": "nodes/ml-inference.js",
       "pca-anomaly": "nodes/pca-anomaly.js",
-      "training-data-collector": "nodes/training-data-collector.js"
+      "training-data-collector": "nodes/training-data-collector.js",
+      "mcp-bridge": "nodes/mcp-bridge.js"
     }
   },
   "keywords": [
@@ -63,7 +64,10 @@
     "data-collection",
     "dataset",
     "ml-training",
-    "s3-upload"
+    "s3-upload",
+    "mcp",
+    "model-context-protocol",
+    "llm-bridge"
   ],
   "author": "blanpa",
   "license": "MIT",
