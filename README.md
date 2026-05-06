@@ -6,7 +6,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 [![npm downloads](https://img.shields.io/npm/dm/node-red-contrib-condition-monitoring.svg)](https://www.npmjs.com/package/node-red-contrib-condition-monitoring)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node-RED](https://img.shields.io/badge/Node--RED-%3E%3D2.0.0-red.svg)](https://nodered.org)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D14.0.0-green.svg)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18.0.0-green.svg)](https://nodejs.org)
 [![Status: Beta](https://img.shields.io/badge/Status-Beta-yellow.svg)](CHANGELOG.md)
 
 ---
@@ -377,7 +377,7 @@ What do you want to detect?
 | peak-detection | signal-analyzer | Set `mode: peaks` |
 | trend-prediction | trend-predictor | Set `mode: prediction` |
 | rate-of-change | trend-predictor | Set `mode: rate-of-change` |
-| isolation-forest-anomaly | isolation-forest | (unchanged) |
+| isolation-forest-anomaly | isolation-forest-anomaly | (unchanged) |
 | health-index | health-index | (unchanged) |
 | ml-inference | ml-inference | (unchanged) |
 

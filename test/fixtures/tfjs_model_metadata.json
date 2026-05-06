@@ -1,0 +1,12 @@
+{
+  "name": "tfjs_model",
+  "version": "1.0.0",
+  "type": "tfjs",
+  "path": "/home/la/private/node-red-contrib-condition-monitoring/test/fixtures/tfjs_model",
+  "source": "local",
+  "format": "tfjs",
+  "lastLoaded": "2026-05-06T08:44:49.580Z",
+  "stage": "production",
+  "inputShape": "1,10",
+  "metadata": {}
+}

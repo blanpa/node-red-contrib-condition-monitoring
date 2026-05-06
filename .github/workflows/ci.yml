@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install (without optional ML runtimes)
+        run: npm install --ignore-optional --no-audit --no-fund
+
+      - name: Run unit tests
+        run: npm test
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install (without optional ML runtimes)
+        run: npm install --ignore-optional --no-audit --no-fund
+
+      - name: Run coverage
+        run: npm run test:coverage
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install (without optional ML runtimes)
+        run: npm install --ignore-optional --no-audit --no-fund
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier
+        run: npm run format:check
+
+  audit:
+    runs-on: ubuntu-latest
+    # We audit production deps only — `optionalDependencies` carry their own
+    # security stories upstream and would otherwise drown the signal.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install (without optional ML runtimes)
+        run: npm install --ignore-optional --no-audit --no-fund
+
+      - name: npm audit (production only, fail on high)
+        run: npm audit --omit=dev --audit-level=high
+
+  # Smoke test with optional ML runtimes installed. Allowed to fail (some
+  # native deps are platform-specific) but its output is visible in the run.
+  optional-runtimes:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install (with optional ML runtimes)
+        run: npm install --no-audit --no-fund
+
+      - name: ONNX smoke test
+        run: npm run test:smoke-onnx
+
+      - name: Full test suite (incl. optional code paths)
+        run: npm test

@@ -1,0 +1,12 @@
+{
+  "name": "model.onnx",
+  "version": "1.0.0",
+  "type": "onnx",
+  "path": "./test/fixtures/model.onnx",
+  "source": "local",
+  "format": "onnx",
+  "lastLoaded": "2026-04-01T14:15:03.434Z",
+  "stage": "production",
+  "inputShape": "1,10",
+  "metadata": {}
+}

@@ -80,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | multi-value-splitter, multi-value-anomaly, correlation-anomaly | **multi-value-processor** | `mode` dropdown |
 | fft-analysis, vibration-features, peak-detection | **signal-analyzer** | `mode` dropdown |
 | trend-prediction, rate-of-change | **trend-predictor** | `mode` dropdown |
-| isolation-forest-anomaly | **isolation-forest** | (unchanged) |
+| isolation-forest-anomaly | **isolation-forest-anomaly** | (unchanged) |
 | health-index | **health-index** | (unchanged) |
 | ml-inference | **ml-inference** | (unchanged) |
 | (new) | **pca-anomaly** | Principal Component Analysis |

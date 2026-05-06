@@ -1,0 +1,8 @@
+node_modules
+.venv
+notebooks_venv
+training/notebooks/.pixi
+models
+node-red-data
+coverage
+*.html

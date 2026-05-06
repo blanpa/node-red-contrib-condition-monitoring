@@ -59,7 +59,7 @@ These nodes identify unusual patterns in sensor data.
 | Node | Purpose | Methods |
 |------|---------|---------|
 | **anomaly-detector** | Single/multi-sensor statistical anomaly detection | Z-Score, IQR, Threshold, Percentile, EMA, CUSUM, Moving Average |
-| **isolation-forest** | ML-based unsupervised anomaly detection | Isolation Forest algorithm |
+| **isolation-forest-anomaly** | ML-based unsupervised anomaly detection | Isolation Forest algorithm |
 | **pca-anomaly** | Multivariate anomaly detection | PCA with Hotelling's T² and SPE |
 
 ```

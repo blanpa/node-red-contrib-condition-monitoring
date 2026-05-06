@@ -33,7 +33,13 @@ USER node-red
 
 # Install ML Runtime dependencies and required packages
 WORKDIR /usr/src/node-red
-RUN npm install @tensorflow/tfjs-node@4.22.0 onnxruntime-node@1.20.0 ml-isolation-forest@0.1.0 simple-statistics@7.8.2
+# Versions stay in sync with package.json (optionalDependencies + dependencies).
+# Bump together — mismatched runtimes will silently disagree with the npm install.
+RUN npm install \
+        @tensorflow/tfjs-node@4.22.0 \
+        onnxruntime-node@1.24.3 \
+        ml-isolation-forest@0.1.0 \
+        simple-statistics@7.8.9
 
 # Copy the condition-monitoring module
 COPY --chown=node-red:node-red . /data/node_modules/node-red-contrib-condition-monitoring/

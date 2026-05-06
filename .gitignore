@@ -19,6 +19,9 @@ notebooks/*_executed.ipynb
 data/simulated/
 data/usecase_*/
 
+# Training-data-collector output (timestamped CSV/JSONL/JSON exports per run)
+training-data/
+
 # Large training datasets (exceed GitHub 100 MB; regenerate or use Git LFS locally)
 training/data/usecase_hvac/hvac_dataset.csv
 training/data/usecase_pump/pump_dataset.csv
