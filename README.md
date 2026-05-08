@@ -11,7 +11,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## Project Status: v0.2.2 Beta
+## Project Status: v0.3.0 Beta
 
 **Predictive Maintenance Enhancement Update**
 
@@ -81,7 +81,7 @@ docker-compose up -d
 2. Menu → Import → Examples
 3. Select one of the example flows
 
-## Available Nodes (9 Nodes)
+## Available Nodes (10 Nodes)
 
 All nodes are in the **`condition-monitoring`** category.
 
@@ -292,6 +292,49 @@ msg.action = "resetRul"; // Reset RUL counter
 [Sensors] → [Multi-Value Processor] → [Training Data Collector] → [S3/File]
                                               ↑
                               [Inject: action="export"]
+```
+
+### 10. LLM Analyzer
+
+**Buffers sensor samples and asks an LLM to analyse them in plain language or structured JSON:**
+
+| Feature | Description |
+|---------|-------------|
+| **5 Providers** | Anthropic (Claude), OpenAI (GPT), Google (Gemini), Ollama (local), OpenAI-compatible (Groq, Together, OpenRouter, DeepSeek, Mistral, vLLM, LMStudio …) |
+| **3 Trigger Modes** | Batch (fire when N samples buffered), Manual (`msg.flush=true`), Interval (every X ms) |
+| **2 Input Modes** | Scalar (single sensor stream) or Record (multi-sensor objects with auto-detected columns) |
+| **2 Output Modes** | Text or structured JSON with example-based schema + optional dot-path field extraction |
+| **Cost Tracking** | Per-call `msg.usage` plus lifetime `msg.totalUsage` and live status indicator |
+| **Buffer Caps** | Hard ring-buffer size + separate cap on samples sent to the prompt |
+| **Persistence** | Optional buffer + counters survive Node-RED redeploys |
+| **Concurrency-safe** | Triggers during in-flight calls are queued, never silently dropped |
+
+**Use Cases:**
+- Operator-readable batch summaries ("the last 50 readings look unusual because ...")
+- Structured anomaly scoring (LLM returns `{severity, score, summary}` → switch-node routes alarms)
+- Cross-sensor correlation in record mode ("temp spiked AND pressure dropped — typical leak pattern")
+- Edge-deployable with Ollama for air-gapped sites
+
+**Configuration:**
+```javascript
+// Inputs
+msg.payload    // number / number[] (scalar) or object / object[] (record)
+msg.flush      // true → fire now (manual mode)
+msg.prompt     // per-message override of user prompt template
+msg.systemPrompt, msg.model, msg.apiUrl  // per-message overrides
+
+// Outputs
+msg.payload    // text response, parsed JSON object, or extracted field
+msg.usage      // { inputTokens, outputTokens } from this call
+msg.totalUsage // lifetime running totals + callCount
+msg.samples    // exact batch sent — useful for archiving / replay
+msg.json       // (JSON mode) full parsed object
+msg.rawResponse // (JSON mode) raw LLM text
+```
+
+**Example:**
+```
+[Sensor] → [Anomaly Detector] → [LLM Analyzer (json)] → [Switch on score≥0.7] → [Alert]
 ```
 
 ---
@@ -572,6 +615,50 @@ docker-compose up
 # Development mode (hot-reload)
 docker-compose -f docker-compose.dev.yml up
 ```
+
+### GPU Acceleration (NVIDIA, optional)
+
+Beide Inferenz-Wege — der direkte TensorFlow.js-Pfad im Node-RED-Container **und** der MAX-Engine-Bridge-Pfad (MAX Engine + ONNX Runtime) — können wahlweise auf einer NVIDIA-GPU laufen. Der CPU-Pfad bleibt der Default; GPU ist Opt-in.
+
+**Voraussetzungen auf dem Host:**
+- NVIDIA-Treiber (kompatibel mit CUDA 12.x)
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+- Docker mit Compose v2
+
+**Aktivierung über Compose-Override:**
+
+```bash
+docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml up --build
+```
+
+Die Override-Datei tauscht beim Build die Dockerfiles gegen die GPU-Varianten (`Dockerfile.gpu`, `Dockerfile.max.gpu`) und reserviert die GPU(s) per `deploy.resources`. Was dabei passiert:
+
+| Container        | GPU-Image-Basis                              | Aktivierte Backends |
+|------------------|----------------------------------------------|---------------------|
+| `node-red`       | `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` | `@tensorflow/tfjs-node-gpu`, `tensorflow[and-cuda]` |
+| `max-engine`     | `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` | MAX Engine (GPU) + `onnxruntime-gpu` (`CUDAExecutionProvider`) |
+
+Der Bridge-Code (`nodes/python/max_bridge.py`) wählt automatisch das beste verfügbare Backend in dieser Reihenfolge: **MAX Engine GPU → ONNX Runtime CUDA → ONNX Runtime CPU**.
+
+**Verifikation:**
+
+```bash
+# ONNX Runtime sollte CUDAExecutionProvider listen
+docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+  exec max-engine python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
+
+# Bridge-Status (zeigt Backend & geladene Modelle)
+curl http://localhost:8765/status
+
+# Im Node-RED-Container: tfjs-node-gpu sollte CUDA finden
+docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+  exec node-red node -e "require('@tensorflow/tfjs-node-gpu'); console.log('OK')"
+```
+
+**Hinweise:**
+- Die GPU-Images sind deutlich größer (mehrere GB). Erst-Build dauert entsprechend länger.
+- Reicht ein einzelner GPU-Pfad, kann man die Override-Datei kürzen und nur den `max-engine`- oder nur den `node-red`-Service-Block behalten.
+- Für reine MAX-Engine-Beschleunigung gibt es alternativ die offiziellen `modular/max-nvidia-full`-Images — als Drop-in für `Dockerfile.max.gpu` nutzbar (Base-Image-Tausch).
 
 ---
 

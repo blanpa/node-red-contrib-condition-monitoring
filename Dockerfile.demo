@@ -1,0 +1,8 @@
+# Demo image for docker-compose.demo.yml — Node-RED + this module.
+# No SDK install needed: llm-analyzer talks to the LLM API via global fetch.
+FROM nodered/node-red:latest
+
+USER node-red
+WORKDIR /usr/src/node-red
+
+# This module is mounted into /data/node_modules at runtime via compose.

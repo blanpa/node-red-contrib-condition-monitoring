@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-05-08 - LLM Analyzer Node (Phase 1–5)
+
+### ✨ New Node: `llm-analyzer`
+
+A flow-time LLM analysis node that buffers samples and asks an LLM to
+analyse them. The result flows back into the Node-RED pipeline as a
+`msg.payload` — text in plain mode, structured object (or extracted
+field) in JSON mode. Replaces the briefly-explored `mcp-bridge` (passive
+MCP server, withdrawn the same release window in favour of this active
+in-flow analyser).
+
+**Five providers, one contract:**
+- Anthropic (Claude — `x-api-key` header)
+- OpenAI (GPT — Chat Completions)
+- Google (Gemini — generateContent)
+- Ollama (local — no key needed)
+- OpenAI-compatible (Groq, Together, OpenRouter, DeepSeek, Mistral, vLLM, LMStudio …)
+
+**Three trigger modes:**
+- `batch` — fire when N samples accumulated
+- `manual` — fire on `msg.flush === true`
+- `interval` — fire every X ms on whatever's buffered
+
+**Two input modes:**
+- `scalar` — one numeric value (or array) per msg
+- `record` — multi-sensor objects, auto-detects numeric columns
+  (skipping common timestamp/id field names) or honours an explicit
+  allowlist
+
+**Two output modes:**
+- `text` — `msg.payload` = LLM string
+- `json` — operator pastes example JSON into the schema field; node
+  appends an instruction to the system prompt and parses the response
+  with a tolerant extractor (markdown fences, prose-wrapped objects,
+  braces inside strings all handled). Optional `outputPath` (dot-notation)
+  extracts a single nested field.
+
+**Production hardening:**
+- `maxBufferSize` — hard ring-buffer cap (default 10 000)
+- `maxSamplesInPrompt` — token-cost knob (default 100)
+- `persistState` — buffer + counters survive redeploys
+- Lifetime cost tracking on `msg.totalUsage` + status line
+- Concurrency-safe — triggers during in-flight calls are queued, never dropped
+
+**Configuration is fully self-contained** — API keys via Node-RED
+credentials (encrypted on disk), per-provider URL/model defaults adjust
+automatically when the operator picks a provider. Editor UI matches the
+rest of the `condition-monitoring` family (collapsible `cm-section`
+cards, gradient headers, `#9482f1` family colour). A "Preview rendered
+prompt" button shows the operator what will actually go to the LLM.
+
+**Test coverage:** 82 unit tests + 3 integration tests against a real
+Node-RED runtime via the existing harness.
+
+**Demo stack:** `docker-compose.demo.yml` starts a Node-RED container
+plus a small mock-Anthropic sidecar so the five demo flows
+(temp / vib-with-anomaly / manual / multi-sensor / json-scorer) run
+without needing a real API key.
+
+See `docs/SPEC-llm-analyzer.md` for the full design contract.
+
+---
+
 ## [0.2.2] - 2026-01-18 - Predictive Maintenance Enhancement
 
 ### ✨ New Features

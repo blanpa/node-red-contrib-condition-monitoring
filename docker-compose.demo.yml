@@ -1,0 +1,45 @@
+# Demo stack for the llm-analyzer node.
+#
+# Editor:        http://localhost:1881
+# Mock LLM API:  http://anthropic-mock:8088/v1/messages   (internal)
+#                http://localhost:18088/v1/messages       (host, smoke-test)
+#
+# Real Anthropic API (operator opt-in):
+#   1. set ANTHROPIC_API_KEY in .env or shell
+#   2. open the llm-analyzer node in the editor and either:
+#       - clear the "API URL" field (defaults to api.anthropic.com), and
+#       - set the API key credential to the real key
+#   The mock keeps running but is unused.
+
+services:
+  node-red:
+    build:
+      context: .
+      dockerfile: Dockerfile.demo
+    image: node-red-condition-monitoring:demo
+    container_name: nr-llm-demo
+    user: "1001:1002"
+    ports:
+      - "0.0.0.0:1881:1880"
+    volumes:
+      - ./demo/node-red-data:/data
+      - ./nodes:/data/node_modules/node-red-contrib-condition-monitoring/nodes:ro
+      - ./package.json:/data/node_modules/node-red-contrib-condition-monitoring/package.json:ro
+    environment:
+      - TZ=Europe/Berlin
+      - NODE_OPTIONS=--max_old_space_size=2048
+    restart: unless-stopped
+    depends_on:
+      - anthropic-mock
+
+  anthropic-mock:
+    build:
+      context: ./demo/mock
+      dockerfile: Dockerfile
+    image: anthropic-mock:demo
+    container_name: nr-llm-mock
+    ports:
+      - "0.0.0.0:18088:8088"
+    environment:
+      - PORT=8088
+    restart: unless-stopped

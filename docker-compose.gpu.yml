@@ -1,0 +1,52 @@
+# GPU-Override für docker-compose.dev.yml
+# ========================================
+# Aktiviert NVIDIA-Beschleunigung für beide Inferenz-Wege:
+#   - Node-RED Container (TensorFlow.js direkt) via Dockerfile.gpu
+#   - MAX-Engine Bridge   (MAX Engine + ONNX Runtime CUDA) via Dockerfile.max.gpu
+#
+# Voraussetzungen auf dem Host:
+#   - NVIDIA Treiber installiert
+#   - NVIDIA Container Toolkit (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
+#   - Docker >= 20.10 mit Compose v2
+#
+# Verwendung (zusätzlich zur dev-Datei laden):
+#   docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml up --build
+#
+# Schnelltest:
+#   docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml \
+#     exec max-engine python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
+# Erwartet: ['CUDAExecutionProvider', 'CPUExecutionProvider']
+
+services:
+  node-red:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: node-red-condition-monitoring:gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      # tfjs-node-gpu nutzt diese Variable, um das gewünschte Device zu wählen.
+      - CUDA_VISIBLE_DEVICES=0
+
+  max-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.max.gpu
+    image: max-engine-inference:gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      # ONNX Runtime liest diese Variablen automatisch — hier nur zur Doku.
+      - ORT_TENSORRT_FP16_ENABLE=0

@@ -1,0 +1,654 @@
+<script type="text/javascript">
+    RED.nodes.registerType('llm-analyzer', {
+        category: 'condition-monitoring',
+        color: '#9482f1',
+        defaults: {
+            name:                { value: "" },
+            sensorName:          { value: "" },
+            unit:                { value: "" },
+
+            // provider & model
+            provider:            { value: "anthropic" },
+            model:               { value: "claude-haiku-4-5-20251001" },
+            apiUrl:              { value: "" },
+
+            // trigger
+            triggerMode:         { value: "batch" },
+            batchSize:           { value: 50,    validate: RED.validators.number() },
+            intervalMs:          { value: 60000, validate: RED.validators.number() },
+
+            // tuning
+            maxOutputTokens:     { value: 1024,  validate: RED.validators.number() },
+            timeoutMs:           { value: 30000, validate: RED.validators.number() },
+            maxBufferSize:       { value: 10000, validate: RED.validators.number() },
+            maxSamplesInPrompt:  { value: 100,   validate: RED.validators.number() },
+
+            // input shape
+            inputMode:           { value: "scalar" },
+            columns:             { value: "" },
+
+            // output shape
+            outputMode:          { value: "text" },
+            outputSchema:        { value: "" },
+            outputPath:          { value: "" },
+
+            // prompts
+            systemPrompt:        { value: "" },
+            userPromptTemplate:  { value: "" },
+
+            // misc
+            passthroughOriginal: { value: true },
+            persistState:        { value: false }
+        },
+        credentials: {
+            apiKey: { type: "password" }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-comment",
+        label: function () {
+            return this.name || (this.sensorName ? "llm: " + this.sensorName : "llm-analyzer");
+        },
+        labelStyle: function () {
+            return this.name ? "node_label_italic" : "";
+        },
+        paletteLabel: "LLM Analyzer",
+        oneditprepare: function () {
+            // Collapsible sections — same convention as the other condition-
+            // monitoring nodes.
+            $(".cm-section-header").on("click", function () {
+                const $content = $(this).next(".cm-section-content");
+                const $icon = $(this).find(".cm-collapse-icon");
+                $content.slideToggle(200);
+                $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
+
+            // Show/hide trigger-specific config rows.
+            const $mode = $("#node-input-triggerMode");
+            const $batch = $(".llm-row-batch");
+            const $interval = $(".llm-row-interval");
+            function refreshMode() {
+                const m = $mode.val();
+                $batch.toggle(m === "batch");
+                $interval.toggle(m === "interval");
+            }
+            $mode.on("change", refreshMode);
+            refreshMode();
+
+            // Show/hide the columns allowlist depending on input mode.
+            const $inputMode = $("#node-input-inputMode");
+            const $rowCols = $(".llm-row-columns");
+            const $rowBatchUnit = $(".llm-row-batch-unit");
+            function refreshInputMode() {
+                const m = $inputMode.val();
+                $rowCols.toggle(m === "record");
+                // The batch-size label changes (samples vs records).
+                $rowBatchUnit.text(m === "record" ? "records" : "samples");
+            }
+            $inputMode.on("change", refreshInputMode);
+            refreshInputMode();
+
+            // Show/hide output schema + path fields depending on output mode.
+            const $outputMode = $("#node-input-outputMode");
+            const $rowSchema = $(".llm-row-schema");
+            const $rowPath = $(".llm-row-path");
+            function refreshOutputMode() {
+                const m = $outputMode.val();
+                $rowSchema.toggle(m === "json");
+                $rowPath.toggle(m === "json");
+            }
+            $outputMode.on("change", refreshOutputMode);
+            refreshOutputMode();
+
+            // Provider-specific hints for the URL and API-key placeholder.
+            const PROVIDER_HINTS = {
+                "anthropic":         { url: "(default: api.anthropic.com/v1/messages)",                                                            model: "claude-haiku-4-5-20251001",     keyHint: "sk-ant-..." },
+                "openai":            { url: "(default: api.openai.com/v1/chat/completions)",                                                       model: "gpt-4o-mini",                   keyHint: "sk-..." },
+                "google":            { url: "(default: generativelanguage.googleapis.com/v1beta/models/{model}:generateContent)",                  model: "gemini-2.0-flash",              keyHint: "AIza..." },
+                "ollama":            { url: "(default: http://localhost:11434/api/chat)",                                                          model: "llama3.2",                      keyHint: "(usually none)" },
+                "openai-compatible": { url: "REQUIRED — e.g. https://api.groq.com/openai/v1/chat/completions",                                     model: "llama-3.3-70b-versatile",       keyHint: "Bearer token" }
+            };
+            const $provider = $("#node-input-provider");
+            const $apiUrl = $("#node-input-apiUrl");
+            const $apiKey = $("#node-input-apiKey");
+            const $model = $("#node-input-model");
+            function applyHints() {
+                const h = PROVIDER_HINTS[$provider.val()];
+                if (!h) return;
+                $apiUrl.attr("placeholder", h.url);
+                $apiKey.attr("placeholder", h.keyHint);
+                if (!$model.val()) $model.attr("placeholder", h.model);
+            }
+            $provider.on("change", applyHints);
+            applyHints();
+
+            // ----------------------------------------------------------------
+            // Prompt preview — pure client-side rendering with fake samples.
+            // ----------------------------------------------------------------
+            // Defaults that mirror the server-side ones; kept in sync by
+            // hand. If they drift, preview just shows the wrong default —
+            // production behaviour is unaffected.
+            const DEFAULT_SYSTEM_PROMPT_C =
+                "You are an industrial sensor analyst. Analyse the time-series batch you " +
+                "are given and report anomalies, trends, and notable patterns. Answer in " +
+                "three sentences or fewer. If nothing is unusual, say so explicitly.";
+            const DEFAULT_USER_TEMPLATE_SCALAR_C =
+                "Sensor {sensor} ({unit}). Batch of {count} samples.\n" +
+                "Stats: {stats}\n" +
+                "Recent values (oldest first):\n" +
+                "{samples}";
+            const DEFAULT_USER_TEMPLATE_RECORD_C =
+                "Multi-sensor batch from {sensor} ({count} records, columns: {columns}).\n" +
+                "Per-column stats:\n" +
+                "{stats}\n" +
+                "Recent records (oldest first):\n" +
+                "{records}";
+
+            function fillTpl(tpl, vars) {
+                if (typeof tpl !== "string") return "";
+                return tpl.replace(/\{(\w+)\}/g, function (whole, key) {
+                    return Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : whole;
+                });
+            }
+
+            function buildPreview() {
+                const inputMode = $inputMode.val();
+                const sensor = $("#node-input-sensorName").val() || "(unnamed)";
+                const unit = $("#node-input-unit").val() || "(unitless)";
+                const sysIn = $("#node-input-systemPrompt").val() || DEFAULT_SYSTEM_PROMPT_C;
+                let userTplIn =
+                    $("#node-input-userPromptTemplate").val() ||
+                    (inputMode === "record" ? DEFAULT_USER_TEMPLATE_RECORD_C : DEFAULT_USER_TEMPLATE_SCALAR_C);
+
+                const outputMode = $outputMode.val();
+                const outputSchema = $("#node-input-outputSchema").val();
+
+                let vars;
+                if (inputMode === "record") {
+                    const colsRaw = $("#node-input-columns").val();
+                    const cols = colsRaw
+                        ? colsRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean)
+                        : ["temp", "pressure", "vibration"];
+                    // Synthetic 5-record batch.
+                    const sampleRecords = [];
+                    for (let i = 0; i < 5; i++) {
+                        const r = {};
+                        cols.forEach(function (c, j) {
+                            r[c] = Math.round((10 * (j + 1) + i + Math.random() * 0.5) * 100) / 100;
+                        });
+                        sampleRecords.push(r);
+                    }
+                    const statsLines = cols.map(function (c) {
+                        const vs = sampleRecords.map(function (r) { return r[c]; });
+                        const mean = vs.reduce(function (a, b) { return a + b; }, 0) / vs.length;
+                        const min = Math.min.apply(null, vs);
+                        const max = Math.max.apply(null, vs);
+                        return "  " + (c + ":").padEnd(13) + "n=" + vs.length + " mean=" + mean.toFixed(2) +
+                               " min=" + min + " max=" + max;
+                    }).join("\n");
+                    const recordsTable = sampleRecords.map(function (r, idx) {
+                        return "t=" + (idx + 1) + " " + cols.map(function (c) { return c + "=" + r[c]; }).join(" ");
+                    }).join("\n");
+                    vars = {
+                        sensor: sensor,
+                        unit: unit,
+                        count: sampleRecords.length,
+                        columns: cols.join(", "),
+                        stats: statsLines,
+                        records: recordsTable,
+                        samples: recordsTable
+                    };
+                } else {
+                    const sampleVals = [];
+                    for (let i = 0; i < 8; i++) sampleVals.push(Math.round((70 + Math.sin(i / 2) * 3) * 100) / 100);
+                    const mean = sampleVals.reduce(function (a, b) { return a + b; }, 0) / sampleVals.length;
+                    const min = Math.min.apply(null, sampleVals);
+                    const max = Math.max.apply(null, sampleVals);
+                    vars = {
+                        sensor: sensor,
+                        unit: unit,
+                        count: sampleVals.length,
+                        samples: sampleVals.join(", "),
+                        stats: "n=" + sampleVals.length + " mean=" + mean.toFixed(2) +
+                               " min=" + min + " max=" + max,
+                        columns: "",
+                        records: sampleVals.join(", ")
+                    };
+                }
+
+                const renderedSystem =
+                    sysIn +
+                    (outputMode === "json"
+                        ? "\n\nYou MUST respond with a single JSON object that matches the structure of " +
+                          "this example (same field names, same types). Do not include any prose, " +
+                          "markdown, or text before or after the JSON.\n\nExample structure:\n" +
+                          (outputSchema || "")
+                        : "");
+                const renderedUser = fillTpl(userTplIn, vars);
+
+                return "── SYSTEM ─────────────────\n" + renderedSystem + "\n\n" +
+                       "── USER ───────────────────\n" + renderedUser;
+            }
+
+            const $previewBtn = $(".llm-preview-btn");
+            const $previewOut = $(".llm-preview-output");
+            $previewBtn.on("click", function () {
+                $previewOut.text(buildPreview()).show();
+            });
+        }
+    });
+</script>
+
+<style>
+    /* Local copies of the .cm-* design tokens, kept here so the node
+       remains self-contained even if loaded standalone. The tokens match
+       anomaly-detector / signal-analyzer / etc. — same family palette. */
+    .cm-section {
+        background: #fafafa;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        overflow: hidden;
+    }
+    .cm-section-header {
+        background: linear-gradient(135deg, #9482f1 0%, #7d6bd3 100%);
+        color: #fff;
+        padding: 10px 14px;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        user-select: none;
+    }
+    .cm-section-header:hover {
+        background: linear-gradient(135deg, #a896f5 0%, #9482f1 100%);
+    }
+    .cm-section-header i:first-child { margin-right: 8px; }
+    .cm-section-content { padding: 14px; }
+    .cm-config-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }
+    .cm-config-item { display: flex; flex-direction: column; }
+    .cm-config-item label {
+        font-size: 11px;
+        color: #666;
+        margin-bottom: 6px;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .cm-config-item input,
+    .cm-config-item select,
+    .cm-config-item textarea {
+        padding: 8px 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 13px;
+    }
+    .cm-config-item textarea { font-family: ui-monospace, SFMono-Regular, monospace; }
+    .cm-config-item input:focus,
+    .cm-config-item select:focus,
+    .cm-config-item textarea:focus {
+        border-color: #9482f1;
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(148, 130, 241, 0.2);
+    }
+    .cm-help-text { font-size: 10px; color: #888; margin-top: 4px; }
+    .cm-stack > .cm-config-item + .cm-config-item { margin-top: 12px; }
+    .cm-checkbox-row {
+        display: flex; align-items: center; gap: 8px;
+        font-size: 12px; color: #424242;
+    }
+    .cm-checkbox-row input[type="checkbox"] { margin: 0; }
+    .cm-tip {
+        margin-top: 10px;
+        padding: 10px 12px;
+        background: #f3e5f5;
+        border-left: 3px solid #9482f1;
+        border-radius: 4px;
+        font-size: 11px;
+        color: #424242;
+    }
+    .cm-tip code {
+        background: rgba(148, 130, 241, 0.15);
+        padding: 1px 4px;
+        border-radius: 3px;
+    }
+</style>
+
+<script type="text/html" data-template-name="llm-analyzer">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Optional editor label">
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- Input shape                                                    -->
+    <!-- ============================================================ -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-sign-in"></i> Input</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-stack">
+                <div class="cm-config-item">
+                    <label for="node-input-inputMode"><i class="fa fa-th"></i> Input mode</label>
+                    <select id="node-input-inputMode">
+                        <option value="scalar">Scalar — one numeric value per msg (single sensor stream)</option>
+                        <option value="record">Record — multi-sensor object per msg (e.g. <code>{temp:65, pressure:4.5}</code>)</option>
+                    </select>
+                    <div class="cm-help-text">Pick <b>record</b> if upstream sends multi-column rows (DB query, SCADA snapshot, multi-sensor MQTT).</div>
+                </div>
+                <div class="cm-config-item llm-row-columns">
+                    <label for="node-input-columns"><i class="fa fa-columns"></i> Columns (comma-separated)</label>
+                    <input type="text" id="node-input-columns" placeholder="leave empty to auto-detect — e.g. temp, pressure, vibration">
+                    <div class="cm-help-text">Numeric fields the LLM should see. Empty = auto-detect from the first record. Listing them explicitly lets you exclude things like <code>timestamp</code>.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- Sensor metadata                                                -->
+    <!-- ============================================================ -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-thermometer-half"></i> Sensor Metadata</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-grid">
+                <div class="cm-config-item">
+                    <label for="node-input-sensorName"><i class="fa fa-sliders-h"></i> Source name</label>
+                    <input type="text" id="node-input-sensorName" placeholder="e.g. machine-A/temp or machine-A">
+                    <div class="cm-help-text">Filled into the prompt as <code>{sensor}</code>. In record mode this typically labels the machine/asset, not a single sensor.</div>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-unit"><i class="fa fa-balance-scale"></i> Unit</label>
+                    <input type="text" id="node-input-unit" placeholder="°C, mm/s, bar, …">
+                    <div class="cm-help-text">Filled as <code>{unit}</code> (scalar mode). For record mode put units in the prompt template.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- Provider & Model                                               -->
+    <!-- ============================================================ -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cloud"></i> Provider &amp; Model</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-stack">
+                <div class="cm-config-item">
+                    <label for="node-input-provider"><i class="fa fa-server"></i> Provider</label>
+                    <select id="node-input-provider">
+                        <option value="anthropic">Anthropic (Claude)</option>
+                        <option value="openai">OpenAI (GPT)</option>
+                        <option value="google">Google (Gemini)</option>
+                        <option value="ollama">Ollama (local)</option>
+                        <option value="openai-compatible">OpenAI-compatible (Groq, Together, OpenRouter, …)</option>
+                    </select>
+                    <div class="cm-help-text">Pick the provider; the URL and key fields adjust their hints automatically.</div>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-model"><i class="fa fa-microchip"></i> Model</label>
+                    <input type="text" id="node-input-model">
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-apiKey"><i class="fa fa-key"></i> API key</label>
+                    <input type="password" id="node-input-apiKey">
+                    <div class="cm-help-text">Stored as a Node-RED credential (encrypted on disk). Optional for Ollama.</div>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-apiUrl"><i class="fa fa-link"></i> API URL</label>
+                    <input type="text" id="node-input-apiUrl">
+                    <div class="cm-help-text">Empty = use the provider default. Required for <i>OpenAI-compatible</i>.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- Trigger                                                        -->
+    <!-- ============================================================ -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-play"></i> Trigger</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-stack">
+                <div class="cm-config-item">
+                    <label for="node-input-triggerMode"><i class="fa fa-bolt"></i> Mode</label>
+                    <select id="node-input-triggerMode">
+                        <option value="batch">Batch — fire when buffer is full</option>
+                        <option value="manual">Manual — fire on <code>msg.flush === true</code></option>
+                        <option value="interval">Interval — fire every X ms</option>
+                    </select>
+                </div>
+                <div class="cm-config-item llm-row-batch">
+                    <label for="node-input-batchSize"><i class="fa fa-database"></i> Batch size</label>
+                    <input type="number" id="node-input-batchSize" min="1" max="1000">
+                    <div class="cm-help-text">Number of <span class="llm-row-batch-unit">samples</span> to collect before each LLM call (1–1000).</div>
+                </div>
+                <div class="cm-config-item llm-row-interval">
+                    <label for="node-input-intervalMs"><i class="fa fa-clock-o"></i> Interval (ms)</label>
+                    <input type="number" id="node-input-intervalMs" min="250">
+                    <div class="cm-help-text">How often the buffer is flushed (≥ 250 ms).</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- Tuning                                                         -->
+    <!-- ============================================================ -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-sliders-h"></i> Tuning</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-grid">
+                <div class="cm-config-item">
+                    <label for="node-input-maxOutputTokens"><i class="fa fa-arrows-h"></i> Max output tokens</label>
+                    <input type="number" id="node-input-maxOutputTokens" min="16" max="8192">
+                    <div class="cm-help-text">Cap on the LLM's reply length.</div>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-timeoutMs"><i class="fa fa-hourglass-half"></i> Timeout (ms)</label>
+                    <input type="number" id="node-input-timeoutMs" min="1000">
+                    <div class="cm-help-text">Aborts the request after this many ms.</div>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-maxBufferSize"><i class="fa fa-database"></i> Max buffer size</label>
+                    <input type="number" id="node-input-maxBufferSize" min="1" max="1000000">
+                    <div class="cm-help-text">Hard cap on buffered <span class="llm-row-batch-unit">samples</span>. When exceeded, the oldest are dropped (ring-buffer). Most useful in <i>manual</i> / <i>interval</i> modes where the buffer can otherwise grow without bound between fires.</div>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-maxSamplesInPrompt"><i class="fa fa-cut"></i> Max samples in prompt</label>
+                    <input type="number" id="node-input-maxSamplesInPrompt" min="1" max="10000">
+                    <div class="cm-help-text">How many of the buffered values are actually included in the LLM prompt (token-cost knob). Beyond this, the most-recent N are kept; older ones are summarised by the stats line.</div>
+                </div>
+            </div>
+            <div class="cm-checkbox-row" style="margin-top: 12px;">
+                <input type="checkbox" id="node-input-passthroughOriginal">
+                <label for="node-input-passthroughOriginal">Pass-through original payload as <code>msg.input</code></label>
+            </div>
+            <div class="cm-checkbox-row" style="margin-top: 6px;">
+                <input type="checkbox" id="node-input-persistState">
+                <label for="node-input-persistState">Persist buffer &amp; counters across restarts (saved every 30 s + on close)</label>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- Output                                                         -->
+    <!-- ============================================================ -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-sign-out"></i> Output</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-stack">
+                <div class="cm-config-item">
+                    <label for="node-input-outputMode"><i class="fa fa-share-square-o"></i> Mode</label>
+                    <select id="node-input-outputMode">
+                        <option value="text">Text — msg.payload = LLM response (string)</option>
+                        <option value="json">JSON — LLM returns structured object, parsed into msg.payload</option>
+                    </select>
+                    <div class="cm-help-text">Pick <b>JSON</b> when downstream nodes (switch, threshold, dashboard) need a specific value rather than free text.</div>
+                </div>
+                <div class="cm-config-item llm-row-schema">
+                    <label for="node-input-outputSchema"><i class="fa fa-code"></i> Output schema (example object)</label>
+                    <textarea id="node-input-outputSchema" rows="6" placeholder='{
+  "severity": "warning",
+  "score": 0.85,
+  "summary": "One-line description",
+  "anomalies": ["temp_spike", "pressure_drop"]
+}'></textarea>
+                    <div class="cm-help-text">Write the JSON object you want back. Field <b>names and types</b> guide the LLM; the values you put here are just examples — the LLM fills its own based on the data.</div>
+                </div>
+                <div class="cm-config-item llm-row-path">
+                    <label for="node-input-outputPath"><i class="fa fa-map-marker"></i> Extract field as payload (optional)</label>
+                    <input type="text" id="node-input-outputPath" placeholder='leave empty for the whole object — or e.g. "score" or "anomalies.0"'>
+                    <div class="cm-help-text">Dot-notation. Empty = whole object. With a path, <code>msg.payload</code> = that field; the full object goes into <code>msg.json</code>.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- Prompts                                                        -->
+    <!-- ============================================================ -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-edit"></i> Prompts</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-stack">
+                <div class="cm-config-item">
+                    <label for="node-input-systemPrompt"><i class="fa fa-cog"></i> System prompt</label>
+                    <textarea id="node-input-systemPrompt" rows="3" placeholder="Leave empty to use the built-in default"></textarea>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-userPromptTemplate"><i class="fa fa-pencil"></i> User prompt template</label>
+                    <textarea id="node-input-userPromptTemplate" rows="6" placeholder="Leave empty to use the built-in default"></textarea>
+                </div>
+            </div>
+            <div class="cm-tip">
+                <b>Placeholders:</b> <code>{sensor}</code>, <code>{unit}</code>, <code>{count}</code>, <code>{stats}</code>, <code>{samples}</code>.
+                In <i>record</i> mode add: <code>{columns}</code>, <code>{records}</code>; <code>{stats}</code> becomes a per-column block.
+                A flow can override per-message via <code>msg.prompt</code>, <code>msg.systemPrompt</code>, <code>msg.model</code>, or <code>msg.apiUrl</code>.
+            </div>
+
+            <div style="margin-top: 12px; display: flex; align-items: center; gap: 8px;">
+                <button type="button" class="red-ui-button llm-preview-btn">
+                    <i class="fa fa-eye"></i> Preview rendered prompt
+                </button>
+                <span class="cm-help-text" style="margin: 0;">— renders the template with synthetic example data so you can see what the LLM will receive.</span>
+            </div>
+            <pre class="llm-preview-output" style="display:none; margin-top: 10px; padding: 10px; background: #1e1e1e; color: #d4d4d4; border-radius: 4px; font-size: 11px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;"></pre>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="llm-analyzer">
+    <p>Buffers numeric samples and asks an LLM to analyse them. Emits the
+    plain-text answer as <code>msg.payload</code> so downstream nodes
+    (debug, dashboard, alerting, archive) can act on it.</p>
+
+    <h3>Inputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">scalar mode: number | numeric string | number[]<br>record mode: object | object[]</span></dt>
+        <dd>
+          <b>Scalar mode</b> — one numeric value or an array of values.<br>
+          <b>Record mode</b> — an object like <code>{temp:65, pressure:4.5, vibration:0.21}</code>, or an array of such objects (e.g. a DB query result).
+        </dd>
+
+        <dt class="optional">flush <span class="property-type">boolean</span></dt>
+        <dd>Manual mode only — set <code>true</code> to trigger an analysis now.</dd>
+
+        <dt class="optional">prompt <span class="property-type">string</span></dt>
+        <dd>Replaces the user-prompt template. Placeholders (<code>{sensor}</code> etc.) are still substituted.</dd>
+
+        <dt class="optional">systemPrompt <span class="property-type">string</span></dt>
+        <dd>Replaces the system prompt for this call only.</dd>
+
+        <dt class="optional">model <span class="property-type">string</span></dt>
+        <dd>Per-message model override.</dd>
+
+        <dt class="optional">apiUrl <span class="property-type">string</span></dt>
+        <dd>Per-message API endpoint override — useful for tests / private gateways.</dd>
+    </dl>
+
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">string | object | any</span></dt>
+        <dd>
+          <b>Text mode:</b> the LLM's text response.<br>
+          <b>JSON mode (no path):</b> parsed object matching the schema.<br>
+          <b>JSON mode (with path):</b> the value at the given dot-path.
+        </dd>
+        <dt class="optional">json <span class="property-type">object</span></dt>
+        <dd>JSON mode only — full parsed object even when payload is a single extracted field.</dd>
+        <dt class="optional">rawResponse <span class="property-type">string</span></dt>
+        <dd>JSON mode only — the LLM's raw text, for debugging if parsing surprised you.</dd>
+        <dt>usage <span class="property-type">object</span></dt>
+        <dd><code>{ inputTokens, outputTokens }</code> from the provider.</dd>
+        <dt>samples <span class="property-type">number[] | object[]</span></dt>
+        <dd>The exact batch that was sent (numbers in scalar mode, objects in record mode).</dd>
+        <dt>durationMs <span class="property-type">number</span></dt>
+        <dd>Wall-clock time of the API call.</dd>
+    </dl>
+
+    <h3>Output modes</h3>
+    <ul>
+        <li><b>Text</b> — LLM answers in free language; <code>msg.payload</code> is a string.</li>
+        <li><b>JSON</b> — Operator pastes a sample JSON object into the schema field; the node appends an instruction to the system prompt asking the LLM to return that exact shape. The response is parsed and emitted as <code>msg.payload</code>. Optional <code>outputPath</code> (dot-notation) extracts a single field — useful for piping a numeric score into a threshold/switch node downstream.</li>
+    </ul>
+    <p>If JSON parsing fails, the node emits a <code>node.error()</code> with the raw text in <code>msg.rawResponse</code>; nothing is sent on the success output.</p>
+
+    <h3>Errors</h3>
+    <p>HTTP errors, timeouts, and configuration issues surface via
+    <code>node.error()</code> — wire a <code>catch</code> node to handle them.
+    The node never emits a payload-bearing output on failure.</p>
+
+    <h3>Trigger modes</h3>
+    <ul>
+        <li><b>Batch</b> — accumulate <code>batchSize</code> samples (or records) then fire.</li>
+        <li><b>Manual</b> — fire only when an upstream message sets <code>msg.flush</code>.</li>
+        <li><b>Interval</b> — fire every <code>intervalMs</code> on whatever's in the buffer.</li>
+    </ul>
+
+    <h3>Input modes</h3>
+    <ul>
+        <li><b>Scalar</b> — one sensor stream. <code>msg.payload</code> is a number or array of numbers.</li>
+        <li><b>Record</b> — multi-sensor records. <code>msg.payload</code> is an object (or array of objects). The first record auto-detects numeric columns; the LLM gets a tabular view plus per-column stats. Use the <i>Columns</i> field to lock in or filter the column set (e.g. exclude a <code>timestamp</code> column).</li>
+    </ul>
+
+    <h3>Cost note</h3>
+    <p>Every fire is one API call billed by the provider. Pick a batch / interval
+    that matches how often a human will actually look at the output. Buffer
+    size and sample count are token cost drivers — the node caps the
+    in-prompt sample list at 100 values to keep cost predictable.</p>
+
+    <h3>Providers</h3>
+    <ul>
+        <li><b>Anthropic (Claude)</b> — native Messages API. <code>x-api-key</code> header.</li>
+        <li><b>OpenAI (GPT)</b> — Chat Completions API. <code>Authorization: Bearer …</code>.</li>
+        <li><b>Google (Gemini)</b> — generateContent API. Key passed as <code>?key=</code> query param.</li>
+        <li><b>Ollama</b> — local <code>/api/chat</code>; no key needed by default.</li>
+        <li><b>OpenAI-compatible</b> — generic adapter for any host that speaks the OpenAI Chat Completions schema (Groq, Together, OpenRouter, DeepSeek, Mistral API, vLLM, LMStudio…). <b>Requires</b> setting the API URL.</li>
+    </ul>
+</script>

@@ -1,0 +1,76 @@
+# GPU-fähige Variante des Node-RED Condition-Monitoring Containers
+# =================================================================
+# Basis: NVIDIA CUDA 12.4 mit cuDNN 9 (Ubuntu 22.04) — liefert die nötigen
+# CUDA/cuDNN-Bibliotheken für @tensorflow/tfjs-node-gpu und das Python-
+# tensorflow-Paket mit CUDA-Support.
+#
+# Build:
+#   docker build -f Dockerfile.gpu -t node-red-condition-monitoring:gpu .
+#
+# Run (NVIDIA Container Toolkit auf dem Host vorausgesetzt):
+#   docker run --gpus=all -p 1880:1880 node-red-condition-monitoring:gpu
+#
+# Komfortabler über Compose:
+#   docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml up
+
+ARG CUDA_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+FROM ${CUDA_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    NODE_RED_VERSION=4.0.5 \
+    NODE_MAJOR=20 \
+    PATH=/usr/src/node-red/node_modules/.bin:$PATH \
+    NODE_PATH=/usr/src/node-red/node_modules:/data/node_modules
+
+# System-Abhängigkeiten + Node.js (über NodeSource, Stand: LTS)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        git \
+        python3 \
+        python3-pip \
+        python3-numpy \
+        make \
+        g++ \
+        tini \
+    && curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python ML-Pakete mit GPU-Unterstützung.
+# tensorflow[and-cuda] zieht die passenden CUDA-Wheels mit. tflite-runtime ist
+# nur als CPU verfügbar — bleibt als optionales Fallback.
+RUN pip3 install --break-system-packages --no-cache-dir \
+        "numpy<2" \
+        "tensorflow[and-cuda]" \
+        scikit-learn \
+        joblib \
+    && pip3 install --break-system-packages --no-cache-dir tflite-runtime || \
+       echo "tflite-runtime nicht verfügbar (CPU-only) — wird übersprungen"
+
+# Node-RED + GPU-fähige JS-Runtimes installieren.
+# @tensorflow/tfjs-node-gpu nutzt die CUDA-Libs aus dem Base-Image.
+RUN useradd --home-dir /usr/src/node-red --create-home --shell /bin/bash node-red \
+    && mkdir -p /data /usr/src/node-red \
+    && chown -R node-red:node-red /data /usr/src/node-red
+
+USER node-red
+WORKDIR /usr/src/node-red
+
+# Versionen bewusst mit package.json synchron halten — siehe Dockerfile (CPU).
+RUN npm install --omit=dev \
+        node-red@${NODE_RED_VERSION} \
+        @tensorflow/tfjs-node-gpu@4.22.0 \
+        onnxruntime-node@1.24.3 \
+        ml-isolation-forest@0.1.0 \
+        simple-statistics@7.8.9
+
+# Modul-Code installieren
+COPY --chown=node-red:node-red . /data/node_modules/node-red-contrib-condition-monitoring/
+
+EXPOSE 1880
+WORKDIR /usr/src/node-red
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node-red", "--userDir", "/data"]
