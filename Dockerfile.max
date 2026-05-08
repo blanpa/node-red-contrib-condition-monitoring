@@ -8,7 +8,7 @@
 
 # Use Modular's MAX base image (CPU version for compatibility)
 # For GPU: use modular/max-nvidia-full:latest or modular/max-amd:latest
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 LABEL maintainer="Node-RED Condition Monitoring"
 LABEL description="MAX Engine inference server for high-performance ML"
