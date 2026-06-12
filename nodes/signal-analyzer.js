@@ -1338,7 +1338,7 @@ module.exports = function (RED) {
             return { normal: isPeak ? null : outputMsg, anomaly: isPeak ? outputMsg : null };
         }
 
-        node.on("input", function (msg) {
+        node.on("input", function (msg, send, done) {
             try {
                 // Dynamic configuration via msg.config
                 // Allows runtime override of node settings
@@ -1354,6 +1354,7 @@ module.exports = function (RED) {
                     node.timestamps = [];
                     node.sampleCount = 0;
                     node.status({ fill: "blue", shape: "ring", text: activeMode + " - reset" });
+                    done();
                     return;
                 }
 
@@ -1363,6 +1364,7 @@ module.exports = function (RED) {
                     const value = parseFloat(msg.payload);
                     if (!Number.isFinite(value)) {
                         node.warn("Invalid payload: not a finite number");
+                        done();
                         return;
                     }
                     result = processFFT(msg, value);
@@ -1373,6 +1375,7 @@ module.exports = function (RED) {
                     });
                     if (values.length === 0) {
                         node.warn("No valid numeric values found");
+                        done();
                         return;
                     }
                     result = processVibrationWithConfig(msg, values, activeVibrationThreshold);
@@ -1381,6 +1384,7 @@ module.exports = function (RED) {
                     const timestamp = msg.timestamp || Date.now();
                     if (!Number.isFinite(value)) {
                         node.warn("Invalid payload: not a finite number");
+                        done();
                         return;
                     }
                     result = processPeaksWithConfig(msg, value, timestamp, activePeakThreshold);
@@ -1388,6 +1392,7 @@ module.exports = function (RED) {
                     const value = parseFloat(msg.payload);
                     if (!Number.isFinite(value)) {
                         node.warn("Invalid payload: not a finite number");
+                        done();
                         return;
                     }
                     result = processEnvelope(msg, value);
@@ -1395,6 +1400,7 @@ module.exports = function (RED) {
                     const value = parseFloat(msg.payload);
                     if (!Number.isFinite(value)) {
                         node.warn("Invalid payload: not a finite number");
+                        done();
                         return;
                     }
                     result = processCepstrum(msg, value);
@@ -1402,14 +1408,15 @@ module.exports = function (RED) {
 
                 if (result) {
                     if (result.anomaly) {
-                        node.send([null, result.anomaly]);
+                        send([null, result.anomaly]);
                     } else if (result.normal) {
-                        node.send([result.normal, null]);
+                        send([result.normal, null]);
                     }
                 }
+                done();
             } catch (err) {
                 node.status({ fill: "red", shape: "ring", text: "error" });
-                node.error("Error in signal analysis: " + err.message, msg);
+                done(err);
             }
         });
 

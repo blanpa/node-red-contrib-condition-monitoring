@@ -1764,8 +1764,8 @@ module.exports = function (RED) {
                     }
                 }
 
-                // Build output message
-                const outputMsg = Object.assign({}, msg);
+                // Build output message (deep clone: nested outputProperty writes must not mutate the original msg)
+                const outputMsg = RED.util.cloneMessage(msg);
 
                 // Set prediction at configured property
                 const outputParts = node.outputProperty.split(".");

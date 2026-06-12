@@ -327,68 +327,72 @@ module.exports = function (RED) {
             }
 
             inFlight = true;
-            const samples = buffer.slice();
-            buffer.length = 0;
-            droppedSinceLastFire = 0;
-            setStatus({ kind: "calling" });
-
-            // Build the prompt variables. Both modes fill {sensor}, {unit},
-            // {count}; scalar mode adds {samples}+{stats}, record mode adds
-            // {records}+{columns}+{stats} (per-column).
-            let vars;
-            if (node.inputMode === "record") {
-                const cols = detectedColumns || [];
-                const colStats = computePerColumnStats(samples, cols);
-                vars = {
-                    sensor: node.sensorName || "(unnamed)",
-                    unit: node.unit || "",
-                    count: samples.length,
-                    columns: cols.join(", "),
-                    records: providers.formatRecordsTable(samples, cols, node.maxSamplesInPrompt),
-                    stats: providers.formatPerColumnStats(colStats),
-                    // {samples} kept available so a custom prompt template
-                    // written for scalar mode still substitutes meaningfully.
-                    samples: providers.formatRecordsTable(samples, cols, node.maxSamplesInPrompt)
-                };
-            } else {
-                const stat = computeStatsBlock(samples);
-                vars = {
-                    sensor: node.sensorName || "(unnamed)",
-                    unit: node.unit || "(unitless)",
-                    count: samples.length,
-                    samples: providers.formatSamplesList(samples, node.maxSamplesInPrompt),
-                    stats: providers.formatStatsLine(stat),
-                    // {records}/{columns} empty in scalar mode so a record-
-                    // mode template won't blow up if accidentally used.
-                    records: providers.formatSamplesList(samples, node.maxSamplesInPrompt),
-                    columns: ""
-                };
-            }
-
-            const overrideUserPrompt =
-                originalMsg && typeof originalMsg.prompt === "string" && originalMsg.prompt.length > 0
-                    ? originalMsg.prompt
-                    : node.userPromptTemplate;
-            let overrideSystemPrompt =
-                originalMsg && typeof originalMsg.systemPrompt === "string" && originalMsg.systemPrompt.length > 0
-                    ? originalMsg.systemPrompt
-                    : node.systemPrompt;
-            // JSON-mode: append the schema instruction to the system prompt.
-            // We do NOT use provider-native JSON modes (response_format etc.)
-            // — the prompt-side approach works across all five providers.
-            if (node.outputMode === "json") {
-                overrideSystemPrompt = (overrideSystemPrompt || "") + providers.buildJsonInstruction(node.outputSchema);
-            }
-            const overrideApiUrl =
-                originalMsg && typeof originalMsg.apiUrl === "string" && originalMsg.apiUrl.length > 0
-                    ? originalMsg.apiUrl
-                    : node.apiUrl;
-            const overrideModel =
-                originalMsg && typeof originalMsg.model === "string" && originalMsg.model.length > 0
-                    ? originalMsg.model
-                    : node.model;
-
+            // The try MUST start before prompt building: an exception anywhere
+            // past this point would otherwise leave inFlight stuck at true and
+            // reject the (un-awaited) fire() promise.
             try {
+                const samples = buffer.slice();
+                buffer.length = 0;
+                droppedSinceLastFire = 0;
+                setStatus({ kind: "calling" });
+
+                // Build the prompt variables. Both modes fill {sensor}, {unit},
+                // {count}; scalar mode adds {samples}+{stats}, record mode adds
+                // {records}+{columns}+{stats} (per-column).
+                let vars;
+                if (node.inputMode === "record") {
+                    const cols = detectedColumns || [];
+                    const colStats = computePerColumnStats(samples, cols);
+                    vars = {
+                        sensor: node.sensorName || "(unnamed)",
+                        unit: node.unit || "",
+                        count: samples.length,
+                        columns: cols.join(", "),
+                        records: providers.formatRecordsTable(samples, cols, node.maxSamplesInPrompt),
+                        stats: providers.formatPerColumnStats(colStats),
+                        // {samples} kept available so a custom prompt template
+                        // written for scalar mode still substitutes meaningfully.
+                        samples: providers.formatRecordsTable(samples, cols, node.maxSamplesInPrompt)
+                    };
+                } else {
+                    const stat = computeStatsBlock(samples);
+                    vars = {
+                        sensor: node.sensorName || "(unnamed)",
+                        unit: node.unit || "(unitless)",
+                        count: samples.length,
+                        samples: providers.formatSamplesList(samples, node.maxSamplesInPrompt),
+                        stats: providers.formatStatsLine(stat),
+                        // {records}/{columns} empty in scalar mode so a record-
+                        // mode template won't blow up if accidentally used.
+                        records: providers.formatSamplesList(samples, node.maxSamplesInPrompt),
+                        columns: ""
+                    };
+                }
+
+                const overrideUserPrompt =
+                    originalMsg && typeof originalMsg.prompt === "string" && originalMsg.prompt.length > 0
+                        ? originalMsg.prompt
+                        : node.userPromptTemplate;
+                let overrideSystemPrompt =
+                    originalMsg && typeof originalMsg.systemPrompt === "string" && originalMsg.systemPrompt.length > 0
+                        ? originalMsg.systemPrompt
+                        : node.systemPrompt;
+                // JSON-mode: append the schema instruction to the system prompt.
+                // We do NOT use provider-native JSON modes (response_format etc.)
+                // — the prompt-side approach works across all five providers.
+                if (node.outputMode === "json") {
+                    overrideSystemPrompt =
+                        (overrideSystemPrompt || "") + providers.buildJsonInstruction(node.outputSchema);
+                }
+                const overrideApiUrl =
+                    originalMsg && typeof originalMsg.apiUrl === "string" && originalMsg.apiUrl.length > 0
+                        ? originalMsg.apiUrl
+                        : node.apiUrl;
+                const overrideModel =
+                    originalMsg && typeof originalMsg.model === "string" && originalMsg.model.length > 0
+                        ? originalMsg.model
+                        : node.model;
+
                 const result = await node.providerCall({
                     apiKey: node.apiKey,
                     model: overrideModel,
@@ -540,6 +544,8 @@ module.exports = function (RED) {
                 if (buffer.length === 0) return;
                 fire(null, (m) => node.send(m));
             }, node.intervalMs);
+            // Don't let a passive interval node hold the process open on shutdown.
+            if (intervalHandle.unref) intervalHandle.unref();
         }
 
         node.on("close", function (removed, doneClose) {
