@@ -197,7 +197,11 @@ function calculatePearsonCorrelation(x, y) {
     stdY = Math.sqrt(stdY);
 
     if (stdX === 0 || stdY === 0) return 0;
-    return covariance / (stdX * stdY);
+    // Pearson r is mathematically bounded to [-1, 1]; floating-point
+    // cancellation with extreme-magnitude inputs can push the quotient
+    // slightly outside, so clamp.
+    const r = covariance / (stdX * stdY);
+    return Math.max(-1, Math.min(1, r));
 }
 
 /**
