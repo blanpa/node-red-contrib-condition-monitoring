@@ -171,6 +171,36 @@ Integrate trained ML models for inference.
 | **ml-inference** | Run ML model predictions | ONNX, TensorFlow.js, TFLite, Keras, scikit-learn, MAX Engine |
 | **training-data-collector** | Collect labeled training data | CSV, JSONL, JSON with S3 upload |
 
+### 6. LLM Analysis Nodes
+
+Send buffered sensor data to a large language model and feed the analysis back into the flow.
+
+| Node | Purpose | Providers |
+|------|---------|-----------|
+| **llm-analyzer** | Batch sensor samples, ask an LLM for plain-text or structured-JSON analysis | Anthropic, OpenAI, Google (Gemini), Ollama (local), OpenAI-compatible (Groq, Together, OpenRouter, …) |
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      LLM Analyzer Flow                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Sensor Data ──▶ [Buffer] ──▶ [Pre-computed Stats] ──▶ [Prompt] │
+│       │              │              (mean/stdDev/...)      │     │
+│       │              ▼                                     ▼     │
+│       │      Trigger: batch /                    ┌─────────────┐│
+│       │      manual / interval ─────────────────▶│ LLM API     ││
+│       │                                          │ (HTTP fetch)││
+│       │                                          └─────────────┘│
+│       │                                                  │      │
+│       │                                                  ▼      │
+│       │                                   msg.payload (text or  │
+│       │                                   parsed JSON) + usage/ │
+│       │                                   cost tracking         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The node calls the provider's HTTP API directly via `fetch` (no SDK dependency); provider adapters live in `nodes/utils/llm-providers.js`. API keys are Node-RED credentials (encrypted at rest). See [docs/API.md](API.md#llm-analyzer) for the full contract and [docs/SPEC-llm-analyzer.md](SPEC-llm-analyzer.md) for design decisions.
+
 ---
 
 ## Data Flow Patterns
@@ -219,6 +249,19 @@ Integrate trained ML models for inference.
                                     ▼
                             [Prediction Output]
 ```
+
+### Pattern 5: LLM-Augmented Analysis
+
+```
+[Sensor Data] ──▶ [llm-analyzer] ──▶ [Operator Summary / Dashboard]
+                  (text mode)
+
+[Sensor Data] ──▶ [anomaly-detector] ──▶ [llm-analyzer] ──▶ [switch on score] ──▶ [Alert]
+                                         (JSON mode,
+                                          outputPath: "score")
+```
+
+The llm-analyzer complements — not replaces — the statistical/ML nodes: stats are pre-computed locally and injected into the prompt, the LLM adds interpretation (anomaly explanation, cross-sensor correlation in record mode, operator-readable summaries). With Ollama as the provider the pattern works fully offline.
 
 ---
 
@@ -382,12 +425,14 @@ node-red-contrib-condition-monitoring/
 │   ├── ml-inference.js          # ML model inference
 │   ├── pca-anomaly.js           # PCA-based detection
 │   ├── training-data-collector.js
+│   ├── llm-analyzer.js          # LLM-based batch analysis
 │   ├── python-bridge-manager.js # Python subprocess manager
 │   ├── max-bridge-manager.js    # MAX Engine client
 │   ├── state-persistence.js     # State management
 │   ├── python_bridge.py         # Python inference server
 │   └── utils/
-│       └── statistics.js        # Shared statistical functions
+│       ├── statistics.js        # Shared statistical functions
+│       └── llm-providers.js     # LLM provider adapters (HTTP)
 ├── test/
 │   └── *_spec.js                # Jest test files
 ├── docs/

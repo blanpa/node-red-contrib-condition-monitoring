@@ -2,13 +2,14 @@
 
 ## Supported Versions
 
-This project is currently at **0.2.x (beta)**. Security fixes land on the `main`
-branch and are released as soon as a fix is available. Older 0.2.x patch
+This project is currently at **0.3.x (beta)**. Security fixes land on the `main`
+branch and are released as soon as a fix is available. Older patch
 releases are not back-ported.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.2.x   | :white_check_mark: |
+| 0.3.x   | :white_check_mark: |
+| 0.2.x   | :x:                |
 | < 0.2   | :x:                |
 
 ## Reporting a Vulnerability
@@ -51,6 +52,14 @@ should be aware of these:
   are compared in constant time. Requests without a matching token are closed
   with WebSocket code `4401`. Configure these in any node that publishes to
   the WebSocket (e.g. `anomaly-detector`).
+
+- **LLM credentials & data egress** — the `llm-analyzer` node stores its API
+  key as a Node-RED credential (`apiKey`, type `password`), encrypted at rest
+  in the credentials file; the inline `apiKey` config property is a dev/test
+  backstop only and should not be used in production. Be aware that this node
+  **sends buffered sensor data to an external LLM API** of the operator's
+  choosing (Anthropic, OpenAI, Google, an OpenAI-compatible endpoint, or a
+  local Ollama instance — the latter keeps data on-site).
 
 - **Prototype-pollution sanitisation** — `nodes/utils/error-handler.js`
   exposes `sanitizeObject` which is used wherever JSON-decoded user input

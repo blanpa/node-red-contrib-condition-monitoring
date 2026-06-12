@@ -11,6 +11,29 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
+## Table of Contents
+
+- [Project Status: v0.3.0 Beta](#project-status-v030-beta)
+- [Important Disclaimer](#important-disclaimer)
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Available Nodes (10 Nodes)](#available-nodes-10-nodes)
+- [Which Node Should I Use?](#which-node-should-i-use)
+- [Usage Examples](#usage-examples)
+- [Migration Guide (v0.1.x → v0.2.0)](#migration-guide-v01x--v020)
+- [Node Configuration Examples](#node-configuration-examples)
+- [Dynamic Configuration (msg.config)](#dynamic-configuration-msgconfig)
+- [Docker Setup](#docker-setup)
+- [Dependencies](#dependencies)
+- [Performance Features](#performance-features)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
+- [Roadmap](#roadmap)
+
+---
+
 ## Project Status: v0.3.0 Beta
 
 **Predictive Maintenance Enhancement Update**
@@ -53,6 +76,8 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 - **State Persistence** - Optional buffer/statistics persistence across restarts
 
 ## Installation
+
+**Prerequisites:** Node.js >= 18, Node-RED >= 2.0.0
 
 ```bash
 npm install node-red-contrib-condition-monitoring
@@ -666,7 +691,7 @@ docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml \
 
 ### Required
 - Node-RED >= 2.0.0
-- Node.js >= 14.0.0
+- Node.js >= 18.0.0 (the LLM Analyzer node uses the built-in `fetch`)
 
 ### Core Dependencies
 - `fft.js` - High-performance FFT (Radix-4 Cooley-Tukey algorithm)

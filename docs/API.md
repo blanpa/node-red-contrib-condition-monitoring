@@ -7,6 +7,7 @@ This document provides detailed API documentation for the internal components an
 - [Python Bridge API](#python-bridge-api)
 - [MAX Engine API](#max-engine-api)
 - [Node Message Interfaces](#node-message-interfaces)
+- [LLM Analyzer](#llm-analyzer)
 - [Shared Utilities](#shared-utilities)
 - [State Persistence API](#state-persistence-api)
 
@@ -535,6 +536,189 @@ msg.config = {
   hysteresisEnabled: false    // Disable hysteresis
 };
 ```
+
+---
+
+## LLM Analyzer
+
+The `llm-analyzer` node buffers sensor samples, builds a prompt from them, calls a configurable LLM provider over plain HTTP (`fetch`, no SDK), and emits the analysis as `msg.payload`. Provider adapters live in `nodes/utils/llm-providers.js`. See `docs/SPEC-llm-analyzer.md` for design rationale.
+
+### Supported Providers
+
+| Provider | Default Endpoint | Authentication | Notes |
+|----------|------------------|----------------|-------|
+| `anthropic` | `https://api.anthropic.com/v1/messages` | `x-api-key` header | Native Messages API (`anthropic-version: 2023-06-01`) |
+| `openai` | `https://api.openai.com/v1/chat/completions` | `Authorization: Bearer` | Chat Completions API |
+| `google` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` | `?key=` query param | `{model}` substituted from config; system prompt sent as `systemInstruction` |
+| `ollama` | `http://localhost:11434/api/chat` | none (optional Bearer) | Local model runner; API key not required |
+| `openai-compatible` | **none — `apiUrl` is required** | `Authorization: Bearer` | Generic Chat Completions adapter (Groq, Together, OpenRouter, DeepSeek, Mistral API, vLLM, LMStudio, …) |
+
+All adapters normalize usage to `{ inputTokens, outputTokens }` and share one HTTP helper for abort/timeout and error mapping. An unknown provider name fails at deploy time with `node.error()` and a red status.
+
+### Configuration Schema
+
+Numeric fields are clamped to their valid range (out-of-range values are pinned, non-numeric values fall back to the default).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | `""` | Editor label only |
+| `provider` | string | `"anthropic"` | One of `anthropic` \| `openai` \| `google` \| `ollama` \| `openai-compatible` |
+| `model` | string | `"claude-haiku-4-5-20251001"` | Free-text model name passed to the provider |
+| `apiUrl` | string | `""` | Empty = provider default endpoint. **Required** for `openai-compatible` |
+| `triggerMode` | string | `"batch"` | `batch` \| `manual` \| `interval` |
+| `batchSize` | number | `50` | Range 1–1000. Used only in `batch` mode |
+| `intervalMs` | number | `60000` | Range 250–86400000 (24 h). Used only in `interval` mode |
+| `maxOutputTokens` | number | `1024` | Range 16–8192. Sent as `max_tokens` (OpenAI/Anthropic), `generationConfig.maxOutputTokens` (Google), `options.num_predict` (Ollama) |
+| `timeoutMs` | number | `30000` | Range 1000–300000 (5 min). Per-request abort timeout |
+| `maxBufferSize` | number | `10000` | Range 1–1000000. Hard buffer cap (ring buffer, oldest dropped) |
+| `maxSamplesInPrompt` | number | `100` | Range 1–10000. Cap on samples/records rendered into the prompt |
+| `inputMode` | string | `"scalar"` | `scalar` (numbers) \| `record` (multi-column objects) |
+| `columns` | string | `""` | Record mode only. Comma-separated column allowlist; empty = auto-detect numeric columns from the first record |
+| `outputMode` | string | `"text"` | `text` \| `json` |
+| `outputSchema` | string | `""` | JSON mode only. Example object whose shape the LLM is asked to mirror |
+| `outputPath` | string | `""` | JSON mode only. Dot-notation path extracted into `msg.payload` (e.g. `"score"`, `"anomalies.0"`) |
+| `systemPrompt` | string | `""` | Empty = built-in default system prompt |
+| `userPromptTemplate` | string | `""` | Empty = built-in default template (differs per input mode). Supports `{word}` placeholders |
+| `sensorName` | string | `""` | Metadata; fills the `{sensor}` placeholder |
+| `unit` | string | `""` | Metadata; fills the `{unit}` placeholder |
+| `passthroughOriginal` | boolean | `true` | If true, the triggering message's `payload` is copied to `msg.input` on the output |
+| `persistState` | boolean | `false` | Persist buffer, detected columns, and lifetime counters across redeploys |
+
+### Credential Handling
+
+The API key is a Node-RED credential (`apiKey`, type `password`) — encrypted at rest in the credentials file, never stored in the flow JSON:
+
+```javascript
+RED.nodes.registerType("llm-analyzer", LlmAnalyzerNode, {
+  credentials: {
+    apiKey: { type: "password" }
+  }
+});
+```
+
+Resolution order at runtime:
+
+1. `node.credentials.apiKey` (encrypted Node-RED credential) — preferred
+2. `config.apiKey` inline property — dev/test backstop only (stored in plain text in the flow file)
+
+The key is required for every provider except `ollama` (where an optional key is sent as `Authorization: Bearer` for hosted forwarders). If a required key is missing the node refuses to start: red `no API key` status plus `node.error()`. The same fail-fast applies to a missing `apiUrl` for `openai-compatible`.
+
+### Trigger Modes
+
+| Mode | Fires when | Notes |
+|------|-----------|-------|
+| `batch` | Buffer reaches `batchSize` on input | Status shows `buffering N/batchSize` |
+| `manual` | Incoming message has `msg.flush === true` | `flush` is ignored in the other modes |
+| `interval` | Every `intervalMs` (timer-driven) | Inputs only fill the buffer; ticks with an empty buffer are skipped |
+
+A trigger with an empty buffer logs `node.warn()` and is skipped. Triggers arriving while a request is in flight are **queued, not dropped**: one pending re-fire slot is kept and drained after the current call returns (a `manual` trigger takes priority over a queued `batch`/`interval` one).
+
+### Prompt Template Substitution
+
+Templates are rendered with `fillTemplate()` (`nodes/utils/llm-providers.js`): every `{word}` token (`/\{(\w+)\}/g`) is replaced if the variable exists; **unknown placeholders are left verbatim** in the prompt.
+
+Variables available in both modes: `{sensor}`, `{unit}`, `{count}`, `{stats}`, `{samples}`, `{records}`, `{columns}`.
+
+| Placeholder | Scalar mode | Record mode |
+|-------------|-------------|-------------|
+| `{sensor}` | `sensorName` or `(unnamed)` | same |
+| `{unit}` | `unit` or `(unitless)` | `unit` or empty string |
+| `{count}` | Number of buffered samples | Number of buffered records |
+| `{stats}` | One line: `n= mean= stdDev= min= max= range=` | Per-column multi-line block (`n= mean= stdDev= min= max=`) |
+| `{samples}` | Comma-separated values (capped at `maxSamplesInPrompt`, newest kept, with a `(showing last N of M)` header when trimmed) | Alias for `{records}` so scalar templates still render |
+| `{records}` | Alias for `{samples}` | Tabular block, one line per record: `t=1 temp=65 pressure=4.5 …` (same cap/trim rules) |
+| `{columns}` | Empty string | Detected/configured column names joined with `, ` |
+
+Stats are pre-computed by the node (mean/stdDev/min/max/range) so the LLM does not burn tokens recomputing them. In JSON output mode an instruction block (built by `buildJsonInstruction()`, including the `outputSchema` example if set) is appended to the system prompt — provider-native JSON modes are not used.
+
+Record mode column detection: with an empty `columns` field, the **first** record received establishes the numeric column set, which is then frozen for the node's lifetime. Common timestamp/identifier fields (`timestamp`, `time`, `ts`, `_ts`, `epoch`, `datetime`, `date`, `id`, `_id` — case-insensitive) are skipped automatically; list columns explicitly to include them.
+
+### Input Message
+
+```javascript
+msg = {
+  // scalar mode: number | numeric string | number[]
+  // record mode: object | object[]   e.g. { temp: 65, pressure: 4.5 }
+  payload: 65.2,
+
+  flush: true,                 // optional — manual mode only: fire now
+  prompt: "…",                 // optional — replaces the user prompt template
+                               //   ({word} substitution is still applied)
+  systemPrompt: "…",           // optional — replaces the system prompt for this call
+  model: "gpt-4o-mini",        // optional — per-message model override
+  apiUrl: "http://mock:8080"   // optional — per-message endpoint override (tests/gateways)
+}
+```
+
+Non-numeric scalar values and records without any numeric field in the column set are silently ignored (not buffered).
+
+### Output Message
+
+```javascript
+msg = {
+  payload: "<LLM response text>",  // text mode: string
+                                   // json mode: parsed object, or the value at
+                                   //            outputPath if one is configured
+  usage: {                         // this call (normalized across providers)
+    inputTokens: 124,
+    outputTokens: 89
+  },
+  totalUsage: {                    // lifetime counters (reset on redeploy,
+    inputTokens: 12400,            // persisted when persistState is on)
+    outputTokens: 3100,
+    callCount: 234
+  },
+  samples: [/* exact batch sent */],  // number[] (scalar) or object[] (record)
+  sensor: "machine-A/temp",        // sensorName or null
+  unit: "°C",                      // unit or null
+  model: "claude-haiku-4-5-…",     // model reported by the provider
+  durationMs: 1234,                // wall-clock time of the API call
+
+  // JSON mode only:
+  json: { /* full parsed object */ },
+  rawResponse: "<raw LLM text>",
+
+  // only if passthroughOriginal and a triggering msg exists:
+  input: 65.2,                     // original msg.payload
+
+  topic: "…",                      // passed through from the triggering msg
+  _msgid: "…"                      // passed through from the triggering msg
+}
+```
+
+### Buffer Behavior
+
+- The buffer is drained (copied and cleared) on every fire; `msg.samples` carries the exact batch that was sent.
+- `maxBufferSize` is a hard ring-buffer cap: when exceeded, the **oldest** entries are dropped and the drop count appears in the status line (`buffering 9999/10000 ⚠ 12 dropped`). Most relevant in `manual`/`interval` modes where the buffer can otherwise grow unbounded.
+- `maxSamplesInPrompt` independently caps how many buffered values are rendered into the prompt (token-cost knob) — the newest N are kept, older ones are summarized only by the stats line.
+- With `persistState: true`, the buffer, detected columns, and lifetime usage counters are saved every 30 s and on close (context key `llmAnalyzerState_<nodeId>` via the shared persistence helper) and restored after a redeploy.
+
+### Timeouts and Errors
+
+Each request runs under an `AbortController` armed with `timeoutMs`; on expiry the call is aborted and surfaces as a `timeout` error. All failures go through `node.error("llm-analyzer: …", msg)` — wire a `catch` node to handle them. **No payload-bearing message is emitted on failure.**
+
+| Error kind | Cause |
+|-----------|-------|
+| `timeout` | Request exceeded `timeoutMs` |
+| `network` | fetch/transport failure |
+| `auth` | HTTP 401 / 403 |
+| `rate-limit` | HTTP 429 |
+| `http` | Any other non-2xx status |
+| `shape` | Provider response missing expected fields |
+| `blocked` | Google only — prompt blocked (`promptFeedback.blockReason`) |
+| `config` | Missing key/URL/model, unknown provider |
+
+JSON mode adds two error paths: an unparseable response (`json parse` status; the error message carries `msg.rawResponse`, `msg.usage`, `msg.model`) and a missing `outputPath` field (`path not found` status; error message additionally carries `msg.json`). The error kind is also shown in the node status (red ring).
+
+### Status Indicator
+
+| State | Visual |
+|-------|--------|
+| Idle | green dot — `ready` |
+| Collecting | blue ring — `buffering 23/50` (plus `⚠ N dropped` after cap hits) |
+| In-flight | yellow dot — `calling LLM` |
+| Last call OK | green dot — `ok · 234 calls · 12.4kin/3.1kout · 1.2s` |
+| Last call failed | red ring — error kind |
 
 ---
 
