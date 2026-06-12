@@ -48,31 +48,41 @@ class PythonBridgeManager extends EventEmitter {
         }
 
         return new Promise((resolve, reject) => {
-            // Try python3 first, then python
-            this._tryStart(["python3", "python"], 0, (err, pythonPath) => {
+            // Listen for the ready signal BEFORE spawning: a bridge that
+            // prints its ready line within the spawn settle window would
+            // otherwise never be seen and start() would always time out.
+            let readyTimeout = null;
+            const checkReady = (response) => {
+                if (response.id === "ready" && response.success) {
+                    if (readyTimeout) clearTimeout(readyTimeout);
+                    this.removeListener("response", checkReady);
+                    this.isReady = true;
+                    this.emit("ready", response.result);
+                    resolve(response.result);
+                }
+            };
+            this.on("response", checkReady);
+
+            // Honor an explicitly configured interpreter, then fall back.
+            const candidates = [...new Set([this.pythonPath, "python3", "python"].filter(Boolean))];
+            this._tryStart(candidates, 0, (err, pythonPath) => {
                 if (err) {
+                    this.removeListener("response", checkReady);
                     reject(err);
                     return;
                 }
 
                 this.pythonPath = pythonPath;
 
-                // Wait for ready signal
-                const readyTimeout = setTimeout(() => {
-                    reject(new Error("Python bridge startup timeout"));
-                    this.stop();
-                }, this.startupTimeout);
-
-                const checkReady = (response) => {
-                    if (response.id === "ready" && response.success) {
-                        clearTimeout(readyTimeout);
-                        this.isReady = true;
-                        this.emit("ready", response.result);
-                        resolve(response.result);
-                    }
-                };
-
-                this.once("response", checkReady);
+                // The ready line may already have arrived during the settle
+                // window — only arm the timeout if we are still waiting.
+                if (!this.isReady) {
+                    readyTimeout = setTimeout(() => {
+                        this.removeListener("response", checkReady);
+                        reject(new Error("Python bridge startup timeout"));
+                        this.stop();
+                    }, this.startupTimeout);
+                }
             });
         });
     }
@@ -129,17 +139,30 @@ class PythonBridgeManager extends EventEmitter {
                 }
             });
 
+            // Each candidate attempt settles exactly once: either the spawn
+            // error advances to the next candidate, or the settle timer
+            // accepts this one. Without the guard, a late error event could
+            // invoke the callback a second time with a stale pythonPath.
+            let settled = false;
+
             this.process.on("error", () => {
                 // Process failed to start, try next python candidate
                 this.process = null;
+                if (settled) return;
+                settled = true;
+                clearTimeout(settleTimer);
                 this._tryStart(pythonCandidates, index + 1, callback);
             });
 
             // If we get here without error, the process started
             // Wait a moment to ensure it's running
-            setTimeout(() => {
+            const settleTimer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
                 if (this.process && !this.process.killed) {
                     callback(null, pythonPath);
+                } else {
+                    this._tryStart(pythonCandidates, index + 1, callback);
                 }
             }, 100);
         } catch (err) {
@@ -281,14 +304,18 @@ class PythonBridgeManager extends EventEmitter {
         await new Promise((resolve) => setTimeout(resolve, 500));
 
         if (this.process) {
-            this.process.kill("SIGTERM");
+            // Capture the reference: this.process is nulled below, so the
+            // force-kill fallback must not depend on it.
+            const proc = this.process;
+            proc.kill("SIGTERM");
 
-            // Force kill after 2 seconds
-            setTimeout(() => {
-                if (this.process) {
-                    this.process.kill("SIGKILL");
+            // Force kill after 2 seconds if SIGTERM didn't end it
+            const killTimer = setTimeout(() => {
+                if (proc.exitCode === null && !proc.killed) {
+                    proc.kill("SIGKILL");
                 }
             }, 2000);
+            if (killTimer.unref) killTimer.unref();
         }
 
         if (this.readline) {

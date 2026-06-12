@@ -89,7 +89,11 @@ class MaxBridgeManager extends EventEmitter {
                         const parsed = JSON.parse(responseData);
 
                         if (res.statusCode >= 400) {
-                            reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+                            const httpErr = new Error(parsed.error || `HTTP ${res.statusCode}`);
+                            // Carry the status so retry logic doesn't have to
+                            // guess it from a body-dependent message string.
+                            httpErr.statusCode = res.statusCode;
+                            reject(httpErr);
                         } else {
                             resolve(parsed);
                         }
@@ -147,8 +151,14 @@ class MaxBridgeManager extends EventEmitter {
             } catch (err) {
                 lastError = err;
 
-                // Don't retry on client errors (4xx)
-                if (err.message && err.message.includes("HTTP 4")) {
+                // Don't retry on client errors (4xx). Prefer the structured
+                // statusCode; the message check stays as a fallback for
+                // errors raised without one.
+                const status = err.statusCode;
+                if (
+                    (typeof status === "number" && status >= 400 && status < 500) ||
+                    (err.message && err.message.includes("HTTP 4"))
+                ) {
                     throw err;
                 }
 
