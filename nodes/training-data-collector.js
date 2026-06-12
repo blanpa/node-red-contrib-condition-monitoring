@@ -158,6 +158,27 @@ module.exports = function (RED) {
             }
         }
 
+        // Without autoSave, batch/timeseries collection would grow without
+        // bound and eventually OOM a long-running flow. Allow headroom up to
+        // 2x bufferSize, then drop the oldest samples — loudly, so the
+        // operator knows data is being lost and can export or enable autoSave.
+        let bufferCapWarned = false;
+        function enforceBufferCap() {
+            const hardCap = node.bufferSize * 2;
+            if (node.dataBuffer.length <= hardCap) return;
+            while (node.dataBuffer.length > hardCap) {
+                node.dataBuffer.shift();
+            }
+            if (!bufferCapWarned) {
+                bufferCapWarned = true;
+                node.warn(
+                    "training-data-collector: buffer exceeded 2x bufferSize (" +
+                        hardCap +
+                        "); dropping oldest samples. Export the data or enable autoSave."
+                );
+            }
+        }
+
         function sanitizePath(inputPath) {
             // SECURITY: Prevent path traversal attacks
             // Remove any parent directory references and normalize the path
@@ -961,6 +982,7 @@ module.exports = function (RED) {
                         };
 
                         node.dataBuffer.push(windowSample);
+                        enforceBufferCap();
 
                         // Slide window with overlap
                         const slideAmount = Math.floor(node.windowSize * (1 - node.windowOverlap / 100));
@@ -970,6 +992,7 @@ module.exports = function (RED) {
                 } else {
                     // Batch mode: collect in buffer
                     node.dataBuffer.push(sample);
+                    enforceBufferCap();
                 }
 
                 // Auto-save when buffer is full

@@ -93,12 +93,14 @@ function initializeStatePersistence(node, options) {
                     onStateLoaded(state);
                     debugLog("Loaded persisted state for " + stateKey);
                 } catch (err) {
-                    debugLog("Error processing loaded state: " + err.message);
+                    // Surface loudly: the node silently starting from scratch
+                    // looks like a mystery reset to the operator.
+                    node.warn("Error processing persisted state (starting fresh): " + err.message);
                 }
             }
         })
         .catch(function (err) {
-            debugLog("Failed to load persisted state: " + err.message);
+            node.warn("Failed to load persisted state (starting fresh): " + err.message);
         });
 
     // Return an enhanced state manager with helper methods

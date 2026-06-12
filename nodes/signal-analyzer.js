@@ -200,8 +200,14 @@ module.exports = function (RED) {
 
             if (FFT) {
                 // Use high-performance fft.js library (Radix-4 algorithm)
-                // Cache FFT instances for different sizes
+                // Cache FFT instances for different sizes. Bounded: dynamic
+                // msg.config can change the FFT size at runtime, so evict the
+                // oldest entry rather than accumulating instances forever.
                 if (!node.fftInstances[n]) {
+                    const cached = Object.keys(node.fftInstances);
+                    if (cached.length >= 8) {
+                        delete node.fftInstances[cached[0]];
+                    }
                     node.fftInstances[n] = new FFT(n);
                 }
                 const fft = node.fftInstances[n];
