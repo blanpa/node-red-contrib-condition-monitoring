@@ -58,6 +58,12 @@ class WebSocketManager extends EventEmitter {
      * @param {string[]|null} [options.allowedOrigins=null]
      *        Optional list of allowed `Origin` header values. When set, browsers
      *        served from any other origin are refused (CSWSH protection).
+     * @param {number} [options.maxClients=100]
+     *        Maximum concurrent connections. Excess connections are closed with
+     *        code 4009 so a misbehaving client cannot exhaust server memory.
+     * @param {number} [options.maxMessageSize=65536]
+     *        Maximum inbound message size in bytes (ws `maxPayload`). Larger
+     *        frames close the connection with code 1009.
      */
     constructor(options = {}) {
         super();
@@ -65,6 +71,12 @@ class WebSocketManager extends EventEmitter {
         this.port = options.port || 1881;
         this.path = options.path || "/ws/condition-monitoring";
         this.heartbeatInterval = options.heartbeatInterval || 30000;
+        this.maxClients = Number.isInteger(options.maxClients) && options.maxClients > 0 ? options.maxClients : 100;
+        this.maxMessageSize =
+            Number.isInteger(options.maxMessageSize) && options.maxMessageSize > 0 ? options.maxMessageSize : 65536;
+        // Cap per-client subscription sets so subscribe-spam with unique
+        // topics cannot grow memory without bound.
+        this.maxSubscriptionsPerClient = 256;
         this.authToken =
             typeof options.authToken === "string" && options.authToken.length > 0 ? options.authToken : null;
         this.allowedOrigins =
@@ -105,7 +117,8 @@ class WebSocketManager extends EventEmitter {
             try {
                 const wsServerOptions = {
                     port: this.port,
-                    path: this.path
+                    path: this.path,
+                    maxPayload: this.maxMessageSize
                 };
                 // Origin allowlist: enforced *before* the WS upgrade completes.
                 if (this.allowedOrigins) {
@@ -189,6 +202,20 @@ class WebSocketManager extends EventEmitter {
      * Handle new client connection
      */
     _handleConnection(ws, req) {
+        if (this.clients.size >= this.maxClients) {
+            this.stats.errors++;
+            try {
+                ws.close(4009, "Server at capacity");
+            } catch (_) {
+                /* ignore */
+            }
+            this.emit("clientRejected", {
+                reason: "capacity",
+                ip: req.socket && req.socket.remoteAddress
+            });
+            return;
+        }
+
         const clientId = `client_${++this.clientCounter}`;
         const clientIp = req.socket.remoteAddress;
 
@@ -250,20 +277,24 @@ class WebSocketManager extends EventEmitter {
             const message = JSON.parse(data.toString());
 
             switch (message.type) {
-                case "subscribe":
-                    // Subscribe to specific topics
-                    if (Array.isArray(message.topics)) {
-                        message.topics.forEach((topic) => {
+                case "subscribe": {
+                    // Subscribe to specific topics (bounded per client)
+                    const addTopic = (topic) => {
+                        if (client.subscriptions.size < this.maxSubscriptionsPerClient) {
                             client.subscriptions.add(topic);
-                        });
+                        }
+                    };
+                    if (Array.isArray(message.topics)) {
+                        message.topics.forEach(addTopic);
                     } else if (message.topic) {
-                        client.subscriptions.add(message.topic);
+                        addTopic(message.topic);
                     }
                     this._sendToClient(clientId, {
                         type: "subscribed",
                         subscriptions: Array.from(client.subscriptions)
                     });
                     break;
+                }
 
                 case "unsubscribe":
                     // Unsubscribe from topics
