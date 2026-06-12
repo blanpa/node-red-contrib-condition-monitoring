@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.3.0] - 2026-05-08 - LLM Analyzer Node (Phase 1–5)
+## [0.3.0] - 2026-06-12 - LLM Analyzer Node (Phase 1–5)
 
 ### ✨ New Node: `llm-analyzer`
 
@@ -67,6 +67,46 @@ plus a small mock-Anthropic sidecar so the five demo flows
 without needing a real API key.
 
 See `docs/SPEC-llm-analyzer.md` for the full design contract.
+
+### 🐛 Fixed (pre-release hardening pass)
+
+- **ml-inference**: outgoing msg is now deep-cloned — a nested
+  `outputProperty` previously mutated the original message
+- **signal-analyzer**: input handler uses the `(msg, send, done)`
+  signature so message tracking and catch-node correlation work
+- **llm-analyzer**: error containment covers prompt building (a throw
+  there left the node stuck in-flight); interval timer is unref'd
+- **python-bridge**: ready-signal race on fast startup, ignored
+  `pythonPath` option, dead SIGKILL fallback, candidate double-callback
+- **max-bridge**: 4xx responses with JSON error bodies were retried
+- **Memory bounds for long-running flows**: FFT instance cache eviction,
+  training-data-collector hard buffer cap (2x bufferSize, with warning),
+  persistence load failures surface as warnings instead of silent resets
+
+### 🔒 Security / Robustness
+
+- **websocket-manager**: `maxClients` connection cap (close 4009),
+  `maxMessageSize` payload limit (64 KiB default), per-client
+  subscription cap (256 topics)
+- **Config validation**: shared `clampInt`/`clampFloat`
+  (`nodes/utils/config-validator.js`) replaces the `parseInt(x) || default`
+  pattern across all nodes — `0` is no longer silently turned into the
+  default where it is a valid value
+
+### 🧪 Testing & CI
+
+- 68 new unit tests for websocket-manager, python-bridge-manager and
+  max-bridge-manager (previously zero coverage)
+- Jest coverage thresholds gate CI and publishing
+- `--forceExit` removed from the test scripts (suite exits cleanly)
+- npm publish workflow: `npm ci`, coverage+lint gates, tag↔package.json
+  version check, `--provenance` attestation
+
+### 📚 Docs & Examples
+
+- `examples/` with one importable flow per node (10 total)
+- LLM Analyzer reference in `docs/API.md`, architecture section updated,
+  SECURITY.md supported versions bumped to 0.3.x, README ToC
 
 ---
 

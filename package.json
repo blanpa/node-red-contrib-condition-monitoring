@@ -3,9 +3,9 @@
   "version": "0.3.0",
   "description": "Node-RED Nodes for anomaly detection, predictive maintenance, and time series analysis",
   "scripts": {
-    "test": "jest --testTimeout=10000 --forceExit",
+    "test": "jest --testTimeout=10000",
     "test:debug-handles": "jest --testTimeout=10000 --detectOpenHandles",
-    "test:coverage": "jest --testTimeout=10000 --forceExit --coverage",
+    "test:coverage": "jest --testTimeout=10000 --coverage",
     "test:generate-fixtures": "node test/fixtures/generate-models.js",
     "test:smoke-onnx": "node test/smoke-onnx.js",
     "lint": "eslint nodes/ test/",
