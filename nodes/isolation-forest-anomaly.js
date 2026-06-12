@@ -7,6 +7,8 @@ module.exports = function (RED) {
     // Import state persistence helper
     const persistenceHelper = require("./utils/persistence-helper");
 
+    const { clampInt, clampFloat } = require("./utils/config-validator");
+
     function IsolationForestAnomalyNode(config) {
         RED.nodes.createNode(this, config);
         const node = this;
@@ -19,17 +21,17 @@ module.exports = function (RED) {
             node.warn("ml-isolation-forest not available. Please install: npm install ml-isolation-forest");
         }
 
-        this.contamination = parseFloat(config.contamination) || 0.1;
-        this.windowSize = parseInt(config.windowSize) || 100;
-        this.numEstimators = parseInt(config.numEstimators) || 100;
-        this.maxSamples = parseInt(config.maxSamples) || 256;
+        this.contamination = clampFloat(config.contamination, 0.001, 0.5, 0.1);
+        this.windowSize = clampInt(config.windowSize, 2, 1000000, 100);
+        this.numEstimators = clampInt(config.numEstimators, 1, 10000, 100);
+        this.maxSamples = clampInt(config.maxSamples, 1, 1000000, 256);
         this.outputTopic = config.outputTopic || "";
         this.debug = config.debug === true;
 
         // Online/Incremental Learning settings
         this.learningMode = config.learningMode || "batch"; // batch, incremental, adaptive
-        this.retrainInterval = parseInt(config.retrainInterval) || 50; // Retrain every N samples
-        this.adaptRate = parseFloat(config.adaptRate) || 0.1; // Adaptation rate for adaptive mode
+        this.retrainInterval = clampInt(config.retrainInterval, 1, 1000000, 50); // Retrain every N samples
+        this.adaptRate = clampFloat(config.adaptRate, 0.001, 1, 0.1); // Adaptation rate for adaptive mode
         this.persistState = config.persistState === true;
 
         this.dataBuffer = [];

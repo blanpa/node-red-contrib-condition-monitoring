@@ -16,6 +16,7 @@ module.exports = function (RED) {
 
     // Path validator for sandboxed model loading
     const { assertPath } = require("./utils/path-validator");
+    const { clampInt } = require("./utils/config-validator");
 
     // Model storage directory
     const MODELS_DIR = path.join(RED.settings.userDir || os.homedir(), "ml-models");
@@ -775,7 +776,7 @@ module.exports = function (RED) {
         this.outputProperty = config.outputProperty || "prediction";
         this.inputProperty = config.inputProperty || "payload";
         this.preprocessMode = config.preprocessMode || "array"; // array, object, flatten
-        this.batchSize = parseInt(config.batchSize) || 1;
+        this.batchSize = clampInt(config.batchSize, 1, 100000, 1);
         this.warmup = config.warmup !== false;
 
         // URL Authentication (for Phase 1)
@@ -809,7 +810,7 @@ module.exports = function (RED) {
 
         // Auto-Update & Lifecycle (Phase 5)
         this.autoUpdate = config.autoUpdate || false;
-        this.updateCheckInterval = parseInt(config.updateCheckInterval) || 3600; // seconds
+        this.updateCheckInterval = clampInt(config.updateCheckInterval, 1, 31536000, 3600); // seconds
         this.modelStage = config.modelStage || "production"; // development, staging, production, deprecated, archived
 
         // MLflow Tracking (Phase 6) - Performance Logging
@@ -821,7 +822,7 @@ module.exports = function (RED) {
         this.mlflowLogPredictions = config.mlflowLogPredictions || false; // Default: false (can be verbose)
         this.mlflowLogInputStats = config.mlflowLogInputStats || false; // Log input min/max/mean
         this.mlflowLogAnomalies = config.mlflowLogAnomalies || false; // Log anomaly detections
-        this.mlflowBatchSize = parseInt(config.mlflowBatchSize) || 100; // Metrics batch size
+        this.mlflowBatchSize = clampInt(config.mlflowBatchSize, 1, 100000, 100); // Metrics batch size
 
         // MLflow Tracker instance
         this.mlflowTracker = null;

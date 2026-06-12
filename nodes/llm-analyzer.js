@@ -12,6 +12,7 @@
 const stats = require("./utils/statistics");
 const providers = require("./utils/llm-providers");
 const persistenceHelper = require("./utils/persistence-helper");
+const { clampInt, stringOr } = require("./utils/config-validator");
 
 const DEFAULT_SYSTEM_PROMPT =
     "You are an industrial sensor analyst. Analyse the time-series batch you " +
@@ -586,19 +587,6 @@ function toFinite(v) {
         return Number.isFinite(n) ? n : null;
     }
     return null;
-}
-
-function clampInt(raw, min, max, fallback) {
-    const n = parseInt(raw, 10);
-    if (!Number.isFinite(n)) return fallback;
-    if (n < min) return min;
-    if (n > max) return max;
-    return n;
-}
-
-function stringOr(raw, fallback) {
-    if (typeof raw === "string" && raw.trim().length > 0) return raw;
-    return fallback;
 }
 
 function computeStatsBlock(values) {

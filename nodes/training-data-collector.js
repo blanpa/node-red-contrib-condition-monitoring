@@ -7,6 +7,7 @@ module.exports = function (RED) {
     const { promisify } = require("util");
 
     const gzip = promisify(zlib.gzip);
+    const { clampInt, clampFloat } = require("./utils/config-validator");
 
     // Optional S3 support
     let S3Client = null;
@@ -59,20 +60,20 @@ module.exports = function (RED) {
         this.labelMode = config.labelMode || "manual"; // manual, fromMessage, rul, unlabeled
         this.labelField = config.labelField || "label";
         this.severityField = config.severityField || "severity";
-        this.rulStartValue = parseFloat(config.rulStartValue) || 100;
+        this.rulStartValue = clampFloat(config.rulStartValue, 0, 1e12, 100);
         this.rulUnit = config.rulUnit || "samples"; // samples, seconds, hours, days
         this.defaultLabel = config.defaultLabel || "normal";
 
         // Buffer settings
-        this.bufferSize = parseInt(config.bufferSize) || 1000;
-        this.windowSize = parseInt(config.windowSize) || 100; // For timeseries mode
-        this.windowOverlap = parseInt(config.windowOverlap) || 50; // Percent
+        this.bufferSize = clampInt(config.bufferSize, 1, 10000000, 1000);
+        this.windowSize = clampInt(config.windowSize, 2, 1000000, 100); // For timeseries mode
+        this.windowOverlap = clampInt(config.windowOverlap, 0, 99, 50); // Percent
         this.flushOnDeploy = config.flushOnDeploy !== false;
 
         // Export settings
         this.exportFormat = config.exportFormat || "csv"; // csv, jsonl, json, npy
         this.compressionEnabled = config.compressionEnabled !== false;
-        this.compressionThreshold = parseInt(config.compressionThreshold) || 10000; // Samples before compression
+        this.compressionThreshold = clampInt(config.compressionThreshold, 1, 100000000, 10000); // Samples before compression
         this.splitRatio = config.splitRatio || { train: 0.8, val: 0.1, test: 0.1 };
         this.shuffleOnExport = config.shuffleOnExport !== false;
         this.includeMetadata = config.includeMetadata !== false;
@@ -97,7 +98,7 @@ module.exports = function (RED) {
         // Data quality settings
         this.validateData = config.validateData !== false;
         this.removeOutliers = config.removeOutliers === true;
-        this.outlierThreshold = parseFloat(config.outlierThreshold) || 5.0; // Z-score threshold
+        this.outlierThreshold = clampFloat(config.outlierThreshold, 0.1, 1000, 5.0); // Z-score threshold
 
         // ========================================
         // State

@@ -3,6 +3,7 @@ module.exports = function (RED) {
 
     // Import state persistence helper
     const persistenceHelper = require("./utils/persistence-helper");
+    const { clampInt, clampFloat } = require("./utils/config-validator");
 
     function TrendPredictorNode(config) {
         RED.nodes.createNode(this, config);
@@ -11,14 +12,14 @@ module.exports = function (RED) {
         // Configuration
         this.mode = config.mode || "prediction"; // prediction, rate-of-change, rul
         this.method = config.method || "linear"; // linear, exponential
-        this.predictionSteps = parseInt(config.predictionSteps) || 10;
-        this.windowSize = parseInt(config.windowSize) || 50;
+        this.predictionSteps = clampInt(config.predictionSteps, 1, 100000, 10);
+        this.windowSize = clampInt(config.windowSize, 2, 1000000, 50);
         this.threshold =
             config.threshold !== "" && config.threshold !== undefined ? parseFloat(config.threshold) : null;
 
         // Rate of change settings
         this.rocMethod = config.rocMethod || "absolute"; // absolute, percentage
-        this.timeWindow = parseInt(config.timeWindow) || 1;
+        this.timeWindow = clampInt(config.timeWindow, 1, 1000000, 1);
         this.rocThreshold =
             config.rocThreshold !== "" && config.rocThreshold !== undefined ? parseFloat(config.rocThreshold) : null;
 
@@ -33,11 +34,11 @@ module.exports = function (RED) {
                 : null;
         this.rulUnit = config.rulUnit || "hours"; // hours, minutes, days, cycles
         this.degradationModel = config.degradationModel || "linear"; // linear, exponential, weibull
-        this.confidenceLevel = parseFloat(config.confidenceLevel) || 0.95;
+        this.confidenceLevel = clampFloat(config.confidenceLevel, 0.5, 0.9999, 0.95);
 
         // Weibull settings
-        this.weibullBeta = parseFloat(config.weibullBeta) || 2.0; // Shape parameter (β)
-        this.weibullEta = parseFloat(config.weibullEta) || 1000; // Scale parameter (η) in hours
+        this.weibullBeta = clampFloat(config.weibullBeta, 0.01, 100, 2.0); // Shape parameter (β)
+        this.weibullEta = clampFloat(config.weibullEta, 0.001, 1e9, 1000); // Scale parameter (η) in hours
 
         // Advanced settings
         this.outputTopic = config.outputTopic || "";

@@ -4,6 +4,8 @@ module.exports = function (RED) {
     // Import state persistence helper
     const persistenceHelper = require("./utils/persistence-helper");
 
+    const { clampInt, clampFloat } = require("./utils/config-validator");
+
     // Import ml-pca and ml-matrix for robust PCA implementation
     let PCA = null;
     let Matrix = null;
@@ -26,14 +28,14 @@ module.exports = function (RED) {
         }
 
         // Configuration
-        this.nComponents = parseInt(config.nComponents) || 2;
-        this.windowSize = parseInt(config.windowSize) || 100;
-        this.threshold = parseFloat(config.threshold) || 3.0;
+        this.nComponents = clampInt(config.nComponents, 1, 1000, 2);
+        this.windowSize = clampInt(config.windowSize, 2, 1000000, 100);
+        this.threshold = clampFloat(config.threshold, 0.1, 1000, 3.0);
         this.method = config.method || "t2"; // t2 (Hotelling's T²), spe (Squared Prediction Error), combined
         this.autoComponents = config.autoComponents !== false; // Auto-select components by explained variance
-        this.varianceThreshold = parseFloat(config.varianceThreshold) || 0.95; // 95% variance explained
-        this.contributionThreshold = parseFloat(config.contributionThreshold) || 0.1; // Min contribution to show
-        this.showTopContributors = parseInt(config.showTopContributors) || 3; // Max contributors to show
+        this.varianceThreshold = clampFloat(config.varianceThreshold, 0.01, 1, 0.95); // 95% variance explained
+        this.contributionThreshold = clampFloat(config.contributionThreshold, 0, 1, 0.1); // Min contribution to show
+        this.showTopContributors = clampInt(config.showTopContributors, 1, 100, 3); // Max contributors to show
         this.outputTopic = config.outputTopic || "";
         this.debug = config.debug === true;
         this.persistState = config.persistState === true;

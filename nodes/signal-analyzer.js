@@ -7,6 +7,9 @@ module.exports = function (RED) {
     // Import state persistence helper
     const persistenceHelper = require("./utils/persistence-helper");
 
+    // Config validation: parse + range-clamp (0 stays 0 where it is valid)
+    const { clampInt, clampFloat } = require("./utils/config-validator");
+
     // Load high-performance FFT library (Radix-4 Cooley-Tukey algorithm)
     let FFT = null;
     try {
@@ -24,20 +27,20 @@ module.exports = function (RED) {
 
         // Configuration
         this.mode = config.mode || "fft"; // fft, vibration, peaks, envelope, cepstrum
-        this.windowSize = parseInt(config.windowSize) || 256;
+        this.windowSize = clampInt(config.windowSize, 2, 1048576, 256);
 
         // FFT settings
-        this.fftSize = parseInt(config.fftSize) || 256;
-        this.samplingRate = parseFloat(config.samplingRate) || 1000;
-        this.peakThreshold = parseFloat(config.peakThreshold) || 0.1;
+        this.fftSize = clampInt(config.fftSize, 2, 1048576, 256);
+        this.samplingRate = clampFloat(config.samplingRate, 0.001, 1e9, 1000);
+        this.peakThreshold = clampFloat(config.peakThreshold, 0, 1e12, 0.1);
         this.outputFormat = config.outputFormat || "peaks";
         this.windowFunction = config.windowFunction || "hann";
-        this.overlapPercent = parseInt(config.overlapPercent) || 50;
+        this.overlapPercent = clampInt(config.overlapPercent, 0, 99, 50);
 
         // Peak detection settings
         this.minPeakHeight =
             config.minPeakHeight !== "" && config.minPeakHeight !== undefined ? parseFloat(config.minPeakHeight) : null;
-        this.minPeakDistance = parseInt(config.minPeakDistance) || 5;
+        this.minPeakDistance = clampInt(config.minPeakDistance, 0, 1000000, 5);
         this.peakType = config.peakType || "both";
 
         // Vibration settings
@@ -46,18 +49,18 @@ module.exports = function (RED) {
         this.iso10816Class = config.iso10816Class || "class2"; // ISO 10816 machine class
 
         // Envelope analysis settings (bearing fault detection)
-        this.envelopeBandLow = parseFloat(config.envelopeBandLow) || 500; // Hz
-        this.envelopeBandHigh = parseFloat(config.envelopeBandHigh) || 5000; // Hz
-        this.bearingBPFO = parseFloat(config.bearingBPFO) || 0; // Ball Pass Freq Outer
-        this.bearingBPFI = parseFloat(config.bearingBPFI) || 0; // Ball Pass Freq Inner
-        this.bearingBSF = parseFloat(config.bearingBSF) || 0; // Ball Spin Freq
-        this.bearingFTF = parseFloat(config.bearingFTF) || 0; // Fundamental Train Freq
-        this.shaftSpeed = parseFloat(config.shaftSpeed) || 0; // RPM
+        this.envelopeBandLow = clampFloat(config.envelopeBandLow, 0, 1e9, 500); // Hz
+        this.envelopeBandHigh = clampFloat(config.envelopeBandHigh, 0, 1e9, 5000); // Hz
+        this.bearingBPFO = clampFloat(config.bearingBPFO, 0, 1e9, 0); // Ball Pass Freq Outer
+        this.bearingBPFI = clampFloat(config.bearingBPFI, 0, 1e9, 0); // Ball Pass Freq Inner
+        this.bearingBSF = clampFloat(config.bearingBSF, 0, 1e9, 0); // Ball Spin Freq
+        this.bearingFTF = clampFloat(config.bearingFTF, 0, 1e9, 0); // Fundamental Train Freq
+        this.shaftSpeed = clampFloat(config.shaftSpeed, 0, 1e9, 0); // RPM
 
         // Cepstrum analysis settings
-        this.quefrencyRangeLow = parseFloat(config.quefrencyRangeLow) || 0.001; // seconds
-        this.quefrencyRangeHigh = parseFloat(config.quefrencyRangeHigh) || 0.1; // seconds
-        this.cepstrumThreshold = parseFloat(config.cepstrumThreshold) || 0.1;
+        this.quefrencyRangeLow = clampFloat(config.quefrencyRangeLow, 0, 1e9, 0.001); // seconds
+        this.quefrencyRangeHigh = clampFloat(config.quefrencyRangeHigh, 0, 1e9, 0.1); // seconds
+        this.cepstrumThreshold = clampFloat(config.cepstrumThreshold, 0, 1e12, 0.1);
         // Parse gear tooth count from comma-separated string
         this.gearTeeth = [];
         if (config.gearToothCount && config.gearToothCount.trim() !== "") {

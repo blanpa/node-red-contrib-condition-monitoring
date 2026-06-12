@@ -7,6 +7,8 @@ module.exports = function (RED) {
     // Import error handling utilities (for sanitizeObject)
     const errorHandler = require("./utils/error-handler");
 
+    const { clampFloat } = require("./utils/config-validator");
+
     function HealthIndexNode(config) {
         RED.nodes.createNode(this, config);
         const node = this;
@@ -91,10 +93,10 @@ module.exports = function (RED) {
         };
 
         // Threshold configuration
-        const healthyThreshold = parseFloat(config.healthyThreshold) || 80;
-        const warningThreshold = parseFloat(config.warningThreshold) || 60;
-        const degradedThreshold = parseFloat(config.degradedThreshold) || 40;
-        const criticalThreshold = parseFloat(config.criticalThreshold) || 20;
+        const healthyThreshold = clampFloat(config.healthyThreshold, 0, 100, 80);
+        const warningThreshold = clampFloat(config.warningThreshold, 0, 100, 60);
+        const degradedThreshold = clampFloat(config.degradedThreshold, 0, 100, 40);
+        const criticalThreshold = clampFloat(config.criticalThreshold, 0, 100, 20);
 
         // Debug logging helper
         const debugLog = function (message) {

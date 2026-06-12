@@ -3,6 +3,7 @@ module.exports = function (RED) {
 
     // Import shared statistics utilities
     const stats = require("./utils/statistics");
+    const { clampInt, clampFloat } = require("./utils/config-validator");
 
     // Import ml-matrix for robust matrix operations (Mahalanobis distance)
     let Matrix = null;
@@ -28,9 +29,9 @@ module.exports = function (RED) {
 
         // Anomaly detection settings
         this.anomalyMethod = config.anomalyMethod || "zscore"; // zscore, iqr, threshold, mahalanobis
-        this.threshold = parseFloat(config.threshold) || 3.0;
-        this.warningThreshold = parseFloat(config.warningThreshold) || 2.0; // For Mahalanobis warning level
-        this.windowSize = parseInt(config.windowSize) || 100;
+        this.threshold = clampFloat(config.threshold, 0.1, 1000, 3.0);
+        this.warningThreshold = clampFloat(config.warningThreshold, 0.1, 1000, 2.0); // For Mahalanobis warning level
+        this.windowSize = clampInt(config.windowSize, 2, 1000000, 100);
         this.minThreshold =
             config.minThreshold !== "" && config.minThreshold !== undefined ? parseFloat(config.minThreshold) : null;
         this.maxThreshold =
@@ -39,7 +40,7 @@ module.exports = function (RED) {
         // Correlation settings
         this.sensor1 = config.sensor1 || "sensor1";
         this.sensor2 = config.sensor2 || "sensor2";
-        this.correlationThreshold = parseFloat(config.correlationThreshold) || 0.7;
+        this.correlationThreshold = clampFloat(config.correlationThreshold, 0, 1, 0.7);
         this.correlationMethod = config.correlationMethod || "pearson";
 
         // Advanced settings

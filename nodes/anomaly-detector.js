@@ -10,6 +10,9 @@ module.exports = function (RED) {
     // Import error handling utilities
     const errorHandler = require("./utils/error-handler");
 
+    // Config validation: parse + range-clamp (0 stays 0 where it is valid)
+    const { clampInt, clampFloat } = require("./utils/config-validator");
+
     // Import WebSocket manager for real-time dashboards
     let WebSocketManager = null;
     try {
@@ -24,43 +27,43 @@ module.exports = function (RED) {
 
         // Common Configuration
         this.method = config.method || "zscore"; // zscore, iqr, threshold, percentile, ema, cusum, moving-average
-        this.windowSize = parseInt(config.windowSize) || 100;
+        this.windowSize = clampInt(config.windowSize, 2, 1000000, 100);
 
         // Z-Score specific
-        this.zscoreThreshold = parseFloat(config.zscoreThreshold) || 3.0;
-        this.zscoreWarning = parseFloat(config.zscoreWarning) || 2.0;
+        this.zscoreThreshold = clampFloat(config.zscoreThreshold, 0.1, 1000, 3.0);
+        this.zscoreWarning = clampFloat(config.zscoreWarning, 0.1, 1000, 2.0);
 
         // IQR specific
-        this.iqrMultiplier = parseFloat(config.iqrMultiplier) || 1.5;
-        this.iqrWarningMultiplier = parseFloat(config.iqrWarningMultiplier) || 1.2;
+        this.iqrMultiplier = clampFloat(config.iqrMultiplier, 0.1, 100, 1.5);
+        this.iqrWarningMultiplier = clampFloat(config.iqrWarningMultiplier, 0.1, 100, 1.2);
 
         // Threshold specific
         this.minThreshold =
             config.minThreshold !== "" && config.minThreshold !== undefined ? parseFloat(config.minThreshold) : null;
         this.maxThreshold =
             config.maxThreshold !== "" && config.maxThreshold !== undefined ? parseFloat(config.maxThreshold) : null;
-        this.warningMargin = parseFloat(config.warningMargin) || 10;
+        this.warningMargin = clampFloat(config.warningMargin, 0, 100, 10);
 
-        // Percentile specific
-        this.lowerPercentile = parseFloat(config.lowerPercentile) || 5.0;
-        this.upperPercentile = parseFloat(config.upperPercentile) || 95.0;
+        // Percentile specific (0 is a valid percentile)
+        this.lowerPercentile = clampFloat(config.lowerPercentile, 0, 100, 5.0);
+        this.upperPercentile = clampFloat(config.upperPercentile, 0, 100, 95.0);
 
         // EMA specific
-        this.emaAlpha = parseFloat(config.emaAlpha) || 0.3;
-        this.emaThreshold = parseFloat(config.emaThreshold) || 2.0;
-        this.emaWarning = parseFloat(config.emaWarning) || 1.5;
+        this.emaAlpha = clampFloat(config.emaAlpha, 0.001, 1, 0.3);
+        this.emaThreshold = clampFloat(config.emaThreshold, 0.1, 1000, 2.0);
+        this.emaWarning = clampFloat(config.emaWarning, 0.1, 1000, 1.5);
         this.emaMethod = config.emaMethod || "stddev";
 
         // CUSUM specific
         this.cusumTarget =
             config.cusumTarget !== "" && config.cusumTarget !== undefined ? parseFloat(config.cusumTarget) : null;
-        this.cusumThreshold = parseFloat(config.cusumThreshold) || 5.0;
-        this.cusumWarning = parseFloat(config.cusumWarning) || 3.5;
-        this.cusumDrift = parseFloat(config.cusumDrift) || 0.5;
+        this.cusumThreshold = clampFloat(config.cusumThreshold, 0.1, 10000, 5.0);
+        this.cusumWarning = clampFloat(config.cusumWarning, 0.1, 10000, 3.5);
+        this.cusumDrift = clampFloat(config.cusumDrift, 0, 1000, 0.5);
 
         // Moving Average specific
-        this.maThreshold = parseFloat(config.maThreshold) || 2.0;
-        this.maWarning = parseFloat(config.maWarning) || 1.5;
+        this.maThreshold = clampFloat(config.maThreshold, 0.1, 1000, 2.0);
+        this.maWarning = clampFloat(config.maWarning, 0.1, 1000, 1.5);
         this.maMethod = config.maMethod || "stddev";
 
         // Advanced settings
@@ -70,21 +73,21 @@ module.exports = function (RED) {
 
         // Hysteresis settings - prevents alarm flickering
         this.hysteresisEnabled = config.hysteresisEnabled !== false; // Default: enabled
-        this.hysteresisPercent = parseFloat(config.hysteresisPercent) || 10; // 10% deadband
-        this.consecutiveCount = parseInt(config.consecutiveCount) || 1; // Consecutive samples to confirm
+        this.hysteresisPercent = clampFloat(config.hysteresisPercent, 0, 100, 10); // deadband; 0 = none
+        this.consecutiveCount = clampInt(config.consecutiveCount, 1, 1000, 1); // Consecutive samples to confirm
 
         // Adaptive Thresholds - learns from operator feedback
         this.adaptiveEnabled = config.adaptiveEnabled === true;
-        this.adaptiveLearningRate = parseFloat(config.adaptiveLearningRate) || 0.1; // How fast to adjust
-        this.adaptiveMinSamples = parseInt(config.adaptiveMinSamples) || 10; // Min feedback before adjusting
-        this.targetFalsePositiveRate = parseFloat(config.targetFalsePositiveRate) || 0.05; // 5% target
+        this.adaptiveLearningRate = clampFloat(config.adaptiveLearningRate, 0.001, 1, 0.1); // How fast to adjust
+        this.adaptiveMinSamples = clampInt(config.adaptiveMinSamples, 1, 100000, 10); // Min feedback before adjusting
+        this.targetFalsePositiveRate = clampFloat(config.targetFalsePositiveRate, 0, 1, 0.05); // 5% target
 
         // Batch Processing Mode - for historical data analysis
         this.batchMode = config.batchMode === true;
 
         // WebSocket for real-time dashboards
         this.websocketEnabled = config.websocketEnabled === true;
-        this.websocketPort = parseInt(config.websocketPort) || 1881;
+        this.websocketPort = clampInt(config.websocketPort, 1, 65535, 1881);
         this.websocketTopic = config.websocketTopic || "anomaly-detector";
         // Optional auth: shared token + allowed origins. Recommended for any
         // deployment where the WS port is reachable from outside `localhost`.
