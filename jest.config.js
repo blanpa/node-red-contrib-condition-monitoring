@@ -10,6 +10,18 @@ module.exports = {
         "/training/notebooks/.*/.pixi/",
         "/__pycache__/"
     ],
+    // Coverage gate: keeps regressions out of merges/publishes. Thresholds
+    // sit a few points under the measured baseline (≈62/53/63/63 as of
+    // v0.3.0) — ratchet them up as coverage grows, never down.
+    collectCoverageFrom: ["nodes/**/*.js", "!nodes/python/**"],
+    coverageThreshold: {
+        global: {
+            statements: 55,
+            branches: 45,
+            functions: 55,
+            lines: 55
+        }
+    },
     modulePathIgnorePatterns: ["/\\.venv/", "/notebooks_venv/", "/training/notebooks/.*/.pixi/"],
     // Two test pools:
     //   - "integration": real Node-RED instances. They listen on sockets and
