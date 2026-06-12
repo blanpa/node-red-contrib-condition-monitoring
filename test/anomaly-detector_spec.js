@@ -518,12 +518,15 @@ describe("anomaly-detector Node", function () {
                     done();
                 });
 
-                // Build up baseline with normal values
+                // Build up baseline with normal values. Deterministic: with a
+                // random baseline the final pressure reading occasionally sat
+                // >2σ from the sample mean, got flagged too, and the failed
+                // assertion inside the listener surfaced as a 10s timeout.
                 for (let i = 0; i < 15; i++) {
                     n1.receive({
                         payload: {
-                            temperature: 65 + Math.random() * 0.5,
-                            pressure: 4.5 + Math.random() * 0.1
+                            temperature: i % 2 === 0 ? 64.5 : 65.5,
+                            pressure: i % 2 === 0 ? 4.4 : 4.6
                         }
                     });
                 }
