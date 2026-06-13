@@ -74,9 +74,10 @@ jobs:
 
   audit:
     runs-on: ubuntu-latest
-    # We audit production deps only — `optionalDependencies` carry their own
-    # security stories upstream and would otherwise drown the signal.
-    continue-on-error: true
+    # Hard gate on the REQUIRED runtime deps. optionalDependencies (tfjs-node,
+    # onnxruntime, aws-sdk, ws) carry their own upstream security stories — the
+    # remaining tar/node-pre-gyp highs live exclusively in tfjs-node's native
+    # install tooling and never reach a user who skips the optional runtime.
     steps:
       - uses: actions/checkout@v4
 
@@ -88,8 +89,8 @@ jobs:
       - name: Install (without optional ML runtimes)
         run: npm install --ignore-optional --no-audit --no-fund
 
-      - name: npm audit (production only, fail on high)
-        run: npm audit --omit=dev --audit-level=high
+      - name: npm audit (required deps, fail on high)
+        run: npm audit --omit=dev --omit=optional --audit-level=high
 
   # Smoke test with optional ML runtimes installed. Allowed to fail (some
   # native deps are platform-specific) but its output is visible in the run.

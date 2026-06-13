@@ -50,12 +50,17 @@ describe("integration: anomaly-detector Z-Score flow", () => {
     }, 15000);
 
     it("routes obvious outliers to the anomaly output and stable values to normal", async () => {
-        // Seed with stable values centred on 100 ± small noise. Window is 30,
-        // so the first ~20 messages may be in warmup ("not yet enough data");
-        // the detector decides per-message based on whatever buffer it has.
+        // Seed with stable values centred on 100. Window is 30, so the first
+        // ~20 messages may be in warmup ("not yet enough data"); the detector
+        // decides per-message based on whatever buffer it has.
+        //
+        // Deterministic ±0.5 oscillation (not Math.random): with a random
+        // baseline, an early sample could land >3σ from a mean whose running
+        // stddev was still tiny, get diverted to the anomaly output, and leave
+        // the normal output one message short — surfacing as a collect timeout.
         const baseline = [];
         for (let i = 0; i < 30; i++) {
-            const v = 100 + (Math.random() - 0.5) * 2;
+            const v = i % 2 === 0 ? 99.5 : 100.5;
             baseline.push(v);
             await harness.inject(DETECTOR, { payload: v });
         }
