@@ -2,6 +2,12 @@
   "name": "node-red-contrib-condition-monitoring",
   "version": "0.3.0",
   "description": "Node-RED Nodes for anomaly detection, predictive maintenance, and time series analysis",
+  "files": [
+    "nodes/",
+    "examples/",
+    "CHANGELOG.md",
+    "SECURITY.md"
+  ],
   "scripts": {
     "test": "jest --testTimeout=10000",
     "test:debug-handles": "jest --testTimeout=10000 --detectOpenHandles",
