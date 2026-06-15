@@ -5,7 +5,7 @@
   "path": "./test/fixtures/model.onnx",
   "source": "local",
   "format": "onnx",
-  "lastLoaded": "2026-06-15T15:45:31.035Z",
+  "lastLoaded": "2026-06-15T19:58:07.681Z",
   "stage": "production",
   "inputShape": "1,10",
   "metadata": {}

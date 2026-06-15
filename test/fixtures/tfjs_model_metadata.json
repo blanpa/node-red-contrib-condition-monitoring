@@ -5,7 +5,7 @@
   "path": "/home/la/private/node-red-contrib-condition-monitoring/test/fixtures/tfjs_model",
   "source": "local",
   "format": "tfjs",
-  "lastLoaded": "2026-06-15T15:45:24.345Z",
+  "lastLoaded": "2026-06-15T19:58:09.352Z",
   "stage": "production",
   "inputShape": "1,10",
   "metadata": {}

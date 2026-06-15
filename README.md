@@ -15,6 +15,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 - [Project Status: v0.3.1 Beta](#project-status-v031-beta)
 - [Important Disclaimer](#important-disclaimer)
+- [Background & Industry Context](#background--industry-context)
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -61,6 +62,38 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 - **Follow** proper safety protocols and regulations for your industry
 
 **Use at your own risk. See LICENSE file for full legal terms.**
+
+## Background & Industry Context
+
+Predictive maintenance works because *machines don't fail randomly — they fail
+predictably, given the right signals*. The industry converges on a small set of
+condition-monitoring techniques and a common pipeline shape, both of which this
+module implements as composable Node-RED nodes.
+
+**Common monitoring techniques → nodes in this module:**
+
+| Industry technique | Detects | Node(s) here |
+| --- | --- | --- |
+| Vibration analysis (the dominant technique by market share) | bearing wear, misalignment, imbalance, looseness | `signal-analyzer` (FFT, RMS, kurtosis, crest factor, envelope), ISO 10816-3 zones |
+| Thermal / process trending | overheating, degradation drift | `trend-predictor`, `anomaly-detector` |
+| Anomaly detection on a learned "normal signature" | deviations preceding failure | `anomaly-detector`, `isolation-forest-anomaly`, `pca-anomaly` |
+| Multi-signal fusion + asset context | a "digital profile" per asset | `multi-value-processor`, `condition-monitoring-source`, `health-index` |
+| Root-cause + recommended action in the alert | actionable alerts, not just flags | `llm-analyzer` |
+| Remaining Useful Life estimation | time-to-failure with confidence bounds | `trend-predictor` (RUL mode) |
+
+The typical pipeline — *sensors → fusion → anomaly/trend → health score →
+actionable alert* — maps directly onto the [architecture](#architecture-at-a-glance)
+below, and runs **on the edge** (inside Node-RED) rather than requiring a cloud round-trip.
+
+> **On the published benchmarks.** Vendor case studies report figures such as
+> ~70% of failures predicted ≥24h ahead, 25–35% less unplanned downtime, and
+> 80–97% prediction accuracy.[^pdm1][^pdm2] These are *third-party industry
+> results under their own conditions* — not benchmarks of this module. Treat
+> them as motivation for the approach, and validate any deployment against your
+> own data and domain experts (see the disclaimer above).
+
+[^pdm1]: ThinkAI, *Cutting Machine Downtime with Predictive Maintenance and AI* — https://thinkaicorp.com/case-study-cutting-machine-downtime-with-predictive-maintenance-and-ai/
+[^pdm2]: iFactory, *Predictive Maintenance 2026: AI vs. Factory Downtime* — https://ifactoryapp.com/blog/predictive-maintenance-2026-ai-factory-downtime
 
 ## Features
 
@@ -971,6 +1004,8 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - [x] ISO 10816-3 vibration severity assessment
 - [x] Hysteresis (anti-flicker) for anomaly detection
 - [x] Pre-trained models for common use cases (model catalog + ML Inference picker)
+- [ ] Concept/data-drift monitoring + retraining feedback loop (current CUSUM `drift` is process drift, not model/distribution drift)
+- [ ] Consistent severity/score in alert output across all anomaly nodes (`isolation-forest`/`pca` lack the `severity` field that `anomaly-detector` already emits)
 
 ---
 
