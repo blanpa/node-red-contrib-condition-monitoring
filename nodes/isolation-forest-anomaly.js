@@ -169,14 +169,20 @@ module.exports = function (RED) {
             return samplesSinceRetrain >= node.retrainInterval;
         }
 
-        node.on("input", function (msg) {
+        node.on("input", function (msg, send, done) {
+            // Node-RED >=1.0 passes send/done; shim for older runtimes.
+            done =
+                done ||
+                function (err) {
+                    if (err) node.error(err, msg);
+                };
             try {
                 // Extract value from message
                 const value = parseFloat(msg.payload);
 
                 // Validate value is a finite number (catches NaN, Infinity, -Infinity)
                 if (!Number.isFinite(value)) {
-                    node.error("Payload is not a valid finite number", msg);
+                    done("Payload is not a valid finite number");
                     return;
                 }
 
@@ -209,6 +215,7 @@ module.exports = function (RED) {
                     // Fallback: Z-Score based detection using shared utilities
                     if (node.dataBuffer.length < 2) {
                         node.send(msg);
+                        done();
                         return;
                     }
 
@@ -230,6 +237,7 @@ module.exports = function (RED) {
                     } else {
                         node.send([outputMsg, null]);
                     }
+                    done();
                     return;
                 }
 
@@ -314,8 +322,9 @@ module.exports = function (RED) {
                 } else {
                     node.send([outputMsg, null]);
                 }
+                done();
             } catch (err) {
-                node.error("Error in Isolation Forest calculation: " + err.message, msg);
+                done("Error in Isolation Forest calculation: " + err.message);
             }
         });
 

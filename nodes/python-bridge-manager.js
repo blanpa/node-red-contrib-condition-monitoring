@@ -79,8 +79,25 @@ class PythonBridgeManager extends EventEmitter {
                 if (!this.isReady) {
                     readyTimeout = setTimeout(() => {
                         this.removeListener("response", checkReady);
+                        // The bridge never signalled ready, so a graceful shutdown
+                        // (which writes a "shutdown" command to stdin and waits) is
+                        // pointless and could leave the process running. Kill the
+                        // spawned process directly instead.
+                        const proc = this.process;
+                        if (proc) {
+                            try {
+                                proc.kill("SIGKILL");
+                            } catch (e) {
+                                // Process may already be gone
+                            }
+                        }
+                        if (this.readline) {
+                            this.readline.close();
+                            this.readline = null;
+                        }
+                        this.process = null;
+                        this.isReady = false;
                         reject(new Error("Python bridge startup timeout"));
-                        this.stop();
                     }, this.startupTimeout);
                 }
             });

@@ -516,8 +516,12 @@ module.exports = function (RED) {
             } else if (method === "geometric") {
                 // Geometric mean (emphasizes low scores)
                 const scores = Object.values(sensorScores);
-                const product = scores.reduce((a, b) => a * b, 1);
-                healthIndex = Math.pow(product, 1 / scores.length);
+                if (scores.length > 0) {
+                    const product = scores.reduce((a, b) => a * b, 1);
+                    healthIndex = Math.pow(product, 1 / scores.length);
+                } else {
+                    healthIndex = 100;
+                }
             }
 
             // Find worst sensor

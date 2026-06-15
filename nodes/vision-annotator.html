@@ -1,0 +1,261 @@
+<script type="text/javascript">
+    RED.nodes.registerType('vision-annotator', {
+        category: 'Condition Monitoring Vision',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            mode: { value: "boxes" },
+            inputProperty: { value: "prediction" },
+            shapeProperty: { value: "mlInference.outputShape" },
+            imageProperty: { value: "image" },
+            canvasWidth: { value: 128, validate: RED.validators.number() },
+            canvasHeight: { value: 128, validate: RED.validators.number() },
+            alpha: { value: 0.5, validate: RED.validators.number() },
+            boxFormat: { value: "xyxy" },
+            scoreThreshold: { value: 0.3, validate: RED.validators.number() },
+            iouThreshold: { value: 0.45, validate: RED.validators.number() },
+            boxThickness: { value: 2, validate: RED.validators.number() },
+            normalizedCoords: { value: false },
+            colormap: { value: "jet" },
+            threshold: { value: 0.5, validate: RED.validators.number() },
+            pointRadius: { value: 3, validate: RED.validators.number() },
+            kpThreshold: { value: 0.5, validate: RED.validators.number() },
+            skeleton: { value: "" },
+            polygonClosed: { value: true },
+            palette: { value: "" },
+            classLabels: { value: "" },
+            editorPreview: { value: true },
+            previewWidth: { value: 200, validate: RED.validators.number() },
+            zoomWidth: { value: 500, validate: RED.validators.number() }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "icon.png",
+        label: function () { return this.name || ("vision: " + (this.mode || "boxes")); },
+        labelStyle: function () { return this.name ? "node_label_italic" : ""; },
+        paletteLabel: "Vision Annotator",
+        oneditprepare: function () {
+            const $mode = $("#node-input-mode");
+            function refresh() {
+                const m = $mode.val();
+                $(".va-box").toggle(m === "boxes" || m === "obb");
+                $(".va-yolo").toggle(m === "boxes");
+                $(".va-overlay").toggle(["segmentation", "instances", "heatmap", "anomaly"].indexOf(m) >= 0);
+                $(".va-cmap").toggle(m === "heatmap" || m === "anomaly");
+                $(".va-thr").toggle(m === "anomaly");
+                $(".va-kp").toggle(m === "keypoints");
+                $(".va-poly").toggle(m === "polygons");
+            }
+            $mode.on("change", refresh);
+            refresh();
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="vision-annotator">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-mode"><i class="fa fa-object-group"></i> Mode</label>
+        <select id="node-input-mode">
+            <option value="boxes">Bounding boxes</option>
+            <option value="obb">Oriented boxes (OBB)</option>
+            <option value="segmentation">Semantic segmentation</option>
+            <option value="instances">Instance segmentation</option>
+            <option value="polygons">Polygons / contours</option>
+            <option value="keypoints">Keypoints / pose</option>
+            <option value="heatmap">Heatmap (depth/CAM/density)</option>
+            <option value="anomaly">Anomaly map</option>
+            <option value="classification">Classification banner</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-inputProperty"><i class="fa fa-sign-in"></i> Tensor</label>
+        <input type="text" id="node-input-inputProperty" placeholder="prediction">
+    </div>
+    <div class="form-row">
+        <label for="node-input-shapeProperty"><i class="fa fa-cubes"></i> Shape</label>
+        <input type="text" id="node-input-shapeProperty" placeholder="mlInference.outputShape">
+    </div>
+    <div class="form-row">
+        <label for="node-input-imageProperty"><i class="fa fa-image"></i> Source img</label>
+        <input type="text" id="node-input-imageProperty" placeholder="image (optional PNG buffer)">
+    </div>
+
+    <div class="form-row va-box">
+        <label for="node-input-boxThickness"><i class="fa fa-pencil"></i> Line px</label>
+        <input type="number" id="node-input-boxThickness" min="1" max="20" step="1" style="width:80px">
+        <label for="node-input-scoreThreshold" style="margin-left:10px">Score</label>
+        <input type="number" id="node-input-scoreThreshold" min="0" max="1" step="0.05" style="width:80px">
+    </div>
+    <div class="form-row va-yolo">
+        <label for="node-input-boxFormat"><i class="fa fa-th"></i> Box format</label>
+        <select id="node-input-boxFormat">
+            <option value="xyxy">xyxy [x1,y1,x2,y2,score,class]</option>
+            <option value="yolo">yolo [cx,cy,w,h,obj,cls...]</option>
+        </select>
+        <label for="node-input-iouThreshold" style="margin-left:10px">IoU</label>
+        <input type="number" id="node-input-iouThreshold" min="0" max="1" step="0.05" style="width:70px">
+    </div>
+
+    <div class="form-row va-overlay">
+        <label for="node-input-alpha"><i class="fa fa-adjust"></i> Overlay α</label>
+        <input type="number" id="node-input-alpha" min="0" max="1" step="0.1" style="width:80px">
+    </div>
+    <div class="form-row va-cmap">
+        <label for="node-input-colormap"><i class="fa fa-paint-brush"></i> Colormap</label>
+        <select id="node-input-colormap">
+            <option value="jet">jet</option>
+            <option value="gray">gray</option>
+        </select>
+    </div>
+    <div class="form-row va-thr">
+        <label for="node-input-threshold"><i class="fa fa-filter"></i> Anomaly thr</label>
+        <input type="number" id="node-input-threshold" step="0.05" style="width:80px">
+    </div>
+
+    <div class="form-row va-kp">
+        <label for="node-input-kpThreshold"><i class="fa fa-dot-circle-o"></i> KP conf</label>
+        <input type="number" id="node-input-kpThreshold" min="0" max="1" step="0.05" style="width:70px">
+        <label for="node-input-pointRadius" style="margin-left:6px">Radius</label>
+        <input type="number" id="node-input-pointRadius" min="1" max="20" style="width:60px">
+    </div>
+    <div class="form-row va-kp">
+        <label for="node-input-skeleton"><i class="fa fa-share-alt"></i> Skeleton</label>
+        <input type="text" id="node-input-skeleton" placeholder="[[0,1],[1,2]] edge index pairs">
+    </div>
+    <div class="form-row va-poly">
+        <label for="node-input-polygonClosed"><i class="fa fa-draw-polygon"></i> Closed</label>
+        <input type="checkbox" id="node-input-polygonClosed" style="width:auto;vertical-align:middle">
+    </div>
+
+    <div class="form-row">
+        <label for="node-input-canvasWidth"><i class="fa fa-arrows-h"></i> Canvas</label>
+        <input type="number" id="node-input-canvasWidth" style="width:75px" placeholder="W">
+        <span>×</span>
+        <input type="number" id="node-input-canvasHeight" style="width:75px" placeholder="H">
+        <label for="node-input-normalizedCoords" style="margin-left:8px;width:auto"> norm</label>
+        <input type="checkbox" id="node-input-normalizedCoords" style="width:auto;vertical-align:middle">
+    </div>
+    <div class="form-row">
+        <label for="node-input-classLabels"><i class="fa fa-list"></i> Labels</label>
+        <input type="text" id="node-input-classLabels" placeholder="comma,separated,names (optional)">
+    </div>
+    <div class="form-row">
+        <label for="node-input-palette"><i class="fa fa-paint-brush"></i> Palette</label>
+        <input type="text" id="node-input-palette" placeholder='JSON [[r,g,b],...] (optional)'>
+    </div>
+    <div class="form-row">
+        <label for="node-input-editorPreview" style="width:auto"><i class="fa fa-eye"></i> Editor preview</label>
+        <input type="checkbox" id="node-input-editorPreview" style="width:auto;vertical-align:middle">
+        <label for="node-input-previewWidth" style="margin-left:12px">width</label>
+        <input type="number" id="node-input-previewWidth" min="40" max="640" style="width:70px">
+        <label for="node-input-zoomWidth" style="margin-left:8px">zoom</label>
+        <input type="number" id="node-input-zoomWidth" min="80" max="1280" style="width:70px">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="vision-annotator">
+    <p>Renders an image-model output as an image. Modes: <b>boxes</b>, <b>obb</b>,
+    <b>segmentation</b>, <b>instances</b>, <b>polygons</b>, <b>keypoints</b>,
+    <b>heatmap</b>, <b>anomaly</b>, <b>classification</b>.</p>
+    <h3>Input</h3>
+    <ul>
+        <li><code>msg.prediction</code> — model output tensor (flat or nested).</li>
+        <li><code>msg.mlInference.outputShape</code> — tensor shape (set by ml-inference).</li>
+        <li><code>msg.image</code> — optional source image (PNG buffer) to draw on.</li>
+    </ul>
+    <h3>Output</h3>
+    <ul>
+        <li><code>msg.payload</code> — annotated PNG <code>Buffer</code>.</li>
+        <li><code>msg.annotations</code> — structured result (boxes / instances / polygons /
+        keypoints / regions / class metrics incl. areas, lengths, counts).</li>
+    </ul>
+    <p>With <b>Editor preview</b> on, the annotated image is drawn live as a
+    thumbnail under this node on the canvas after each message. <b>Double-click</b>
+    the thumbnail to enlarge it (to <i>zoom</i> width) and double-click again to
+    shrink it back.</p>
+</script>
+
+<script type="text/javascript">
+    // Live in-editor thumbnail under the vision-annotator node (self-contained;
+    // mirrors the node-red-contrib-image-output rendering on a private topic).
+    (function () {
+        const W = (node) => (node && parseInt(node.previewWidth, 10)) || 200;
+        const Z = (node) => (node && parseInt(node.zoomWidth, 10)) || 500;
+        const latest = {};
+        const zoomed = {}; // node id -> true when enlarged
+
+        function remove(id) {
+            const $img = document.getElementById("va-img-" + id);
+            const $b = document.getElementById("va-bubble-" + id);
+            if ($img) $img.remove();
+            if ($b) $b.remove();
+            delete latest[id];
+        }
+
+        function render(id, data, node) {
+            if (!data) { remove(id); return; }
+            const width = zoomed[id] ? Z(node) : W(node);
+            const i = new Image();
+            let $img = document.getElementById("va-img-" + id);
+            if (!$img) {
+                const $c = document.getElementById(id);
+                if (!$c) { return; }
+                const bubble = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+                bubble.setAttribute("id", "va-bubble-" + id);
+                bubble.setAttribute("style", "fill:#11141a");
+                bubble.setAttribute("stroke", "#9482f1");
+                $c.insertBefore(bubble, $c.lastChild.nextSibling);
+                const img = document.createElementNS("http://www.w3.org/2000/svg", "image");
+                img.setAttribute("id", "va-img-" + id);
+                img.setAttribute("x", "0");
+                img.setAttribute("y", "45");
+                img.style.cursor = "zoom-in";
+                // double-click toggles enlarge / restore
+                img.addEventListener("dblclick", function (ev) {
+                    ev.preventDefault();
+                    zoomed[id] = !zoomed[id];
+                    img.style.cursor = zoomed[id] ? "zoom-out" : "zoom-in";
+                    render(id, latest[id], RED.nodes.node(id));
+                });
+                $c.insertBefore(img, $c.lastChild.nextSibling);
+                $img = img;
+            }
+            $img.setAttribute("width", width);
+            i.onload = function () {
+                const h = Math.round(width * i.height / i.width);
+                $img.setAttribute("height", h);
+                const $b = document.getElementById("va-bubble-" + id);
+                if ($b) {
+                    const top = 47, bottom = 45 + h, right = width;
+                    $b.setAttribute("points", "4," + (top - 17) + " 4," + top + " " + right + "," + top + " " + right + "," + bottom + " 0," + bottom + " 0," + (top - 21));
+                }
+            };
+            $img.setAttribute("href", "data:image/png;base64," + data);
+            i.src = "data:image/png;base64," + data;
+        }
+
+        RED.events.on("editor:save", function (node) { if (latest[node.id]) render(node.id, latest[node.id], node); });
+        // per-node topic + wildcard so retained thumbnails replay on (re)connect
+        RED.comms.subscribe("vision-annotator-preview/#", function (event, data) {
+            if (data && data.hasOwnProperty("data")) {
+                latest[data.id] = data.data;
+                render(data.id, data.data, RED.nodes.node(data.id));
+            } else if (data) {
+                remove(data.id);
+            }
+        });
+        // watchdog: if a canvas redraw (pan/zoom/deploy) wiped the thumbnail,
+        // redraw it from the cache so it stays visible until dismissed.
+        setInterval(function () {
+            for (const id in latest) {
+                if (!document.getElementById("va-img-" + id) && RED.nodes.node(id)) {
+                    render(id, latest[id], RED.nodes.node(id));
+                }
+            }
+        }, 1500);
+    })();
+</script>

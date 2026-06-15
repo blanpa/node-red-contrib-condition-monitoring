@@ -1,0 +1,101 @@
+<script type="text/javascript">
+    RED.nodes.registerType('image-source', {
+        category: 'Condition Monitoring Demo',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            width: { value: 64, validate: RED.validators.number() },
+            height: { value: 64, validate: RED.validators.number() },
+            defect: { value: "spot" },
+            severity: { value: 0.7, validate: RED.validators.number() },
+            noise: { value: 0.12, validate: RED.validators.number() },
+            degrade: { value: false },
+            degStep: { value: 0.03, validate: RED.validators.number() },
+            intervalMs: { value: 1000, validate: RED.validators.number() },
+            autoStart: { value: false },
+            emitMask: { value: true },
+            seed: { value: "" },
+            outputTopic: { value: "" }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "icon.png",
+        label: function () { return this.name || ("image-source " + (this.defect || "spot")); },
+        labelStyle: function () { return this.name ? "node_label_italic" : ""; },
+        paletteLabel: "CM Image Source",
+        oneditprepare: function () {
+            const $d = $("#node-input-degrade");
+            function r() { $(".is-deg").toggle($d.is(":checked")); }
+            $d.on("change", r); r();
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="image-source">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label><i class="fa fa-arrows-alt"></i> Size</label>
+        <input type="number" id="node-input-width" style="width:75px" placeholder="W">
+        <span>×</span>
+        <input type="number" id="node-input-height" style="width:75px" placeholder="H">
+    </div>
+    <div class="form-row">
+        <label for="node-input-defect"><i class="fa fa-bug"></i> Defect</label>
+        <select id="node-input-defect">
+            <option value="none">None (clean surface)</option>
+            <option value="spot">Spot (bright pit / corrosion)</option>
+            <option value="scratch">Scratch (dark crack/line)</option>
+            <option value="multi">Multiple (spots + scratch)</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-severity"><i class="fa fa-exclamation-triangle"></i> Severity</label>
+        <input type="number" id="node-input-severity" min="0" max="1" step="0.05" style="width:80px">
+        <label for="node-input-noise" style="margin-left:10px">Noise</label>
+        <input type="number" id="node-input-noise" min="0" max="1" step="0.02" style="width:80px">
+    </div>
+    <div class="form-row">
+        <label for="node-input-degrade" style="width:auto"><i class="fa fa-line-chart"></i> Degrade over time</label>
+        <input type="checkbox" id="node-input-degrade" style="width:auto;vertical-align:middle">
+        <span class="is-deg"><label for="node-input-degStep" style="margin-left:10px">step</label>
+        <input type="number" id="node-input-degStep" min="0" max="1" step="0.01" style="width:70px"></span>
+    </div>
+    <div class="form-row">
+        <label for="node-input-autoStart" style="width:auto"><i class="fa fa-play"></i> Auto-start</label>
+        <input type="checkbox" id="node-input-autoStart" style="width:auto;vertical-align:middle">
+        <label for="node-input-intervalMs" style="margin-left:10px">interval (ms)</label>
+        <input type="number" id="node-input-intervalMs" min="50" style="width:90px">
+    </div>
+    <div class="form-row">
+        <label for="node-input-emitMask" style="width:auto"><i class="fa fa-clone"></i> Emit mask (msg.mask)</label>
+        <input type="checkbox" id="node-input-emitMask" style="width:auto;vertical-align:middle">
+    </div>
+    <div class="form-row">
+        <label for="node-input-seed"><i class="fa fa-dice"></i> Seed</label>
+        <input type="number" id="node-input-seed" placeholder="empty = random" style="width:120px">
+        <label for="node-input-outputTopic" style="margin-left:10px">Topic</label>
+        <input type="text" id="node-input-outputTopic" style="width:110px" placeholder="image-source">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="image-source">
+    <p>Synthetic inspection-image data source — the visual counterpart of
+    <b>condition-monitoring-source</b>. Generates a textured surface with optional
+    defects (bright spot, dark scratch) so the vision pipeline
+    (<code>image-preprocess → ml-inference → vision-annotator</code>) can be driven
+    live and the trained defect model exercised.</p>
+    <h3>Output</h3>
+    <ul>
+        <li><code>msg.payload</code> — generated image (PNG Buffer)</li>
+        <li><code>msg.mask</code> — ground-truth defect mask (PNG, white = defect)</li>
+        <li><code>msg.defects</code> — list of placed defects (type, position, size, severity)</li>
+    </ul>
+    <h3>Control</h3>
+    <p>Any input emits one image. <code>msg.payload</code>/<code>msg.command</code>
+    = <code>"start"</code>/<code>"stop"</code>/<code>"reset"</code> control streaming
+    (or set <b>Auto-start</b>). <code>msg.config</code> adjusts severity/defect/noise live.
+    With <b>Degrade over time</b>, the defect grows each sample.</p>
+</script>

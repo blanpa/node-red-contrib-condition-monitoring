@@ -89,25 +89,45 @@ class NodeStateManager {
      */
     async load() {
         return new Promise((resolve) => {
-            try {
-                const context = this.node.context();
-                const stored = context.get(this.stateKey, this.storeName);
-
-                if (stored && typeof stored === "object") {
-                    this.state = this._deserializeState(stored);
-                    this.isLoaded = true;
-                    this.node.debug(`[Persistence] Loaded state: ${Object.keys(this.state).length} keys`);
-                } else {
+            let settled = false;
+            const finish = (stored) => {
+                if (settled) return;
+                settled = true;
+                try {
+                    if (stored && typeof stored === "object") {
+                        this.state = this._deserializeState(stored);
+                        this.node.debug(`[Persistence] Loaded state: ${Object.keys(this.state).length} keys`);
+                    } else {
+                        this.state = {};
+                    }
+                } catch (err) {
+                    this.node.warn(`[Persistence] Failed to deserialize state: ${err.message}`);
                     this.state = {};
-                    this.isLoaded = true;
                 }
-
-                resolve(this.state);
-            } catch (err) {
-                this.node.warn(`[Persistence] Failed to load state: ${err.message}`);
-                this.state = {};
                 this.isLoaded = true;
                 resolve(this.state);
+            };
+
+            try {
+                const context = this.node.context();
+                // Use the async callback form so async context stores (e.g. the
+                // file store — the whole point of persistence) actually load.
+                // Stores that only support sync get return the value directly.
+                const maybeValue = context.get(this.stateKey, this.storeName, (err, value) => {
+                    if (err) {
+                        this.node.warn(`[Persistence] Failed to load state: ${err.message}`);
+                        finish(null);
+                        return;
+                    }
+                    finish(value);
+                });
+                // Synchronous stores ignore the callback and return the value.
+                if (maybeValue !== undefined) {
+                    finish(maybeValue);
+                }
+            } catch (err) {
+                this.node.warn(`[Persistence] Failed to load state: ${err.message}`);
+                finish(null);
             }
         });
     }

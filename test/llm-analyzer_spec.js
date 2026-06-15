@@ -1390,7 +1390,7 @@ describe("llm-analyzer node", () => {
         });
         let calls = 0;
         const samplesSeen = [];
-        const provider = async (args) => {
+        const provider = async (_args) => {
             calls++;
             if (calls === 1) {
                 samplesSeen.push("first call");

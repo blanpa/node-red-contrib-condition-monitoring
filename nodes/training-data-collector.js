@@ -38,7 +38,13 @@ module.exports = function (RED) {
         // ========================================
 
         // Dataset settings
-        this.datasetName = config.datasetName || "dataset";
+        // SECURITY: datasetName is used to build filenames; strip any path
+        // components and traversal sequences so it can never escape the output dir.
+        this.datasetName =
+            path
+                .basename(config.datasetName || "dataset")
+                .replace(/[^a-zA-Z0-9._-]/g, "_")
+                .replace(/^\.+/, "") || "dataset";
         this.outputPath = config.outputPath || ""; // Relative to userDir/training-data
         this.mode = config.mode || "batch"; // streaming, batch, timeseries
         this.autoSave = config.autoSave !== false;
@@ -1096,10 +1102,19 @@ module.exports = function (RED) {
     RED.httpAdmin.get("/training-data-collector/download/:filename", function (req, res) {
         try {
             const dataDir = getDataDir(RED);
-            const filename = req.params.filename;
+            // SECURITY: strip directory components to prevent path traversal
+            // (e.g. ../../etc/passwd) via the :filename route parameter.
+            const filename = path.basename(req.params.filename || "");
             const filePath = path.join(dataDir, filename);
 
-            if (!fs.existsSync(filePath)) {
+            // Defence in depth: ensure the resolved path stays within dataDir.
+            const resolvedPath = path.resolve(filePath);
+            const resolvedBase = path.resolve(dataDir);
+            if (resolvedPath !== resolvedBase && !resolvedPath.startsWith(resolvedBase + path.sep)) {
+                return res.status(400).json({ error: "Invalid filename" });
+            }
+
+            if (!filename || !fs.existsSync(filePath)) {
                 return res.status(404).json({ error: "File not found" });
             }
 

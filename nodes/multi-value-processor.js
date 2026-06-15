@@ -739,6 +739,12 @@ module.exports = function (RED) {
                 correlation = crossCorr.correlation;
             }
 
+            // Guard against an unknown/invalid correlationMethod (correlation stays
+            // null) or a non-finite result, which would crash on .toFixed() below.
+            if (correlation === null || !Number.isFinite(correlation)) {
+                throw new Error("Correlation could not be computed (method: " + node.correlationMethod + ")");
+            }
+
             const isAnomalous = Math.abs(correlation) < node.correlationThreshold;
 
             const outputMsg = {

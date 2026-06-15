@@ -1,11 +1,13 @@
 <script type="text/javascript">
     RED.nodes.registerType('ml-inference', {
-        category: 'condition-monitoring',
+        category: 'Condition Monitoring ML',
         color: '#9482f1',
         defaults: {
             name: { value: "" },
+            catalogId: { value: "" },
             modelSource: { value: "local" },
             modelPath: { value: "" },
+            modelSha256: { value: "" },
             modelType: { value: "auto" },
             urlAuthType: { value: "" },
             urlAuthToken: { value: "" },
@@ -429,7 +431,69 @@
                 }
             });
             $("#node-input-modelSource").trigger("change");
-            
+
+            // The URL textbox has no own `defaults` entry — it mirrors the persisted
+            // `modelPath` field. Populate it on open so a saved URL is shown again;
+            // oneditsave reconciles edits back into modelPath.
+            if (this.modelSource === "url") {
+                $("#node-input-modelPath-url").val(this.modelPath || "");
+            }
+
+            // --- Pretrained model catalog (common use cases) ---
+            (function () {
+                var $sel = $("#node-input-catalogId");
+                var $info = $("#ml-catalog-info");
+                var $btn = $("#ml-insert-pipeline");
+                var saved = node.catalogId || "";
+                var CATALOG = null;
+                function entryById(id) {
+                    return (CATALOG && (CATALOG.models || []).filter(function (m) { return m.id === id; })[0]) || null;
+                }
+                function describe(entry) {
+                    if (!entry) { $info.text(""); $btn.hide(); return; }
+                    var inp = entry.input || {}, out = entry.output || {};
+                    var pre = inp.shape ? ("[" + inp.shape.join(",") + "]") : "";
+                    if (inp.normalize) pre += " · " + inp.normalize;
+                    if (inp.features) pre = "features: " + inp.features.join(", ");
+                    var post = out.annotation ? (" → annotate: " + out.annotation + (out.boxFormat ? "/" + out.boxFormat : "")) : "";
+                    var dl = entry.source !== "bundled" ? " · downloads on deploy (SHA-256 verified)" : " · bundled";
+                    $info.html("License <b>" + (entry.license || "?") + "</b> · " + entry.task + "<br/>" + pre + post + dl +
+                        (out.decode ? "<br/><b>note:</b> needs a " + out.decode + " decode step before the annotator" : ""));
+                    $btn.toggle(inp.layout === "nchw"); // image pipelines only
+                }
+                function applyEntry(entry) {
+                    if (!entry) return;
+                    var inp = entry.input || {};
+                    var isBundled = entry.source === "bundled";
+                    var modelPath = isBundled ? (entry.resolvedPath || ("models/" + entry.file)) : (entry.url || "");
+                    $("#node-input-modelSource").val(isBundled ? "local" : "url").trigger("change");
+                    $("#node-input-modelPath").val(modelPath);
+                    $("#node-input-modelPath-url").val(isBundled ? "" : modelPath);
+                    $("#node-input-modelSha256").val(entry.sha256 || "");
+                    $("#node-input-modelType").val("onnx").trigger("change");
+                    if (inp.shape) $("#node-input-inputShape").val(inp.shape.join(","));
+                }
+                $.getJSON("ml-inference/model-catalog", function (cat) {
+                    CATALOG = cat;
+                    (cat.models || []).forEach(function (m) {
+                        $sel.append($("<option>").val(m.id).text(m.useCase + "  [" + m.license + "]"));
+                    });
+                    if (saved) $sel.val(saved);
+                    describe(entryById(saved)); // show info on load WITHOUT overwriting saved fields
+                }).fail(function () { $info.text("(catalog unavailable)"); });
+                $sel.on("change", function () {
+                    var entry = entryById($(this).val());
+                    if (entry) applyEntry(entry); // selecting an entry fills the fields
+                    describe(entry);
+                });
+                $btn.on("click", function () {
+                    var entry = entryById($sel.val());
+                    if (!entry) return;
+                    try { insertVisionPipeline(entry); RED.notify("Inserted pipeline for: " + entry.useCase, "success"); }
+                    catch (e) { RED.notify("Could not insert pipeline: " + e.message, "error"); }
+                });
+            })();
+
             // Model type change handler
             $("#node-input-modelType").on("change", function() {
                 var type = $(this).val();
@@ -469,8 +533,37 @@
             });
         },
         oneditsave: function() {
+            // The URL textbox (#node-input-modelPath-url) isn't a backed field; fold
+            // its value into the persisted modelPath when the source is "url".
+            if ($("#node-input-modelSource").val() === "url") {
+                var url = ($("#node-input-modelPath-url").val() || "").trim();
+                if (url) $("#node-input-modelPath").val(url);
+            }
         }
     });
+
+    // Insert a ready-to-run vision pipeline (image-preprocess → ml-inference →
+    // [decode] → vision-annotator → debug) configured from a catalog entry.
+    function insertVisionPipeline(entry) {
+        if (!RED.view || typeof RED.view.importNodes !== "function") throw new Error("editor import API unavailable");
+        var inp = entry.input || {}, out = entry.output || {};
+        var z = RED.workspaces.active();
+        var x = 140, y = 120;
+        var mk = function (type, cfg) { var n = Object.assign({ id: RED.nodes.id(), type: type, z: z, x: x, y: y, wires: [] }, cfg); x += 190; return n; };
+        var isBundled = entry.source === "bundled";
+        var modelPath = isBundled ? (entry.resolvedPath || ("models/" + entry.file)) : (entry.url || "");
+        var cmt = mk("comment", { name: "feed a PNG/JPEG Buffer →", info: "Wire your image source (CM Image Source, file in, http in…) into image-preprocess." });
+        var pre = mk("image-preprocess", { name: "", targetWidth: inp.shape ? inp.shape[3] : 224, targetHeight: inp.shape ? inp.shape[2] : 224, normalize: inp.normalize || "0-1", layout: inp.layout || "nchw", channelOrder: inp.channelOrder || "rgb", keepImage: true });
+        var ml = mk("ml-inference", { name: entry.useCase, catalogId: entry.id, modelSource: isBundled ? "local" : "url", modelPath: modelPath, modelSha256: entry.sha256 || "", modelType: "onnx", inputProperty: "payload", outputProperty: "prediction", preprocessMode: "array", inputShape: inp.shape ? inp.shape.join(",") : "", warmup: false });
+        var decode = out.decode ? mk("function", { name: "decode " + out.decode, func: "// TODO: decode " + out.decode + " output to the annotator's expected shape\nreturn msg;", outputs: 1 }) : null;
+        var va = mk("vision-annotator", { name: "", mode: out.annotation || "boxes", boxFormat: out.boxFormat || "xyxy", colormap: out.colormap || "jet", imageProperty: "image" });
+        var dbg = mk("debug", { name: "", active: true, complete: "payload", targetType: "msg" });
+        pre.wires = [[ml.id]];
+        if (decode) { ml.wires = [[decode.id]]; decode.wires = [[va.id]]; } else { ml.wires = [[va.id]]; }
+        va.wires = [[dbg.id]];
+        var nodes = [cmt, pre, ml, decode, va, dbg].filter(Boolean);
+        RED.view.importNodes(JSON.stringify(nodes));
+    }
 </script>
 
 <style>
@@ -841,6 +934,18 @@
             <i class="fa fa-chevron-down ml-collapse-icon"></i>
         </div>
         <div class="ml-section-content">
+            <!-- Pretrained catalog (common use cases) -->
+            <div class="ml-config-item" style="margin-bottom: 12px;">
+                <label for="node-input-catalogId"><i class="fa fa-magic"></i> Pretrained</label>
+                <select id="node-input-catalogId">
+                    <option value="">— custom (configure manually) —</option>
+                </select>
+                <div id="ml-catalog-info" class="ml-help-text" style="margin-top:6px;"></div>
+                <button type="button" id="ml-insert-pipeline" class="red-ui-button" style="margin-top:6px; display:none;">
+                    <i class="fa fa-sitemap"></i> Insert full pipeline
+                </button>
+            </div>
+
             <!-- Source Type -->
             <div class="ml-config-item" style="margin-bottom: 12px;">
                 <label for="node-input-modelSource"><i class="fa fa-cloud"></i> Source</label>
@@ -852,7 +957,7 @@
                     <option value="custom">Custom Registry</option>
                 </select>
             </div>
-            
+
             <!-- Local: Model Library -->
             <div id="local-model-section">
                 <div style="font-size: 12px; color: #666; margin-bottom: 8px;">
@@ -874,6 +979,9 @@
             <div id="url-auth-section" style="display: none;">
                 <div class="form-row" style="margin-bottom: 8px;">
                     <input type="text" id="node-input-modelPath-url" placeholder="https://example.com/models/model.onnx" style="width: 100%;">
+                </div>
+                <div class="form-row" style="margin-bottom: 8px;">
+                    <input type="text" id="node-input-modelSha256" placeholder="optional SHA-256 (integrity check)" style="width: 100%;">
                 </div>
                 <div class="ml-config-grid">
                     <div class="ml-config-item">

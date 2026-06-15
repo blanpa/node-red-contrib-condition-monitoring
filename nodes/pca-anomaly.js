@@ -240,7 +240,23 @@ module.exports = function (RED) {
                     return a - b;
                 });
 
-                let percentileIndex = Math.floor(t2Values.length * (1 - 1 / node.threshold / 10));
+                // Map the sigma-like `threshold` to a one-sided normal percentile
+                // (e.g. 3σ -> ~99.86th percentile). Replaces an ad-hoc formula
+                // (1 - 1/threshold/10) that degenerated to the 0th percentile —
+                // flagging nearly everything — at low threshold values.
+                const erf = function (x) {
+                    // Abramowitz & Stegun 7.1.26
+                    const t = 1 / (1 + 0.3275911 * Math.abs(x));
+                    const y =
+                        1 -
+                        ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) *
+                            t *
+                            Math.exp(-x * x);
+                    return x >= 0 ? y : -y;
+                };
+                let pct = 0.5 * (1 + erf(node.threshold / Math.SQRT2));
+                pct = Math.min(0.9999, Math.max(0.5, pct));
+                let percentileIndex = Math.floor(t2Values.length * pct);
                 percentileIndex = Math.min(percentileIndex, t2Values.length - 1);
 
                 node.t2Threshold = t2Values[percentileIndex];
@@ -313,7 +329,13 @@ module.exports = function (RED) {
             };
         }
 
-        node.on("input", function (msg) {
+        node.on("input", function (msg, send, done) {
+            // Node-RED >=1.0 passes send/done; shim for older runtimes.
+            done =
+                done ||
+                function (err) {
+                    if (err) node.error(err, msg);
+                };
             try {
                 // Reset command
                 if (msg.reset === true) {
@@ -323,6 +345,7 @@ module.exports = function (RED) {
                     node.mean = null;
                     node.stdDev = null;
                     node.status({ fill: "blue", shape: "ring", text: "PCA - reset" });
+                    done();
                     return;
                 }
 
@@ -352,12 +375,12 @@ module.exports = function (RED) {
                         }
                     });
                 } else {
-                    node.error("Payload must be an array or object with multiple sensor values", msg);
+                    done("Payload must be an array or object with multiple sensor values");
                     return;
                 }
 
                 if (values.length < 2) {
-                    node.error("At least 2 sensor values are required for PCA", msg);
+                    done("At least 2 sensor values are required for PCA");
                     return;
                 }
 
@@ -384,6 +407,7 @@ module.exports = function (RED) {
                             text: "Training: " + node.dataBuffer.length + "/" + Math.floor(node.windowSize * 0.5)
                         });
                         node.send([msg, null]);
+                        done();
                         return;
                     }
                 }
@@ -396,6 +420,7 @@ module.exports = function (RED) {
 
                 if (!stats) {
                     node.send([msg, null]);
+                    done();
                     return;
                 }
 
@@ -502,9 +527,10 @@ module.exports = function (RED) {
                 } else {
                     node.send([outputMsg, null]);
                 }
+                done();
             } catch (err) {
                 node.status({ fill: "red", shape: "ring", text: "error" });
-                node.error("Error in PCA analysis: " + err.message, msg);
+                done("Error in PCA analysis: " + err.message);
             }
         });
 

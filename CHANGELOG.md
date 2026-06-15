@@ -7,6 +7,160 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+---
+
+## [0.3.1] - 2026-06-15 - Data sources, vision pipeline & hardening
+
+### ✨ Data sources for testing every node (incl. vision)
+
+- **`condition-monitoring-source`** gained a **waveform** output mode: besides the
+  trended scalar KPIs it can emit a raw vibration time-signal (configurable
+  `sampleRate`/`frameSize`) with the fault components at their characteristic
+  orders (imbalance 1×, misalignment 2×, looseness, bearing impacts at BPFO) so
+  `signal-analyzer` (FFT/envelope/kurtosis) can be exercised — its FFT recovers
+  the fault frequency. `signal-analyzer` FFT/envelope/cepstrum now also accept a
+  whole frame (array) in one message.
+- **New node `image-source`** — synthetic inspection-image generator (the visual
+  counterpart of condition-monitoring-source): textured surface with configurable
+  defects (spot/scratch/multi), severity, noise, optional degrade-over-time, a
+  ground-truth mask and a deterministic seed. Drives the whole vision pipeline
+  (`image-source → image-preprocess → ml-inference → vision-annotator`).
+- **New node `json-source`** — generic structured-data (JSON record) simulator:
+  user-defined fields (mean/noise/trend/min/max, constants), optional anomaly
+  injection, deterministic seed. Drives the object/record nodes
+  (multi-value-processor, health-index, pca-anomaly, training-data-collector,
+  llm-analyzer record mode). Together the three sources cover every node.
+
+### ✨ New Nodes: `image-preprocess` + `vision-annotator` (computer-vision pipeline)
+
+Two pure-JS nodes (deps: `pngjs`, `jpeg-js` — no native build) that let
+`ml-inference` work on real images end-to-end:
+
+- **`image-preprocess`** — decode PNG/JPEG → resize (bilinear/nearest) →
+  normalize (`0-1`/`0-255`/`-1..1`/`imagenet`/`custom`) → NCHW/NHWC tensor;
+  keeps the resized image on `msg.image` for overlays.
+- **`vision-annotator`** — renders model output as an annotated PNG +
+  structured `msg.annotations`. 9 modes: `boxes`, `obb`, `segmentation`,
+  `instances`, `polygons`, `keypoints`, `heatmap`, `anomaly`, `classification`
+  (with measurements: areas, perimeter, anomaly fraction, …). Live in-editor
+  thumbnail under the node (double-click to enlarge).
+- `ml-inference` now also reports the output tensor shape on
+  `msg.mlInference.outputShape`.
+
+A self-validating example flow `examples/test-suite.json` exercises every node
+and annotation mode with synthetic **and real pretrained models** (SqueezeNet,
+YOLOv10, YOLOv8-pose, Depth-Anything). Fetch models via `tools/fetch-models.sh`;
+`GET /test` runs all checks, `GET /gallery` shows the annotated images. Jest
+specs added for both new nodes.
+
+### ✨ New Node: `condition-monitoring-source`
+
+A synthetic **data source** for condition monitoring and predictive
+maintenance demos, testing and prototyping. It streams the sensor data of
+a degrading machine instead of consuming it.
+
+**What it does:**
+- Models machine **health (0–100%)** decaying over time via
+  `degRate × loadFactor × (1 + Σ fault severity)`.
+- Derives **vibration RMS, temperature, current and pressure** from health,
+  load and active faults, with adjustable measurement noise.
+- Injects four fault signatures at their characteristic orders relative to
+  shaft frequency: **imbalance (1×), misalignment (2×), bearing (~3.5×),
+  looseness (0.5×)**.
+- Emits **status** (normal/warning/alarm) against ISO 10816-style
+  thresholds and an estimated **remaining useful life (RUL)**.
+
+**Control & configuration:**
+- Stream control via `autoStart`, an interval timer, or manual inject;
+  commands `start` / `stop` / `reset` (string payload or `msg.start/stop/reset`).
+- Live reconfiguration via `msg.config` (load, faults, noise, thresholds,
+  interval); `msg.emit = true` also emits a sample immediately.
+- Configurable failure policy (reset / stop / continue) and an optional
+  integer `seed` for reproducible streams.
+- Output as a full condition object or just the vibration value.
+
+Registered in `package.json`, documented in the README, ships with example
+flow `examples/11-condition-monitoring-source.json` and a Jest spec
+(`test/condition-monitoring-source_spec.js`).
+
+### 🔒 Security
+
+- **`training-data-collector`** — closed two path-traversal vectors: the
+  configured `datasetName` is now sanitized (basename + character allowlist)
+  before being used in stream/export filenames, and the admin download endpoint
+  (`/training-data-collector/download/:filename`) strips directory components and
+  verifies the resolved path stays inside the data directory.
+- **`json-source`** — the `fields` spec (both static config and the `msg.config`
+  runtime override) is validated and stripped of prototype-pollution keys
+  (`__proto__`, `constructor`, `prototype`); non-object/array specs are rejected.
+
+### 🐛 Fixed
+
+- **`condition-monitoring-source`** — debug logging overwrote Node-RED's
+  `node.debug()` method with a boolean, throwing `TypeError` whenever debug was
+  enabled (uncaught in `stop`/`reset`/failure-policy paths). Renamed the flag to
+  `debugEnabled` and route through `node.log()`.
+- **`ml-inference`** — the previously loaded model is now disposed/unloaded
+  before an auto-update or `msg.loadModel` reload (tensor / native-session /
+  bridge-model leak); warmup disposes multi-output tensor arrays; the model
+  download stream now has an `error` listener so disk errors reject instead of
+  crashing the process.
+- **`ml-inference` — MLflow / registry model sources now load on startup.**
+  Previously the model was only auto-loaded when a `modelPath` was set, so the
+  `mlflow`, `huggingface` and `custom` registry sources never initialised (the
+  node sat at "no model configured" and inference failed). Plus two MLflow
+  registry fixes: the registry client now picks http/https from the registry URI
+  scheme (a plain-http registry such as `http://mlflow-server:5000` no longer
+  fails against a hardcoded https client), and "latest"/stage resolution now
+  calls the correct `POST /api/2.0/mlflow/registered-models/get-latest-versions`
+  endpoint instead of a non-existent `latest-versions/get`. Non-HTTP artifact
+  sources (`s3:`, `dbfs:`, `mlflow-artifacts:`, …) now produce a clear error
+  instead of an opaque failure. Added integration tests against a mock MLflow
+  server covering registry resolution (latest/stage + specific version) and the
+  tracking lifecycle (experiment/run creation, param + metric logging, end-run).
+- **`signal-analyzer`** — ISO 10816 acceleration→velocity conversion now derives
+  the frequency from the configured `shaftSpeed` instead of a hardcoded 50 Hz
+  (falls back to 50 Hz only when no shaft speed is set); `sampleEntropy` is
+  capped to the most recent 2000 samples (O(n²) guard); cepstrum rahmonics
+  guarded against an empty/zero spectrum (no more NaN normalization).
+- **`trend-predictor`** — the RUL confidence interval now uses the smoothed
+  current value (consistent with the point estimate, so the interval brackets
+  the RUL).
+- **`pca-anomaly`** — replaced the ad-hoc percentile formula that degenerated to
+  the 0th percentile (flagging nearly everything) at low thresholds with a proper
+  normal-CDF mapping of the sigma-like threshold.
+- **`health-index`** — `geometric` aggregation guarded against an empty score set
+  (returned `NaN`).
+- **`multi-value-processor`** — correlation result is validated before formatting
+  (an unknown `correlationMethod` previously crashed on `null.toFixed()`).
+- **`state-persistence`** — `load()` uses the async callback form of
+  `context.get`, so persistence works with asynchronous context stores (e.g. the
+  file store), not just synchronous ones.
+- **`python-bridge-manager`** — on a startup timeout the spawned Python process
+  is now killed directly instead of attempting a graceful shutdown that could
+  leave it running.
+- **`image-preprocess`** — bilinear resampling clamps all corner indices and
+  weights, fixing fragile edge behaviour at sub-pixel sample positions.
+- **`vision-annotator`** — scalar-field renderers now error on a declared shape
+  larger than the data instead of silently producing `NaN` metrics.
+- **Node-RED lifecycle** — `anomaly-detector`, `trend-predictor`,
+  `isolation-forest-anomaly` and `pca-anomaly` input handlers now use the
+  `(msg, send, done)` signature and call `done()`/`done(err)` on every path;
+  `image-source`/`json-source` close handlers invoke their `done` callback.
+
+### 📝 Documentation
+
+- README: corrected the Signal Analyzer `msg.config` keys (removed `fftSize`/
+  `sampleRate`, which are not honored at runtime) and the Health Index
+  `aggregationMethod` example (`min` → `minimum`); fixed the version tagline and
+  test count; translated the GPU-acceleration section to English; removed the
+  obsolete v0.1.x→v0.2.0 migration guide; redesigned the architecture diagrams
+  (grouped sources, category colour-coding, fixed disconnected nodes).
+
+---
+
 ## [0.3.0] - 2026-06-12 - LLM Analyzer Node (Phase 1–5)
 
 ### ✨ New Node: `llm-analyzer`

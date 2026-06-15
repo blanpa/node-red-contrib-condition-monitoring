@@ -582,8 +582,10 @@ module.exports = function (RED) {
                 const zScore = 1.96;
                 const margin = zScore * stdError * Math.sqrt(1 + 1 / n);
 
-                rulLower = ((failureThreshold - margin - currentValue) / slope) * avgInterval;
-                rulUpper = ((failureThreshold + margin - currentValue) / slope) * avgInterval;
+                // Use the same smoothed value as the point estimate so the interval
+                // is centred on `rul` and actually brackets it.
+                rulLower = ((failureThreshold - margin - smoothedCurrentValue) / slope) * avgInterval;
+                rulUpper = ((failureThreshold + margin - smoothedCurrentValue) / slope) * avgInterval;
             }
 
             let status = "healthy";
@@ -965,8 +967,7 @@ module.exports = function (RED) {
                                       ? "decreasing"
                                       : "stable",
                             slope: regression.slope,
-                            predicted: regression.predicted,
-                            confidence: regression.rSquared,
+                            predictedValues: regression.predictedValues,
                             bufferSize: node.sensorBuffers[sensorName].length
                         };
 
@@ -1035,7 +1036,7 @@ module.exports = function (RED) {
                             bufferSize: node.sensorBuffers[sensorName].length
                         };
 
-                        if (rul.status === "critical" || rul.status === "failed") {
+                        if (rul && (rul.status === "critical" || rul.status === "failed")) {
                             anyThresholdExceeded = true;
                             exceededSensors.push(sensorName);
                         }
@@ -1094,7 +1095,13 @@ module.exports = function (RED) {
             }
         }
 
-        node.on("input", function (msg) {
+        node.on("input", function (msg, send, done) {
+            // Node-RED >=1.0 passes send/done; shim for older runtimes.
+            done =
+                done ||
+                function (err) {
+                    if (err) node.error(err, msg);
+                };
             try {
                 // Dynamic configuration via msg.config
                 // Allows runtime override of node settings
@@ -1121,12 +1128,14 @@ module.exports = function (RED) {
                     node.sensorPrevious = {};
                     node.sensorRocHistory = {};
                     node.status({ fill: "blue", shape: "ring", text: activeMode + " - reset" });
+                    done();
                     return;
                 }
 
                 // Check if payload is JSON object (multi-sensor mode)
                 if (typeof msg.payload === "object" && msg.payload !== null && !Array.isArray(msg.payload)) {
                     processMultiSensorInput(msg, msg.payload);
+                    done();
                     return;
                 }
 
@@ -1135,6 +1144,7 @@ module.exports = function (RED) {
 
                 if (isNaN(value)) {
                     node.warn("Invalid payload: not a number");
+                    done();
                     return;
                 }
 
@@ -1161,9 +1171,10 @@ module.exports = function (RED) {
                         node.send([result.normal, null]);
                     }
                 }
+                done();
             } catch (err) {
                 node.status({ fill: "red", shape: "ring", text: "error" });
-                node.error("Error in trend prediction: " + err.message, msg);
+                done("Error in trend prediction: " + err.message);
             }
         });
 

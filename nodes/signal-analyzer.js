@@ -33,6 +33,10 @@ module.exports = function (RED) {
         this.fftSize = clampInt(config.fftSize, 2, 1048576, 256);
         this.samplingRate = clampFloat(config.samplingRate, 0.001, 1e9, 1000);
         this.peakThreshold = clampFloat(config.peakThreshold, 0, 1e12, 0.1);
+        this.vibrationThreshold =
+            config.vibrationThreshold !== "" && config.vibrationThreshold !== undefined
+                ? parseFloat(config.vibrationThreshold)
+                : 6;
         this.outputFormat = config.outputFormat || "peaks";
         this.windowFunction = config.windowFunction || "hann";
         this.overlapPercent = clampInt(config.overlapPercent, 0, 99, 50);
@@ -395,10 +399,14 @@ module.exports = function (RED) {
             };
         }
 
-        // Convert RMS value to velocity in mm/s for ISO 10816 evaluation
-        // Assumes typical industrial frequency of ~50Hz for acceleration to velocity conversion
+        // Convert RMS value to velocity in mm/s for ISO 10816 evaluation.
+        // Acceleration -> velocity uses the single-frequency relation v = a/(2πf).
+        // The conversion frequency is derived from the configured shaft speed
+        // (shaftSpeed in RPM -> Hz); only when no shaft speed is configured do we
+        // fall back to a generic 50 Hz, which is physically wrong for other speeds.
         function convertToVelocity(rmsValue, inputUnit) {
-            const typicalFreq = 50; // Hz - typical industrial machine frequency
+            // Derive conversion frequency from shaft speed when available.
+            const convFreq = node.shaftSpeed > 0 ? node.shaftSpeed / 60 : 50; // Hz
 
             switch (inputUnit) {
                 case "mm_s":
@@ -411,11 +419,11 @@ module.exports = function (RED) {
                     // Convert g (acceleration) to mm/s (velocity)
                     // v = a / (2 * π * f), where a is in m/s²
                     // g = 9.81 m/s², so: v(mm/s) = (g * 9810) / (2 * π * f)
-                    return (rmsValue * 9810) / (2 * Math.PI * typicalFreq);
+                    return (rmsValue * 9810) / (2 * Math.PI * convFreq);
                 case "m_s2":
                     // Convert m/s² (acceleration) to mm/s (velocity)
                     // v = a / (2 * π * f), then convert to mm/s
-                    return (rmsValue * 1000) / (2 * Math.PI * typicalFreq);
+                    return (rmsValue * 1000) / (2 * Math.PI * convFreq);
                 case "raw":
                 default:
                     // Raw/dimensionless - return as-is but mark as unconverted
@@ -513,7 +521,12 @@ module.exports = function (RED) {
 
         // Sample Entropy - measures signal complexity/regularity
         // Lower values = more regular/predictable, Higher = more complex/random
-        function calculateSampleEntropy(data, m, r) {
+        // NOTE: this is O(n²); cap the analysis length so a large windowSize
+        // (up to ~1M samples) cannot stall the flow on every message. We use the
+        // most recent SAMPEN_MAX samples, which is statistically sufficient.
+        const SAMPEN_MAX = 2000;
+        function calculateSampleEntropy(input, m, r) {
+            const data = input.length > SAMPEN_MAX ? input.slice(input.length - SAMPEN_MAX) : input;
             const n = data.length;
             if (n < m + 1) return 0;
 
@@ -963,7 +976,10 @@ module.exports = function (RED) {
 
             // Skip the first few samples (aperiodic component)
             const startIdx = 5;
+            if (cepstrum.length <= startIdx + 1) return peaks;
             const maxCepstrum = Math.max.apply(null, cepstrum.slice(startIdx).map(Math.abs));
+            // No usable energy -> no peaks (avoids divide-by-zero / NaN normalization)
+            if (!(maxCepstrum > 0)) return peaks;
 
             for (let i = startIdx + 1; i < cepstrum.length - 1; i++) {
                 if (quefrencies[i] < minQuefrency || quefrencies[i] > maxQuefrency) continue;
@@ -1369,14 +1385,34 @@ module.exports = function (RED) {
 
                 let result = null;
 
+                // For frame (array) payloads: buffer every finite sample but run the
+                // expensive transform only once, on the most recent sample. Without this
+                // a 2048-sample waveform frame would trigger 2048 full FFTs per message
+                // (O(N²·logN)) and discard all but the last result.
+                const bufferFrameReturnLast = function (payload) {
+                    const arr = Array.isArray(payload) ? payload : [payload];
+                    const finite = [];
+                    for (let i = 0; i < arr.length; i++) {
+                        const v = parseFloat(arr[i]);
+                        if (Number.isFinite(v)) finite.push(v);
+                    }
+                    if (finite.length === 0) return null;
+                    for (let i = 0; i < finite.length - 1; i++) {
+                        node.buffer.push(finite[i]);
+                        if (node.buffer.length > node.fftSize) node.buffer.shift();
+                    }
+                    return { last: finite[finite.length - 1] };
+                };
+
                 if (activeMode === "fft") {
-                    const value = parseFloat(msg.payload);
-                    if (!Number.isFinite(value)) {
-                        node.warn("Invalid payload: not a finite number");
+                    // accept a single number or a whole waveform frame (array)
+                    const framed = bufferFrameReturnLast(msg.payload);
+                    if (!framed) {
+                        node.warn("Invalid payload: not a finite number (or array of numbers)");
                         done();
                         return;
                     }
-                    result = processFFT(msg, value);
+                    result = processFFT(msg, framed.last);
                 } else if (activeMode === "vibration") {
                     let values = Array.isArray(msg.payload) ? msg.payload : [msg.payload];
                     values = values.filter(function (v) {
@@ -1398,21 +1434,21 @@ module.exports = function (RED) {
                     }
                     result = processPeaksWithConfig(msg, value, timestamp, activePeakThreshold);
                 } else if (activeMode === "envelope") {
-                    const value = parseFloat(msg.payload);
-                    if (!Number.isFinite(value)) {
-                        node.warn("Invalid payload: not a finite number");
+                    const framed = bufferFrameReturnLast(msg.payload);
+                    if (!framed) {
+                        node.warn("Invalid payload: not a finite number (or array of numbers)");
                         done();
                         return;
                     }
-                    result = processEnvelope(msg, value);
+                    result = processEnvelope(msg, framed.last);
                 } else if (activeMode === "cepstrum") {
-                    const value = parseFloat(msg.payload);
-                    if (!Number.isFinite(value)) {
-                        node.warn("Invalid payload: not a finite number");
+                    const framed = bufferFrameReturnLast(msg.payload);
+                    if (!framed) {
+                        node.warn("Invalid payload: not a finite number (or array of numbers)");
                         done();
                         return;
                     }
-                    result = processCepstrum(msg, value);
+                    result = processCepstrum(msg, framed.last);
                 }
 
                 if (result) {

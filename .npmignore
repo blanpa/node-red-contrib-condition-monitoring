@@ -33,6 +33,9 @@ yarn-error.log*
 test/
 coverage/
 .nyc_output/
+# (examples/test-suite.json is excluded via the package.json "files" allowlist
+#  negation "!examples/test-suite.json" — a .npmignore entry would be ignored
+#  while a files allowlist is present.)
 jest.config.js
 
 # Documentation build files

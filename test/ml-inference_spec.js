@@ -14,7 +14,7 @@ const hasTFJS = (() => {
         return false;
     }
 })();
-const hasONNX = (() => {
+const _hasONNX = (() => {
     try {
         require("onnxruntime-node");
         return fs.existsSync(path.join(__dirname, "fixtures", "model.onnx"));
@@ -96,12 +96,6 @@ describe("ml-inference Node", function () {
         ];
         helper.load(mlInferenceNode, flow, function () {
             const n1 = helper.getNode("n1");
-            const n2 = helper.getNode("n2");
-
-            let errorReceived = false;
-            n1.on("call:error", function () {
-                errorReceived = true;
-            });
 
             // Give time for model load attempt
             setTimeout(function () {
@@ -126,11 +120,6 @@ describe("ml-inference Node", function () {
         ];
         helper.load(mlInferenceNode, flow, function () {
             const n1 = helper.getNode("n1");
-
-            let errorCalled = false;
-            n1.on("call:error", function () {
-                errorCalled = true;
-            });
 
             // Send message without the expected input property
             n1.receive({ payload: [1, 2, 3] });
@@ -204,7 +193,7 @@ describe("ml-inference Node", function () {
             const n1 = helper.getNode("n1");
 
             // Original message with various properties
-            const originalMsg = {
+            const _originalMsg = {
                 payload: [1, 2, 3],
                 topic: "sensors/motor01/vibration",
                 sensorId: "VIB-001",

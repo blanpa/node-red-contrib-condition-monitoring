@@ -13,15 +13,15 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ## Table of Contents
 
-- [Project Status: v0.3.0 Beta](#project-status-v030-beta)
+- [Project Status: v0.3.1 Beta](#project-status-v031-beta)
 - [Important Disclaimer](#important-disclaimer)
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Available Nodes (10 Nodes)](#available-nodes-10-nodes)
+- [Available Nodes (15 Nodes)](#available-nodes-15-nodes)
+- [Pretrained Models (catalog)](#pretrained-models-catalog)
 - [Which Node Should I Use?](#which-node-should-i-use)
 - [Usage Examples](#usage-examples)
-- [Migration Guide (v0.1.x → v0.2.0)](#migration-guide-v01x--v020)
 - [Node Configuration Examples](#node-configuration-examples)
 - [Dynamic Configuration (msg.config)](#dynamic-configuration-msgconfig)
 - [Docker Setup](#docker-setup)
@@ -34,11 +34,11 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## Project Status: v0.3.0 Beta
+## Project Status: v0.3.1 Beta
 
-**Predictive Maintenance Enhancement Update**
+**LLM Analyzer, Vision Pipeline & Data-Source Simulators**
 
-- **9 Unified Nodes** - PCA, Training Data Collector, and enhanced core nodes
+- **15 Nodes** - analysis, ML inference, vision pipeline, LLM analysis, and data-source simulators
 - **ISO 10816-3 Integration** - Vibration severity assessment with zones A-D
 - **Butterworth Filter** - 2nd order IIR filter with zero-phase filtering (filtfilt)
 - **Hysteresis (Anti-Flicker)** - Prevents rapid alarm on/off switching
@@ -46,7 +46,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 - **Robust RUL Calculation** - Theil-Sen estimator, median filter, moving average smoothing
 - **High-Performance FFT** - Radix-4 Cooley-Tukey algorithm via fft.js
 - **State Persistence** - Optional context-based state saving across restarts
-- **Comprehensive Testing** - 135 unit tests with Jest framework
+- **Comprehensive Testing** - 405 unit tests with Jest framework
 
 ---
 
@@ -64,7 +64,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ## Features
 
-- **9 Powerful Nodes** - Complete condition monitoring toolkit
+- **15 Powerful Nodes** - Complete condition monitoring + vision + LLM toolkit
 - **10 Anomaly Detection Methods** - Z-Score, IQR, Moving Average, Threshold, Percentile, EMA, CUSUM, Isolation Forest, PCA, Mahalanobis
 - **Signal Analysis** - High-performance FFT (Radix-4), Vibration Features (RMS, Crest Factor, Kurtosis), Peak Detection, Envelope Analysis, Cepstrum, Autocorrelation (ACF), Sample Entropy, Periodicity Detection
 - **Correlation Analysis** - Pearson, Spearman, Cross-Correlation with time lag detection
@@ -106,9 +106,96 @@ docker-compose up -d
 2. Menu → Import → Examples
 3. Select one of the example flows
 
-## Available Nodes (10 Nodes)
+## Available Nodes (15 Nodes)
 
-All nodes are in the **`condition-monitoring`** category.
+Nodes are grouped in the palette under five **`Condition Monitoring`** categories:
+**Condition Monitoring Stats** (analysis), **Condition Monitoring ML**
+(ml-inference, training-data-collector), **Condition Monitoring Vision**
+(image-preprocess, vision-annotator), **Condition Monitoring LLM** (llm-analyzer)
+and **Condition Monitoring Demo** (condition-monitoring-source, image-source, json-source).
+
+**Data sources for testing:** `condition-monitoring-source` simulates realistic
+sensor data — trended KPIs (vibration RMS, temperature, current, pressure with
+degradation, faults, ISO thresholds, RUL) and, in **waveform mode**, a raw
+vibration time-signal so the signal-analyzer (FFT/envelope/kurtosis) can be
+driven too. `image-source` is its visual counterpart: it generates synthetic
+inspection images with configurable defects (spot/scratch) + a ground-truth
+mask to drive the vision pipeline. `json-source` is a generic structured-data
+simulator — you define arbitrary fields (mean/noise/trend, optional anomaly
+injection) and it emits JSON records to drive the object/record nodes
+(multi-value-processor, health-index, pca-anomaly, training-data-collector,
+llm-analyzer record mode).
+
+### Architecture at a glance
+
+How the nodes fit together — data sources (or real inputs) feed the processing
+nodes, which emit results to dashboards/alarms/storage:
+
+```mermaid
+flowchart LR
+    subgraph SRC["🔌 Sources"]
+        EXT["Real inputs<br/>MQTT · OPC-UA · files"]:::src
+        CMS["CM Sensor Source"]:::src
+        IMS["CM Image Source"]:::src
+        JSS["CM JSON Source"]:::src
+    end
+
+    subgraph STATS["📊 Statistical analysis"]
+        AD["Anomaly Detector"]:::stats
+        IF["Isolation Forest"]:::stats
+        PCA["PCA Anomaly"]:::stats
+        MVP["Multi-Value Processor"]:::stats
+        SA["Signal Analyzer"]:::stats
+        TP["Trend Predictor"]:::stats
+        HI["Health Index"]:::stats
+    end
+    subgraph MLG["🤖 Machine learning"]
+        MLI["ML Inference"]:::ml
+        TDC["Training Data Collector"]:::ml
+    end
+    subgraph VIS["🖼️ Vision pipeline"]
+        IPP["Image Preprocess"]:::vis
+        VAN["Vision Annotator"]:::vis
+    end
+    subgraph LLMG["💬 LLM"]
+        LLA["LLM Analyzer"]:::llm
+    end
+    OUT["Dashboard · Alarm · Database"]:::sink
+
+    EXT --> AD & IF & SA & MVP & TDC
+    CMS -->|scalar| AD & IF & TP & HI
+    CMS -->|waveform| SA
+    JSS --> MVP & PCA & HI
+    IMS --> IPP --> MLI --> VAN --> OUT
+
+    AD & IF & SA & TP & HI & PCA --> OUT
+    MVP --> AD
+    MLI -->|predictions| OUT
+    AD -->|anomaly context| LLA --> OUT
+    TDC -.->|labelled data| MLI
+
+    classDef src fill:#9482f1,color:#fff,stroke:#6b5bd6;
+    classDef stats fill:#42a5f5,color:#fff,stroke:#1e88e5;
+    classDef ml fill:#ffa726,color:#3e2723,stroke:#fb8c00;
+    classDef vis fill:#ec407a,color:#fff,stroke:#d81b60;
+    classDef llm fill:#66bb6a,color:#fff,stroke:#43a047;
+    classDef sink fill:#26a69a,color:#fff,stroke:#1c7e74;
+```
+
+The vision path is its own short pipeline:
+
+```mermaid
+flowchart LR
+    IMG["Image<br/>(CM Image Source or PNG/JPEG)"]:::src --> P["Image Preprocess<br/>decode · resize · normalize → tensor"]:::vis
+    P --> M["ML Inference<br/>ONNX / TFJS model"]:::ml
+    M --> A["Vision Annotator<br/>boxes · masks · keypoints · heatmap…"]:::vis
+    A --> V["Annotated PNG<br/>(editor preview / dashboard)"]:::sink
+
+    classDef src fill:#9482f1,color:#fff,stroke:#6b5bd6;
+    classDef vis fill:#ec407a,color:#fff,stroke:#d81b60;
+    classDef ml fill:#ffa726,color:#3e2723,stroke:#fb8c00;
+    classDef sink fill:#26a69a,color:#fff,stroke:#1c7e74;
+```
 
 ### Core Analysis Nodes
 
@@ -364,28 +451,165 @@ msg.rawResponse // (JSON mode) raw LLM text
 
 ---
 
+### 11. Condition Monitoring Data Source
+
+**Synthetic sensor stream of a degrading machine — for demos, testing and predictive-maintenance prototyping** (palette label **CM Sensor Source**):
+
+| Feature | Description |
+|---------|-------------|
+| **Asset types** | Pump, motor, fan, gearbox (with configurable RPM → shaft frequency) |
+| **Output modes** | `object` (full JSON), `value` (vibration RMS), or `waveform` (raw vibration time-signal array + `msg.samplingRate`, for the Signal Analyzer) |
+| **Degradation model** | Health (0–100%) decays by `degRate × loadFactor × (1 + Σ fault severity)` |
+| **Derived sensors** | Vibration RMS (mm/s), temperature (°C), current (A), pressure (bar) |
+| **Fault injection** | Imbalance (1×), misalignment (2×), bearing (~3.5×), looseness (0.5×) with characteristic frequencies |
+| **Thresholds + RUL** | ISO 10816-style warn/alarm levels and an estimated remaining useful life |
+| **Streaming control** | Auto-start on deploy, interval timer, or manual inject; `start`/`stop`/`reset` commands |
+| **Runtime overrides** | `msg.config` adjusts load, faults, noise, thresholds and interval live |
+| **Reproducible** | Optional integer `seed` for deterministic streams |
+
+**Configuration:**
+```javascript
+// Control inputs
+msg.payload = "start" | "stop" | "reset";   // or msg.start / msg.stop / msg.reset = true
+msg.config  = {                              // live reconfiguration
+  load: 90, degRate: 0.2, noise: 0.1,
+  faults: { bearing: 0.85, imbalance: 0.2 },
+  warnThreshold: 4.5, alarmThreshold: 7.1, intervalMs: 500
+};
+msg.emit = true;   // with msg.config: also emit a sample immediately
+
+// Output (object mode)
+msg.payload = { asset, health, status, rul, sensors:{...}, faults:[...], thresholds:{...} };
+msg.status  // "normal" | "warning" | "alarm"
+msg.health  // 0–100
+msg.alarm   // boolean
+```
+
+**Example:**
+```
+[Inject "start"] → [CM Data Source] → [Health Index / Signal Analyzer / Anomaly Detector]
+```
+
+---
+
+### Vision Nodes (for image models)
+
+### 12. Image Preprocess
+
+**Turns a real image (PNG/JPEG Buffer) into a normalized tensor for `ml-inference`** — pure-JS (`pngjs` + `jpeg-js`, no native deps).
+
+| Feature | Description |
+|---------|-------------|
+| **Decode** | PNG and JPEG buffers |
+| **Resize** | bilinear / nearest to a target W×H |
+| **Normalize** | `0-1`, `0-255`, `-1..1`, `imagenet` (mean/std), or `custom` mean/std |
+| **Layout** | `NCHW` (ONNX) or `NHWC` (TFJS); channel order RGB/BGR; optional grayscale |
+| **Keeps the image** | sets `msg.image` (resized PNG) so `vision-annotator` can draw on the real photo |
+
+Output: `msg.payload` = flat tensor, `msg.tensorShape` = e.g. `[1,3,224,224]`, `msg.preprocess` = metadata. Set the `ml-inference` **Input shape** to match.
+
+### 13. Vision Annotator
+
+**Renders an image-model's output as an annotated image** (PNG `Buffer` on `msg.payload`) plus structured `msg.annotations`. 9 modes:
+
+| Mode | Annotation |
+|------|------------|
+| `boxes` | bounding boxes (xyxy or yolo + NMS) |
+| `obb` | oriented / rotated boxes |
+| `segmentation` | semantic class-mask overlay (+ area fractions) |
+| `instances` | per-object masks + bbox + area |
+| `polygons` | contour outlines (+ area & perimeter) |
+| `keypoints` | keypoints + skeleton (pose) |
+| `heatmap` | scalar field → jet/gray colormap (depth / CAM / density) |
+| `anomaly` | anomaly score field → heatmap + thresholded regions + metrics |
+| `classification` | label banner + status dot (softmax confidence) |
+
+With **Editor preview** on (default), the annotated image is drawn live as a thumbnail **under the node on the canvas** — double-click it to enlarge. Display it elsewhere with a dashboard `ui_image`, or via `msg.payload`.
+
+A ready-to-run, self-validating example flow that exercises every node and every
+annotation mode (with both synthetic and **real pretrained models** — SqueezeNet,
+YOLOv10, YOLOv8-pose, Depth-Anything) lives in `examples/test-suite.json`. Fetch
+the models first with `bash tools/fetch-models.sh`, then `GET /test` runs all
+checks and `GET /gallery` shows every annotated image.
+
+### Data Source Nodes (Demo)
+
+Simulate input so any node can be tested without real hardware. (The **CM Sensor
+Source**, node #11 above, is the third one — it also has a **waveform** output
+mode that emits a raw vibration time-signal for the Signal Analyzer.)
+
+### 14. CM Image Source
+
+**Synthetic inspection-image generator** (`image-source`) — the visual counterpart.
+Produces a textured surface with configurable defects (spot / scratch / multiple),
+severity, noise and optional *degrade over time*, plus a **ground-truth mask**
+(`msg.mask`) and defect list. Drives the whole vision pipeline.
+
+### 15. CM JSON Source
+
+**Generic structured-data simulator** (`json-source`). Define arbitrary fields
+(`{ "temperature": { "mean": 60, "noise": 2, "trend": 0.05 }, "asset": "pump-01" }`);
+each numeric field is `mean + trend·count + gaussian(noise)`, constants pass through.
+Optional anomaly injection. Drives the object/record nodes (multi-value-processor,
+health-index, pca-anomaly, training-data-collector, llm-analyzer record mode).
+
+---
+
+## Pretrained Models (catalog)
+
+A curated catalog of pretrained models for **common use cases** ships with the
+package (`nodes/model-catalog.json`). In the **ML Inference** node, pick one from
+the **Pretrained** dropdown — it auto-fills the source, URL, SHA-256, type and
+input shape, and shows the matching preprocessing + annotation. The **Insert full
+pipeline** button drops a ready-wired `image-preprocess → ml-inference →
+vision-annotator` chain.
+
+| Use case | Model | Source | License |
+|----------|-------|--------|---------|
+| Image classification (ImageNet) | SqueezeNet 1.1 | ONNX Model Zoo | BSD-3-Clause |
+| Object detection (COCO) | YOLOv10n (NMS-free) | onnx-community | AGPL-3.0 |
+| Human pose / keypoints | YOLOv8n-pose | Xenova | AGPL-3.0 |
+| Monocular depth | Depth-Anything-v2-small | onnx-community | Apache-2.0 |
+| Surface defect segmentation | bundled (trained in-repo) | this package | MIT |
+| Vibration fault classification | bundled (trained in-repo) | this package | MIT |
+
+- **Fetched on demand**, not redistributed: `url` models download on deploy into
+  `ml-models/cache` and are verified against the catalog's SHA-256. Mind each
+  model's **license** (YOLO is AGPL-3.0). Only the small in-repo models are bundled.
+- Pre-download everything for offline use with `bash tools/fetch-models.sh`.
+
+---
+
 ## Which Node Should I Use?
 
 ### Quick Decision Tree
 
+Start from your data and goal, follow to the node:
+
+```mermaid
+flowchart TD
+    Q{"What is your data?"}
+
+    Q -->|"single numeric stream"| G1{"goal?"}
+    G1 -->|"fixed min/max limits"| AD1["Anomaly Detector · threshold"]
+    G1 -->|"statistical outliers"| AD2["Anomaly Detector · z-score / IQR"]
+    G1 -->|"gradual drift"| AD3["Anomaly Detector · CUSUM"]
+    G1 -->|"forecast / remaining useful life"| TP["Trend Predictor"]
+
+    Q -->|"many sensors at once"| G2{"goal?"}
+    G2 -->|"split / aggregate"| MVP["Multi-Value Processor"]
+    G2 -->|"correlated / multivariate"| PCA["PCA Anomaly · Mahalanobis"]
+    G2 -->|"single 0–100 score"| HI["Health Index"]
+    G2 -->|"complex, unsupervised"| IF["Isolation Forest"]
+
+    Q -->|"raw vibration waveform"| SA["Signal Analyzer<br/>FFT · vibration · envelope (bearings) · cepstrum (gears)"]
+    Q -->|"image / photo"| VIS["Image Preprocess → ML Inference → Vision Annotator"]
+    Q -->|"need a trained model"| ML["ML Inference (ONNX / TFJS)"]
+    Q -->|"want a text summary"| LLM["LLM Analyzer"]
+    Q -->|"build a training dataset"| TDC["Training Data Collector"]
 ```
-What do you want to detect?
-├─ Simple threshold violations → Anomaly Detector (Threshold)
-├─ Statistical outliers → Anomaly Detector (Z-Score/IQR)
-├─ Gradual drift → Anomaly Detector (CUSUM)
-├─ Complex patterns → Isolation Forest (with Online Learning)
-├─ Multi-sensor anomalies → PCA Anomaly Detection
-├─ Vibration issues → Signal Analyzer (Vibration/FFT)
-├─ Bearing faults → Signal Analyzer (Envelope Mode)
-├─ Gearbox faults → Signal Analyzer (Cepstrum)
-├─ Multiple sensors → Multi-Value Processor
-├─ Multivariate anomalies → Multi-Value Processor (Mahalanobis)
-├─ Aggregate sensors → Multi-Value Processor (Aggregate Mode)
-├─ Remaining Useful Life → Trend Predictor (RUL + Weibull)
-├─ Future prediction → Trend Predictor (Prediction)
-├─ Overall health → Health Index (Visual Thresholds)
-└─ Custom ML model → ML Inference
-```
+
+> Tip: the **Demo** sources (`CM Sensor Source`, `CM Image Source`, `CM JSON Source`) let you drive any of these without real hardware.
 
 ---
 
@@ -420,44 +644,6 @@ What do you want to detect?
 
 ```
 [Features] → [ML Inference (Autoencoder)] → Reconstruction Error → [Anomaly Detector (Threshold)]
-```
-
----
-
-## Migration Guide (v0.1.x → v0.2.0)
-
-### Node Mapping
-
-| Old Node(s) | New Node | Notes |
-|-------------|----------|-------|
-| zscore-anomaly | anomaly-detector | Set `method: zscore` |
-| iqr-anomaly | anomaly-detector | Set `method: iqr` |
-| threshold-anomaly | anomaly-detector | Set `method: threshold` |
-| percentile-anomaly | anomaly-detector | Set `method: percentile` |
-| ema-anomaly | anomaly-detector | Set `method: ema` |
-| cusum-anomaly | anomaly-detector | Set `method: cusum` |
-| moving-average-anomaly | anomaly-detector | Set `method: moving-average` |
-| multi-value-splitter | multi-value-processor | Set `mode: split` |
-| multi-value-anomaly | multi-value-processor | Set `mode: analyze` |
-| correlation-anomaly | multi-value-processor | Set `mode: correlate` |
-| fft-analysis | signal-analyzer | Set `mode: fft` |
-| vibration-features | signal-analyzer | Set `mode: vibration` |
-| peak-detection | signal-analyzer | Set `mode: peaks` |
-| trend-prediction | trend-predictor | Set `mode: prediction` |
-| rate-of-change | trend-predictor | Set `mode: rate-of-change` |
-| isolation-forest-anomaly | isolation-forest-anomaly | (unchanged) |
-| health-index | health-index | (unchanged) |
-| ml-inference | ml-inference | (unchanged) |
-
-### Configuration Mapping
-
-**Anomaly Detector:**
-```javascript
-// Old (zscore-anomaly)
-{ threshold: 3.0, warningThreshold: 2.0, windowSize: 100 }
-
-// New (anomaly-detector)
-{ method: "zscore", zscoreThreshold: 3.0, zscoreWarning: 2.0, windowSize: 100 }
 ```
 
 ---
@@ -581,8 +767,6 @@ msg.payload = 75.2;
 ```javascript
 msg.config = {
   mode: "vibration",          // Override mode (fft/vibration/peaks/envelope/cepstrum)
-  fftSize: 1024,              // Override FFT size
-  sampleRate: 1000,           // Override sample rate
   vibrationThreshold: 5,      // Override vibration threshold
   peakThreshold: 0.3          // Override peak detection threshold
 };
@@ -597,7 +781,7 @@ msg.config = {
   warningThreshold: 70,       // Override warning threshold
   degradedThreshold: 50,      // Override degraded threshold
   criticalThreshold: 25,      // Override critical threshold
-  aggregationMethod: "min",   // Override aggregation (weighted/min/average)
+  aggregationMethod: "minimum", // Override aggregation (weighted/dynamic/minimum/average/geometric)
   sensorWeights: {            // Override sensor weights
     "temp": 2.0,
     "vibration": 1.5
@@ -643,47 +827,47 @@ docker-compose -f docker-compose.dev.yml up
 
 ### GPU Acceleration (NVIDIA, optional)
 
-Beide Inferenz-Wege — der direkte TensorFlow.js-Pfad im Node-RED-Container **und** der MAX-Engine-Bridge-Pfad (MAX Engine + ONNX Runtime) — können wahlweise auf einer NVIDIA-GPU laufen. Der CPU-Pfad bleibt der Default; GPU ist Opt-in.
+Both inference paths — the direct TensorFlow.js path in the Node-RED container **and** the MAX Engine bridge path (MAX Engine + ONNX Runtime) — can optionally run on an NVIDIA GPU. The CPU path stays the default; GPU is opt-in.
 
-**Voraussetzungen auf dem Host:**
-- NVIDIA-Treiber (kompatibel mit CUDA 12.x)
+**Host prerequisites:**
+- NVIDIA driver (compatible with CUDA 12.x)
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-- Docker mit Compose v2
+- Docker with Compose v2
 
-**Aktivierung über Compose-Override:**
+**Enable via Compose override:**
 
 ```bash
 docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml up --build
 ```
 
-Die Override-Datei tauscht beim Build die Dockerfiles gegen die GPU-Varianten (`Dockerfile.gpu`, `Dockerfile.max.gpu`) und reserviert die GPU(s) per `deploy.resources`. Was dabei passiert:
+The override file swaps the Dockerfiles for their GPU variants (`Dockerfile.gpu`, `Dockerfile.max.gpu`) at build time and reserves the GPU(s) via `deploy.resources`. What this does:
 
-| Container        | GPU-Image-Basis                              | Aktivierte Backends |
+| Container        | GPU image base                               | Enabled backends |
 |------------------|----------------------------------------------|---------------------|
 | `node-red`       | `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` | `@tensorflow/tfjs-node-gpu`, `tensorflow[and-cuda]` |
 | `max-engine`     | `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` | MAX Engine (GPU) + `onnxruntime-gpu` (`CUDAExecutionProvider`) |
 
-Der Bridge-Code (`nodes/python/max_bridge.py`) wählt automatisch das beste verfügbare Backend in dieser Reihenfolge: **MAX Engine GPU → ONNX Runtime CUDA → ONNX Runtime CPU**.
+The bridge code (`nodes/python/max_bridge.py`) automatically selects the best available backend in this order: **MAX Engine GPU → ONNX Runtime CUDA → ONNX Runtime CPU**.
 
-**Verifikation:**
+**Verification:**
 
 ```bash
-# ONNX Runtime sollte CUDAExecutionProvider listen
+# ONNX Runtime should list CUDAExecutionProvider
 docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml \
   exec max-engine python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
 
-# Bridge-Status (zeigt Backend & geladene Modelle)
+# Bridge status (shows backend & loaded models)
 curl http://localhost:8765/status
 
-# Im Node-RED-Container: tfjs-node-gpu sollte CUDA finden
+# Inside the Node-RED container: tfjs-node-gpu should find CUDA
 docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml \
   exec node-red node -e "require('@tensorflow/tfjs-node-gpu'); console.log('OK')"
 ```
 
-**Hinweise:**
-- Die GPU-Images sind deutlich größer (mehrere GB). Erst-Build dauert entsprechend länger.
-- Reicht ein einzelner GPU-Pfad, kann man die Override-Datei kürzen und nur den `max-engine`- oder nur den `node-red`-Service-Block behalten.
-- Für reine MAX-Engine-Beschleunigung gibt es alternativ die offiziellen `modular/max-nvidia-full`-Images — als Drop-in für `Dockerfile.max.gpu` nutzbar (Base-Image-Tausch).
+**Notes:**
+- The GPU images are significantly larger (several GB), so the first build takes correspondingly longer.
+- If a single GPU path is enough, you can trim the override file and keep only the `max-engine` or only the `node-red` service block.
+- For MAX-Engine-only acceleration, the official `modular/max-nvidia-full` images are an alternative — usable as a drop-in for `Dockerfile.max.gpu` (base image swap).
 
 ---
 
@@ -786,7 +970,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - [x] Mahalanobis distance for multivariate anomalies
 - [x] ISO 10816-3 vibration severity assessment
 - [x] Hysteresis (anti-flicker) for anomaly detection
-- [ ] Pre-trained models for common use cases
+- [x] Pre-trained models for common use cases (model catalog + ML Inference picker)
 
 ---
 

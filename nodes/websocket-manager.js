@@ -121,6 +121,9 @@ class WebSocketManager extends EventEmitter {
                     maxPayload: this.maxMessageSize
                 };
                 // Origin allowlist: enforced *before* the WS upgrade completes.
+                // (Token auth is enforced post-upgrade in _authorize so the client
+                // receives an explicit 4401 close code with a reason, rather than a
+                // bare HTTP 401 / abnormal-close at the handshake layer.)
                 if (this.allowedOrigins) {
                     wsServerOptions.verifyClient = (info) => {
                         const origin = info.origin || (info.req && info.req.headers && info.req.headers.origin);
@@ -168,11 +171,10 @@ class WebSocketManager extends EventEmitter {
      *
      * Tokens are compared with a constant-time comparator to avoid timing oracles.
      */
-    _authorize(ws, req) {
-        if (!this.authToken) return true;
-
+    _extractToken(req) {
+        if (!req) return null;
         let presented = null;
-        const subProto = req.headers["sec-websocket-protocol"];
+        const subProto = req.headers && req.headers["sec-websocket-protocol"];
         if (typeof subProto === "string" && subProto.length > 0) {
             presented = subProto.split(",")[0].trim();
         }
@@ -184,8 +186,21 @@ class WebSocketManager extends EventEmitter {
                 presented = null;
             }
         }
+        return presented;
+    }
 
-        if (!presented || !timingSafeEqualStrings(presented, this.authToken)) {
+    /**
+     * Constant-time check of the token presented on a request against authToken.
+     */
+    _checkToken(req) {
+        const presented = this._extractToken(req);
+        return !!presented && timingSafeEqualStrings(presented, this.authToken);
+    }
+
+    _authorize(ws, req) {
+        if (!this.authToken) return true;
+
+        if (!this._checkToken(req)) {
             this.stats.errors++;
             try {
                 ws.close(4401, "Unauthorized");

@@ -36,6 +36,8 @@ module.exports = function (RED) {
         const bases = [MODELS_DIR];
         if (RED.settings && RED.settings.userDir) bases.push(RED.settings.userDir);
         bases.push(process.cwd());
+        // models bundled with this package (catalog "bundled" entries)
+        bases.push(path.join(__dirname, "models"));
         for (const e of extra) {
             if (typeof e === "string" && e.length > 0) bases.push(e);
         }
@@ -270,56 +272,81 @@ module.exports = function (RED) {
     }
 
     // MLflow Registry API
+    // Minimal MLflow REST request helper: picks http/https from the URL scheme
+    // (registry URIs are commonly plain http, e.g. http://mlflow-server:5000)
+    // and supports both GET (with query params) and POST (with a JSON body).
+    function mlflowApiRequest(url, method, token, body) {
+        return new Promise((resolve, reject) => {
+            const isHttps = url.startsWith("https");
+            const protocol = isHttps ? https : http;
+            const urlObj = new URL(url);
+            const options = {
+                hostname: urlObj.hostname,
+                port: urlObj.port || (isHttps ? 443 : 80),
+                path: urlObj.pathname + urlObj.search,
+                method: method,
+                headers: { "Content-Type": "application/json" }
+            };
+            if (token) options.headers["Authorization"] = "Bearer " + token;
+
+            const req = protocol.request(options, (res) => {
+                let data = "";
+                res.on("data", (chunk) => (data += chunk));
+                res.on("end", () => {
+                    if (res.statusCode >= 200 && res.statusCode < 300) {
+                        try {
+                            resolve(data ? JSON.parse(data) : {});
+                        } catch (e) {
+                            reject(new Error("Invalid JSON response from MLflow"));
+                        }
+                    } else {
+                        reject(new Error(`MLflow API error: ${res.statusCode} ${res.statusMessage}`));
+                    }
+                });
+            });
+            req.on("error", reject);
+            if (body) req.write(JSON.stringify(body));
+            req.end();
+        });
+    }
+
     async function downloadFromMLflow(registryUri, modelName, version, stage, token, targetPath, expectedSha256) {
         try {
             const baseUrl = registryUri.replace(/\/$/, "");
-            let modelUri = null;
 
-            const protocol = https;
-            const options = {
-                headers: {
-                    "Content-Type": "application/json"
-                }
-            };
-
-            if (token) {
-                options.headers["Authorization"] = "Bearer " + token;
-            }
-
-            // Get model version URI
-            let apiUrl;
+            // Resolve the model version's artifact source.
+            let modelInfo;
             if (version && version !== "latest") {
-                apiUrl = `${baseUrl}/api/2.0/mlflow/model-versions/get?name=${encodeURIComponent(modelName)}&version=${version}`;
-            } else if (stage) {
-                apiUrl = `${baseUrl}/api/2.0/mlflow/latest-versions/get?name=${encodeURIComponent(modelName)}&stages=${stage}`;
+                // Specific version: GET model-versions/get
+                const apiUrl = `${baseUrl}/api/2.0/mlflow/model-versions/get?name=${encodeURIComponent(
+                    modelName
+                )}&version=${encodeURIComponent(version)}`;
+                modelInfo = await mlflowApiRequest(apiUrl, "GET", token);
             } else {
-                apiUrl = `${baseUrl}/api/2.0/mlflow/latest-versions/get?name=${encodeURIComponent(modelName)}`;
+                // "latest" (optionally filtered by stage): POST get-latest-versions
+                // (there is no `latest-versions/get` endpoint; the registry API is
+                // registered-models/get-latest-versions and it is a POST).
+                const apiUrl = `${baseUrl}/api/2.0/mlflow/registered-models/get-latest-versions`;
+                const reqBody = { name: modelName };
+                if (stage) reqBody.stages = [stage];
+                modelInfo = await mlflowApiRequest(apiUrl, "POST", token, reqBody);
             }
 
-            const modelInfo = await new Promise((resolve, reject) => {
-                protocol
-                    .get(apiUrl, options, (res) => {
-                        let data = "";
-                        res.on("data", (chunk) => (data += chunk));
-                        res.on("end", () => {
-                            if (res.statusCode === 200) {
-                                try {
-                                    resolve(JSON.parse(data));
-                                } catch (e) {
-                                    reject(new Error("Invalid JSON response from MLflow"));
-                                }
-                            } else {
-                                reject(new Error(`MLflow API error: ${res.statusCode} ${res.statusMessage}`));
-                            }
-                        });
-                    })
-                    .on("error", reject);
-            });
-
-            modelUri = modelInfo.model_version?.source || modelInfo.model_versions?.[0]?.source;
+            const modelUri = modelInfo.model_version?.source || modelInfo.model_versions?.[0]?.source;
 
             if (!modelUri) {
                 throw new Error("Could not get model URI from MLflow");
+            }
+
+            // MLflow `source` is an artifact URI. Only http(s) sources are directly
+            // downloadable here; object-store / proxy schemes (s3://, dbfs:/,
+            // mlflow-artifacts:/, models:/, file:/) need their own client.
+            if (!/^https?:\/\//i.test(modelUri)) {
+                const scheme = String(modelUri).split(":")[0];
+                throw new Error(
+                    `MLflow model source uses '${scheme}:' which is not directly downloadable over HTTP. ` +
+                        "Serve artifacts over http(s) (e.g. the mlflow-artifacts proxy) or use modelSource=url with a direct link."
+                );
             }
 
             // Download model from MLflow storage
@@ -664,7 +691,8 @@ module.exports = function (RED) {
     // compared against it after the stream completes. On mismatch the file is
     // unlinked and the promise rejects — no caller will ever see a poisoned
     // model. Hashes must be the lower-case hex SHA-256 digest.
-    async function downloadFile(url, authType, authToken, targetPath, expectedSha256) {
+    async function downloadFile(url, authType, authToken, targetPath, expectedSha256, redirectsLeft) {
+        if (redirectsLeft === undefined) redirectsLeft = 5;
         await new Promise((resolve, reject) => {
             const protocol = url.startsWith("https") ? https : http;
 
@@ -681,13 +709,55 @@ module.exports = function (RED) {
 
             const file = fs.createWriteStream(targetPath);
 
+            // A WriteStream error (disk full, EACCES, etc.) would otherwise be an
+            // unhandled 'error' event and crash the process. Route it to reject.
+            file.on("error", (err) => {
+                try {
+                    file.destroy();
+                    if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
+                } catch (_) {
+                    /* ignore cleanup errors */
+                }
+                reject(err);
+            });
+
             protocol
                 .get(url, options, (response) => {
-                    if (response.statusCode === 301 || response.statusCode === 302) {
+                    if (
+                        response.statusCode === 301 ||
+                        response.statusCode === 302 ||
+                        response.statusCode === 303 ||
+                        response.statusCode === 307 ||
+                        response.statusCode === 308
+                    ) {
                         // Handle redirect — recurse but keep the same expectedSha256
-                        file.close();
+                        file.destroy();
                         if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-                        return downloadFile(response.headers.location, authType, authToken, targetPath, expectedSha256)
+                        if (redirectsLeft <= 0 || !response.headers.location) {
+                            reject(new Error("Too many redirects (or missing Location) while downloading " + url));
+                            return;
+                        }
+                        const nextUrl = new URL(response.headers.location, url).toString();
+                        // Drop credentials when the redirect crosses to another origin —
+                        // presigned-CDN redirects (HF/S3) must not receive our auth token.
+                        let nextAuthType = authType;
+                        let nextAuthToken = authToken;
+                        try {
+                            if (new URL(nextUrl).origin !== new URL(url).origin) {
+                                nextAuthType = null;
+                                nextAuthToken = null;
+                            }
+                        } catch (e) {
+                            // malformed URL — let the recursive call fail cleanly
+                        }
+                        return downloadFile(
+                            nextUrl,
+                            nextAuthType,
+                            nextAuthToken,
+                            targetPath,
+                            expectedSha256,
+                            redirectsLeft - 1
+                        )
                             .then(resolve)
                             .catch(reject);
                     }
@@ -1201,7 +1271,31 @@ module.exports = function (RED) {
         }
 
         // Initialize model
+        // Dispose/unload the currently loaded model before loading a new one.
+        // Prevents tensor / native-session / bridge-model leaks on auto-update
+        // reloads and runtime msg.loadModel swaps.
+        async function disposeCurrentModel() {
+            if (!node.model) return;
+            const old = node.model;
+            node.model = null;
+            node.modelLoaded = false;
+            try {
+                if (old.usePersistentBridge && old.unload) {
+                    await old.unload();
+                }
+                if (node.modelFormat === "tfjs" && old.dispose) {
+                    old.dispose();
+                }
+                // ONNX sessions don't need explicit disposal
+            } catch (err) {
+                node.warn("Error disposing previous model: " + err.message);
+            }
+        }
+
         async function initializeModel() {
+            // Dispose any previously loaded model first (reload / auto-update / swap)
+            await disposeCurrentModel();
+
             // Check if model source is configured
             if (node.modelSource === "huggingface" && !node.hfModelId) {
                 node.status({ fill: "grey", shape: "ring", text: "no Hugging Face model ID" });
@@ -1350,7 +1444,12 @@ module.exports = function (RED) {
                         const dummyInput = tensorflow.zeros(shape);
                         try {
                             const result = node.model.predict(dummyInput);
-                            if (result.dispose) result.dispose();
+                            // Multi-output models return an array of tensors
+                            if (Array.isArray(result)) {
+                                result.forEach((t) => t && t.dispose && t.dispose());
+                            } else if (result && result.dispose) {
+                                result.dispose();
+                            }
                         } catch (e) {
                             // Ignore warmup errors
                         }
@@ -1535,9 +1634,11 @@ module.exports = function (RED) {
                 let output;
 
                 if (Array.isArray(result)) {
+                    node._lastOutputShape = result.map((t) => t.shape);
                     output = await Promise.all(result.map((t) => t.array()));
                     result.forEach((t) => t.dispose());
                 } else {
+                    node._lastOutputShape = result.shape;
                     output = await result.array();
                     result.dispose();
                 }
@@ -1599,6 +1700,10 @@ module.exports = function (RED) {
             const outputName = node.outputNames[0] || Object.keys(results)[0];
             const outputTensor = results[outputName];
 
+            // Remember the tensor shape so downstream nodes (e.g. vision-annotator)
+            // can reshape the flat data back into [N,C,H,W] / [N,boxes,attrs].
+            node._lastOutputShape = outputTensor.dims ? Array.from(outputTensor.dims) : null;
+
             // Convert to array
             return Array.from(outputTensor.data);
         }
@@ -1620,8 +1725,7 @@ module.exports = function (RED) {
                 // Check if this is a model load/reload command
                 if (msg.loadModel) {
                     node.modelPath = msg.loadModel;
-                    node.modelLoaded = false;
-                    node.model = null;
+                    // initializeModel() disposes the previous model before loading
                     await initializeModel();
                     done();
                     return;
@@ -1783,6 +1887,7 @@ module.exports = function (RED) {
                     modelFormat: node.modelFormat,
                     inferenceTime: inferenceTime,
                     inputShape: node.inputShape,
+                    outputShape: node._lastOutputShape || null,
                     timestamp: Date.now(),
                     mlflowTracking:
                         node.mlflowTrackingEnabled && node.mlflowTracker
@@ -1854,8 +1959,13 @@ module.exports = function (RED) {
             done();
         });
 
-        // Initialize model on startup
-        if (node.modelPath) {
+        // Initialize model on startup. local/url load from modelPath; the registry
+        // sources (mlflow / huggingface / custom) load by their own identifiers and
+        // have no modelPath — initializeModel() self-validates each source, so it is
+        // safe to call whenever a remote source is selected.
+        const remoteSource =
+            node.modelSource === "mlflow" || node.modelSource === "huggingface" || node.modelSource === "custom";
+        if (node.modelPath || remoteSource) {
             initializeModel();
         } else {
             node.status({ fill: "grey", shape: "ring", text: "no model configured" });
@@ -1863,6 +1973,26 @@ module.exports = function (RED) {
     }
 
     RED.nodes.registerType("ml-inference", MLInferenceNode);
+
+    // Curated pretrained-model catalog (common use cases). Bundled entries are
+    // exposed with a RELATIVE "models/<file>" path — the loader's allowlist already
+    // includes path.join(__dirname, "models"), so the absolute server path never
+    // needs to leave the server (avoids disclosing the install path to editor clients).
+    RED.httpAdmin.get(
+        "/ml-inference/model-catalog",
+        RED.auth.needsPermission("ml-inference.read"),
+        function (req, res) {
+            try {
+                const cat = JSON.parse(fs.readFileSync(path.join(__dirname, "model-catalog.json"), "utf8"));
+                (cat.models || []).forEach(function (m) {
+                    if (m.source === "bundled" && m.file) m.resolvedPath = "models/" + m.file;
+                });
+                res.json(cat);
+            } catch (e) {
+                res.status(500).json({ error: e.message });
+            }
+        }
+    );
 
     // API endpoint for model info
     RED.httpAdmin.get("/ml-inference/runtimes", function (req, res) {

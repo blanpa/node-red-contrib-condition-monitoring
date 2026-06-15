@@ -1,0 +1,112 @@
+<script type="text/javascript">
+    RED.nodes.registerType('image-preprocess', {
+        category: 'Condition Monitoring Vision',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            inputProperty: { value: "payload" },
+            outputProperty: { value: "payload" },
+            shapeProperty: { value: "tensorShape" },
+            targetWidth: { value: 224, validate: RED.validators.number() },
+            targetHeight: { value: 224, validate: RED.validators.number() },
+            normalize: { value: "0-1" },
+            layout: { value: "nchw" },
+            channelOrder: { value: "rgb" },
+            grayscale: { value: false },
+            resizeMode: { value: "bilinear" },
+            keepImage: { value: true },
+            meanR: { value: "" }, meanG: { value: "" }, meanB: { value: "" },
+            stdR: { value: "" }, stdG: { value: "" }, stdB: { value: "" }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "icon.png",
+        label: function () { return this.name || ("image-preprocess " + (this.targetWidth || 224) + "x" + (this.targetHeight || 224)); },
+        labelStyle: function () { return this.name ? "node_label_italic" : ""; },
+        paletteLabel: "Image Preprocess",
+        oneditprepare: function () {
+            const $n = $("#node-input-normalize");
+            function refresh() { $(".ip-custom").toggle($n.val() === "custom"); }
+            $n.on("change", refresh); refresh();
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="image-preprocess">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-inputProperty"><i class="fa fa-sign-in"></i> Image in</label>
+        <input type="text" id="node-input-inputProperty" placeholder="payload (PNG/JPEG Buffer)">
+    </div>
+    <div class="form-row">
+        <label><i class="fa fa-arrows-alt"></i> Resize to</label>
+        <input type="number" id="node-input-targetWidth" style="width:75px" placeholder="W">
+        <span>×</span>
+        <input type="number" id="node-input-targetHeight" style="width:75px" placeholder="H">
+        <select id="node-input-resizeMode" style="width:110px;margin-left:8px">
+            <option value="bilinear">bilinear</option>
+            <option value="nearest">nearest</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-normalize"><i class="fa fa-balance-scale"></i> Normalize</label>
+        <select id="node-input-normalize">
+            <option value="0-1">0..1 (÷255)</option>
+            <option value="0-255">0..255 (raw)</option>
+            <option value="-1-1">-1..1</option>
+            <option value="imagenet">ImageNet mean/std</option>
+            <option value="custom">custom mean/std</option>
+        </select>
+    </div>
+    <div class="form-row ip-custom">
+        <label><i class="fa fa-sliders"></i> mean RGB</label>
+        <input type="number" id="node-input-meanR" step="0.01" style="width:60px">
+        <input type="number" id="node-input-meanG" step="0.01" style="width:60px">
+        <input type="number" id="node-input-meanB" step="0.01" style="width:60px">
+    </div>
+    <div class="form-row ip-custom">
+        <label><i class="fa fa-sliders"></i> std RGB</label>
+        <input type="number" id="node-input-stdR" step="0.01" style="width:60px">
+        <input type="number" id="node-input-stdG" step="0.01" style="width:60px">
+        <input type="number" id="node-input-stdB" step="0.01" style="width:60px">
+    </div>
+    <div class="form-row">
+        <label for="node-input-layout"><i class="fa fa-cubes"></i> Layout</label>
+        <select id="node-input-layout" style="width:110px">
+            <option value="nchw">NCHW (ONNX)</option>
+            <option value="nhwc">NHWC (TFJS)</option>
+        </select>
+        <select id="node-input-channelOrder" style="width:90px;margin-left:8px">
+            <option value="rgb">RGB</option>
+            <option value="bgr">BGR</option>
+        </select>
+    </div>
+    <div class="form-row">
+        <label for="node-input-grayscale" style="width:auto"><i class="fa fa-adjust"></i> Grayscale</label>
+        <input type="checkbox" id="node-input-grayscale" style="width:auto;vertical-align:middle">
+        <label for="node-input-keepImage" style="width:auto;margin-left:16px">Keep image (msg.image)</label>
+        <input type="checkbox" id="node-input-keepImage" style="width:auto;vertical-align:middle">
+    </div>
+    <div class="form-row">
+        <label for="node-input-outputProperty"><i class="fa fa-sign-out"></i> Tensor out</label>
+        <input type="text" id="node-input-outputProperty" placeholder="payload">
+        <label for="node-input-shapeProperty" style="margin-left:8px">Shape</label>
+        <input type="text" id="node-input-shapeProperty" placeholder="tensorShape" style="width:120px">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="image-preprocess">
+    <p>Decodes a PNG/JPEG image and turns it into a normalized tensor for
+    <code>ml-inference</code>. Set the ml-inference <b>Input shape</b> to match
+    (e.g. <code>[1,3,224,224]</code>).</p>
+    <h3>Output</h3>
+    <ul>
+        <li><code>msg.payload</code> — flat tensor (Float array), layout NCHW/NHWC.</li>
+        <li><code>msg.tensorShape</code> — the tensor shape.</li>
+        <li><code>msg.image</code> — resized image (PNG Buffer) for vision-annotator overlays.</li>
+        <li><code>msg.preprocess</code> — metadata (source size, target size, normalize…).</li>
+    </ul>
+</script>

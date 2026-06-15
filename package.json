@@ -1,10 +1,11 @@
 {
   "name": "node-red-contrib-condition-monitoring",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Node-RED Nodes for anomaly detection, predictive maintenance, and time series analysis",
   "files": [
     "nodes/",
     "examples/",
+    "!examples/test-suite.json",
     "CHANGELOG.md",
     "SECURITY.md"
   ],
@@ -31,7 +32,12 @@
       "ml-inference": "nodes/ml-inference.js",
       "pca-anomaly": "nodes/pca-anomaly.js",
       "training-data-collector": "nodes/training-data-collector.js",
-      "llm-analyzer": "nodes/llm-analyzer.js"
+      "llm-analyzer": "nodes/llm-analyzer.js",
+      "condition-monitoring-source": "nodes/condition-monitoring-source.js",
+      "vision-annotator": "nodes/vision-annotator.js",
+      "image-preprocess": "nodes/image-preprocess.js",
+      "image-source": "nodes/image-source.js",
+      "json-source": "nodes/json-source.js"
     }
   },
   "keywords": [
@@ -75,7 +81,11 @@
     "claude",
     "anthropic",
     "llm-analysis",
-    "openai"
+    "openai",
+    "simulator",
+    "data-source",
+    "synthetic-data",
+    "vibration-simulation"
   ],
   "author": "blanpa",
   "license": "MIT",
@@ -89,9 +99,11 @@
   "homepage": "https://github.com/blanpa/node-red-contrib-condition-monitoring#readme",
   "dependencies": {
     "fft.js": "^4.0.4",
+    "jpeg-js": "^0.4.4",
     "ml-isolation-forest": "^0.1.0",
     "ml-matrix": "^6.12.1",
     "ml-pca": "^4.1.1",
+    "pngjs": "^7.0.0",
     "simple-statistics": "^7.8.9"
   },
   "optionalDependencies": {

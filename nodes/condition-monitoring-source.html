@@ -1,0 +1,433 @@
+<script type="text/javascript">
+    RED.nodes.registerType('condition-monitoring-source', {
+        category: 'Condition Monitoring Demo',
+        color: '#9482f1',
+        defaults: {
+            name: { value: "" },
+            assetType: { value: "pump" },
+            rpm: { value: 1500, validate: RED.validators.number() },
+            load: { value: 70, validate: RED.validators.number() },
+            degRate: { value: 0.06, validate: RED.validators.number() },
+            noise: { value: 0.3, validate: RED.validators.number() },
+            intervalMs: { value: 1000, validate: RED.validators.number() },
+            hoursPerSample: { value: 2, validate: RED.validators.number() },
+            faultImbalance: { value: 0 },
+            faultMisalignment: { value: 0 },
+            faultBearing: { value: 0 },
+            faultLooseness: { value: 0 },
+            warnThreshold: { value: 4.5, validate: RED.validators.number() },
+            alarmThreshold: { value: 7.1, validate: RED.validators.number() },
+            autoStart: { value: false },
+            onFailure: { value: "reset" },
+            outputFormat: { value: "object" },
+            sampleRate: { value: 2560, validate: RED.validators.number() },
+            frameSize: { value: 2048, validate: RED.validators.number() },
+            outputTopic: { value: "" },
+            seed: { value: "" },
+            debug: { value: false }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "icon.png",
+        label: function () {
+            return this.name || "CM Sensor Source";
+        },
+        labelStyle: function () {
+            return this.name ? "node_label_italic" : "";
+        },
+        paletteLabel: "CM Sensor Source",
+        oneditprepare: function () {
+            // Collapsible sections
+            $(".cm-section-header").on("click", function () {
+                var $content = $(this).next(".cm-section-content");
+                var $icon = $(this).find(".cm-collapse-icon");
+                $content.slideToggle(200);
+                $icon.toggleClass("fa-chevron-down fa-chevron-up");
+            });
+
+            // Show waveform settings (sample rate / frame size) only in waveform mode
+            var $fmt = $("#node-input-outputFormat");
+            function refreshFmt() {
+                $(".cm-wave-only").toggle($fmt.val() === "waveform");
+            }
+            $fmt.on("change", refreshFmt);
+            refreshFmt();
+
+            // Keep the number boxes next to each fault slider in sync
+            function bindPair(slider, number) {
+                var $slider = $(slider);
+                var $number = $(number);
+                $slider.on("input", function () {
+                    $number.val($slider.val());
+                });
+                $number.on("change", function () {
+                    $slider.val($number.val());
+                });
+                $slider.val($number.val());
+            }
+            bindPair("#cm-imb-slider", "#node-input-faultImbalance");
+            bindPair("#cm-mis-slider", "#node-input-faultMisalignment");
+            bindPair("#cm-bear-slider", "#node-input-faultBearing");
+            bindPair("#cm-loose-slider", "#node-input-faultLooseness");
+
+            // Scenario presets fill the fault fields with one click
+            var presets = {
+                healthy: { imb: 0, mis: 0, bear: 0, loose: 0, deg: 0.02 },
+                imbalance: { imb: 0.65, mis: 0.1, bear: 0, loose: 0, deg: 0.06 },
+                misalign: { imb: 0.1, mis: 0.7, bear: 0, loose: 0.1, deg: 0.08 },
+                bearing: { imb: 0, mis: 0.1, bear: 0.75, loose: 0, deg: 0.16 },
+                looseness: { imb: 0.15, mis: 0.2, bear: 0, loose: 0.6, deg: 0.1 }
+            };
+            $("#cm-preset").on("change", function () {
+                var p = presets[$(this).val()];
+                if (!p) return;
+                $("#node-input-faultImbalance").val(p.imb);
+                $("#cm-imb-slider").val(p.imb);
+                $("#node-input-faultMisalignment").val(p.mis);
+                $("#cm-mis-slider").val(p.mis);
+                $("#node-input-faultBearing").val(p.bear);
+                $("#cm-bear-slider").val(p.bear);
+                $("#node-input-faultLooseness").val(p.loose);
+                $("#cm-loose-slider").val(p.loose);
+                $("#node-input-degRate").val(p.deg);
+            });
+        },
+        oneditsave: function () {}
+    });
+</script>
+
+<style>
+    .cm-section {
+        background: #fafafa;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        overflow: hidden;
+    }
+    .cm-section-header {
+        background: #26a69a;
+        color: #fff;
+        padding: 10px 14px;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        user-select: none;
+    }
+    .cm-section-header:hover {
+        background: #2bbbad;
+    }
+    .cm-section-content {
+        padding: 14px;
+    }
+    .cm-config-item {
+        display: flex;
+        flex-direction: column;
+        margin-bottom: 12px;
+    }
+    .cm-config-item label {
+        font-size: 11px;
+        color: #666;
+        margin-bottom: 6px;
+        font-weight: 500;
+    }
+    .cm-config-item input,
+    .cm-config-item select {
+        padding: 8px 12px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 13px;
+    }
+    .cm-grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+    }
+    .cm-fault-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+    }
+    .cm-fault-row > label {
+        flex: 0 0 150px;
+        font-size: 12px;
+        color: #555;
+    }
+    .cm-fault-row input[type="range"] {
+        flex: 1;
+    }
+    .cm-fault-row input[type="number"] {
+        width: 60px;
+        padding: 4px;
+        border: 1px solid #ddd;
+        border-radius: 3px;
+    }
+    .cm-help-text {
+        font-size: 11px;
+        color: #888;
+        margin-top: 4px;
+        font-style: italic;
+    }
+    .cm-info-box {
+        background: #e0f2f1;
+        border-left: 3px solid #26a69a;
+        padding: 10px 12px;
+        border-radius: 4px;
+        margin-top: 10px;
+        font-size: 12px;
+    }
+</style>
+
+<script type="text/html" data-template-name="condition-monitoring-source">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+
+    <!-- Asset & Machine -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cogs"></i> Asset &amp; Machine</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-grid-2">
+                <div class="cm-config-item">
+                    <label for="node-input-assetType"><i class="fa fa-industry"></i> Asset type</label>
+                    <select id="node-input-assetType">
+                        <option value="pump">Centrifugal pump</option>
+                        <option value="motor">Electric motor</option>
+                        <option value="fan">Fan</option>
+                        <option value="gearbox">Gearbox</option>
+                    </select>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-rpm"><i class="fa fa-refresh"></i> Speed (RPM)</label>
+                    <input type="number" id="node-input-rpm" min="1" max="100000" step="1">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Operation & Degradation -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-line-chart"></i> Operation &amp; Degradation</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-grid-2">
+                <div class="cm-config-item">
+                    <label for="node-input-load"><i class="fa fa-tachometer"></i> Load (%)</label>
+                    <input type="number" id="node-input-load" min="0" max="100" step="1">
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-degRate"><i class="fa fa-arrow-down"></i> Degradation rate (%/h)</label>
+                    <input type="number" id="node-input-degRate" min="0" max="100" step="0.005">
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-noise"><i class="fa fa-random"></i> Measurement noise (0–1)</label>
+                    <input type="number" id="node-input-noise" min="0" max="1" step="0.02">
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-hoursPerSample"><i class="fa fa-clock-o"></i> Sim hours per sample</label>
+                    <input type="number" id="node-input-hoursPerSample" min="0.0001" step="0.5">
+                </div>
+            </div>
+            <div class="cm-help-text">Health loss = degradation rate × load factor × (1 + Σ fault severity).</div>
+        </div>
+    </div>
+
+    <!-- Fault Injection -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-bug"></i> Fault injection</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-config-item">
+                <label for="cm-preset"><i class="fa fa-magic"></i> Scenario preset</label>
+                <select id="cm-preset">
+                    <option value="">— select —</option>
+                    <option value="healthy">Healthy</option>
+                    <option value="imbalance">Imbalance</option>
+                    <option value="misalign">Misalignment</option>
+                    <option value="bearing">Bearing fault</option>
+                    <option value="looseness">Mechanical looseness</option>
+                </select>
+            </div>
+            <div class="cm-fault-row">
+                <label>Imbalance (1×)</label>
+                <input type="range" id="cm-imb-slider" min="0" max="1" step="0.01">
+                <input type="number" id="node-input-faultImbalance" min="0" max="1" step="0.01">
+            </div>
+            <div class="cm-fault-row">
+                <label>Misalignment (2×)</label>
+                <input type="range" id="cm-mis-slider" min="0" max="1" step="0.01">
+                <input type="number" id="node-input-faultMisalignment" min="0" max="1" step="0.01">
+            </div>
+            <div class="cm-fault-row">
+                <label>Bearing fault (~3.5×)</label>
+                <input type="range" id="cm-bear-slider" min="0" max="1" step="0.01">
+                <input type="number" id="node-input-faultBearing" min="0" max="1" step="0.01">
+            </div>
+            <div class="cm-fault-row">
+                <label>Looseness (0.5×)</label>
+                <input type="range" id="cm-loose-slider" min="0" max="1" step="0.01">
+                <input type="number" id="node-input-faultLooseness" min="0" max="1" step="0.01">
+            </div>
+            <div class="cm-help-text">0 = inactive, 1 = fully developed. Faults raise vibration and accelerate degradation.</div>
+        </div>
+    </div>
+
+    <!-- Thresholds -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-exclamation-triangle"></i> Thresholds (vibration RMS)</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-grid-2">
+                <div class="cm-config-item">
+                    <label for="node-input-warnThreshold" style="color:#f9a825;"><i class="fa fa-exclamation-circle"></i> Warning ≥ (mm/s)</label>
+                    <input type="number" id="node-input-warnThreshold" min="0" step="0.1">
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-alarmThreshold" style="color:#e53935;"><i class="fa fa-times-circle"></i> Alarm ≥ (mm/s)</label>
+                    <input type="number" id="node-input-alarmThreshold" min="0" step="0.1">
+                </div>
+            </div>
+            <div class="cm-info-box">Defaults follow ISO 10816 (class II): warning 4.5 mm/s, alarm 7.1 mm/s.</div>
+        </div>
+    </div>
+
+    <!-- Streaming -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-play-circle"></i> Streaming &amp; Output</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-grid-2">
+                <div class="cm-config-item">
+                    <label for="node-input-intervalMs"><i class="fa fa-clock-o"></i> Interval (ms)</label>
+                    <input type="number" id="node-input-intervalMs" min="50" step="50">
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-onFailure"><i class="fa fa-repeat"></i> On failure (health 0)</label>
+                    <select id="node-input-onFailure">
+                        <option value="reset">Reset (100%)</option>
+                        <option value="stop">Stop stream</option>
+                        <option value="continue">Continue at 0%</option>
+                    </select>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-outputFormat"><i class="fa fa-sign-out"></i> Output format</label>
+                    <select id="node-input-outputFormat">
+                        <option value="object">Object (all sensors + state)</option>
+                        <option value="value">Value (vibration RMS only)</option>
+                        <option value="waveform">Waveform (array, for Signal Analyzer / FFT)</option>
+                    </select>
+                </div>
+                <div class="cm-grid-2 cm-wave-only">
+                    <div class="cm-config-item">
+                        <label for="node-input-sampleRate"><i class="fa fa-wave-square"></i> Sample rate (Hz)</label>
+                        <input type="number" id="node-input-sampleRate" min="64" step="1">
+                    </div>
+                    <div class="cm-config-item">
+                        <label for="node-input-frameSize"><i class="fa fa-th"></i> Frame size (samples)</label>
+                        <input type="number" id="node-input-frameSize" min="16" step="1">
+                    </div>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-outputTopic"><i class="fa fa-tag"></i> Output Topic</label>
+                    <input type="text" id="node-input-outputTopic" placeholder="empty = asset type">
+                </div>
+            </div>
+            <div class="cm-config-item" style="margin-top:8px;">
+                <label><input type="checkbox" id="node-input-autoStart" style="width:auto; margin-right:6px;"> Auto-start on deploy</label>
+            </div>
+        </div>
+    </div>
+
+    <!-- Advanced -->
+    <div class="cm-section">
+        <div class="cm-section-header">
+            <span><i class="fa fa-cog"></i> Advanced</span>
+            <i class="fa fa-chevron-down cm-collapse-icon"></i>
+        </div>
+        <div class="cm-section-content">
+            <div class="cm-grid-2">
+                <div class="cm-config-item">
+                    <label for="node-input-seed"><i class="fa fa-hashtag"></i> Seed (optional)</label>
+                    <input type="number" id="node-input-seed" placeholder="empty = random">
+                    <div class="cm-help-text">Fixed seed = reproducible stream.</div>
+                </div>
+                <div class="cm-config-item">
+                    <label><input type="checkbox" id="node-input-debug" style="width:auto; margin-right:6px;"> Debug logging</label>
+                </div>
+            </div>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="condition-monitoring-source">
+    <p>Synthetic <b>data source</b> for condition monitoring and predictive maintenance.
+    Streams the sensor data of a degrading machine with configurable load,
+    degradation, noise and injectable fault signatures.</p>
+
+    <h3>Operation</h3>
+    <p>The node works as a generator. It can auto-start on deploy (<i>Auto-start</i>)
+    or be driven by control messages and individual inject triggers.</p>
+
+    <h3>Control via input</h3>
+    <dl class="message-properties">
+        <dt>msg.payload <span class="property-type">"start" | "stop" | "reset"</span></dt>
+        <dd>Start/stop the stream, or reset health and operating hours. Alternatively
+        <code>msg.start</code>, <code>msg.stop</code>, <code>msg.reset</code> (true).</dd>
+        <dt>msg.config <span class="property-type">object</span></dt>
+        <dd>Runtime override, e.g.:
+        <pre>msg.config = {
+  load: 90,
+  degRate: 0.2,
+  noise: 0.1,
+  faults: { bearing: 0.8, imbalance: 0.2 },
+  warnThreshold: 4.5,
+  alarmThreshold: 7.1,
+  intervalMs: 500
+};</pre>
+        Also set <code>msg.emit = true</code> to emit a sample immediately.</dd>
+        <dt>any other message</dt>
+        <dd>Emits exactly one sample (manual trigger, e.g. via an inject node).</dd>
+    </dl>
+
+    <h3>Output (object mode)</h3>
+    <pre>{
+  asset: "pump",
+  timestamp: 1700000000000,
+  simHours: 2,
+  health: 99.88,
+  status: "normal",            // normal | warning | alarm
+  rul: { hours: 1664, label: "69.3 d", lossPerHour: 0.06 },
+  rpm: 1500,
+  shaftFrequencyHz: 25,
+  sensors: { vibrationRMS: 1.74, temperature: 57.6, current: 11.7, pressure: 4.6 },
+  faults: [ { type: "bearing", frequencyHz: 87.5, severity: "high", ... } ],
+  thresholds: { warn: 4.5, alarm: 7.1 }
+}</pre>
+    <p><code>msg.status</code>, <code>msg.health</code>, <code>msg.rul</code> and
+    <code>msg.alarm</code> are also set. In <i>value</i> mode <code>msg.payload</code> holds
+    only the vibration (mm/s); the full object is on <code>msg.condition</code>. In
+    <i>waveform</i> mode <code>msg.payload</code> is a raw vibration time-signal (array)
+    with <code>msg.samplingRate</code>, for the signal-analyzer.</p>
+
+    <h3>Model</h3>
+    <ul>
+        <li>Health decreases by degradation rate × load factor × (1 + Σ fault severity).</li>
+        <li>Vibration, temperature, current and pressure are derived from health, load and faults.</li>
+        <li>Fault harmonics are computed relative to the shaft frequency f_r = RPM ÷ 60.</li>
+        <li>RUL = health ÷ health loss per hour.</li>
+    </ul>
+</script>

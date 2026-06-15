@@ -483,7 +483,7 @@ describe("State Persistence", function () {
                 const n2 = helper.getNode("n2");
 
                 let msgCount = 0;
-                n2.on("input", function (msg) {
+                n2.on("input", function (_msg) {
                     msgCount++;
                     if (msgCount >= 3) {
                         expect(n1.healthHistory.length).toBe(3);

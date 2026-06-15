@@ -1095,7 +1095,13 @@ module.exports = function (RED) {
             }
         }
 
-        node.on("input", function (msg) {
+        node.on("input", function (msg, send, done) {
+            // Node-RED >=1.0 passes send/done; shim for older runtimes.
+            done =
+                done ||
+                function (err) {
+                    if (err) node.error(err, msg);
+                };
             try {
                 // ==========================================
                 // FEEDBACK PROCESSING (Adaptive Thresholds)
@@ -1121,6 +1127,7 @@ module.exports = function (RED) {
                         _msgid: msg._msgid
                     };
                     node.send([feedbackMsg, null]);
+                    done();
                     return;
                 }
 
@@ -1169,6 +1176,7 @@ module.exports = function (RED) {
                     } else {
                         node.send([batchMsg, null]);
                     }
+                    done();
                     return;
                 }
 
@@ -1222,6 +1230,7 @@ module.exports = function (RED) {
                     }
 
                     node.status({ fill: "blue", shape: "ring", text: activeMethod + " - reset" });
+                    done();
                     return;
                 }
 
@@ -1229,6 +1238,7 @@ module.exports = function (RED) {
                 if (typeof msg.payload === "object" && msg.payload !== null && !Array.isArray(msg.payload)) {
                     // JSON object input: { "sensor1": 25.5, "sensor2": 30.2, ... }
                     processMultiSensorInput(msg, msg.payload);
+                    done();
                     return;
                 } else if (Array.isArray(msg.payload) && msg.payload.length > 0 && typeof msg.payload[0] === "object") {
                     // Array of sensor objects: [{ name: "temp", value: 25.5 }, ...]
@@ -1239,6 +1249,7 @@ module.exports = function (RED) {
                         }
                     });
                     processMultiSensorInput(msg, sensorData);
+                    done();
                     return;
                 }
 
@@ -1252,19 +1263,19 @@ module.exports = function (RED) {
                     const trimmed = msg.payload.trim();
                     if (trimmed === "" || !/^-?\d*\.?\d+(?:[eE][-+]?\d+)?$/.test(trimmed)) {
                         node.status({ fill: "red", shape: "ring", text: "invalid input" });
-                        node.error("Payload is not a valid number: " + msg.payload, msg);
+                        done("Payload is not a valid number: " + msg.payload);
                         return;
                     }
                     value = parseFloat(trimmed);
                 } else {
                     node.status({ fill: "red", shape: "ring", text: "invalid input" });
-                    node.error("Payload must be a number or numeric string, got: " + typeof msg.payload, msg);
+                    done("Payload must be a number or numeric string, got: " + typeof msg.payload);
                     return;
                 }
 
                 if (!Number.isFinite(value)) {
                     node.status({ fill: "red", shape: "ring", text: "invalid input" });
-                    node.error("Payload is not a finite number (NaN or Infinity)", msg);
+                    done("Payload is not a finite number (NaN or Infinity)");
                     return;
                 }
 
@@ -1290,6 +1301,7 @@ module.exports = function (RED) {
                         text: "warmup " + node.dataBuffer.length + "/" + minRequired
                     });
                     node.send(msg);
+                    done();
                     return;
                 }
 
@@ -1449,9 +1461,10 @@ module.exports = function (RED) {
                 } else {
                     node.send([outputMsg, null]);
                 }
+                done();
             } catch (err) {
                 node.status({ fill: "red", shape: "ring", text: "error" });
-                node.error("Error in anomaly detection: " + err.message, msg);
+                done("Error in anomaly detection: " + err.message);
             }
         });
 

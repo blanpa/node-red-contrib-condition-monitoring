@@ -1,0 +1,74 @@
+{
+    "version": 1,
+    "note": "Curated pretrained models for common condition-monitoring / vision use cases. Entries with source 'url' are fetched on demand by ml-inference (verified against sha256, cached); 'bundled' entries ship with the package. Weights are NOT redistributed here — see each entry's license.",
+    "models": [
+        {
+            "id": "imagenet-squeezenet",
+            "useCase": "Image classification (general, 1000 ImageNet classes)",
+            "task": "classification",
+            "source": "url",
+            "url": "https://github.com/onnx/models/raw/main/validated/vision/classification/squeezenet/model/squeezenet1.1-7.onnx",
+            "sha256": "1eeff551a67ae8d565ca33b572fc4b66e3ef357b0eb2863bb9ff47a918cc4088",
+            "license": "BSD-3-Clause",
+            "input": { "shape": [1, 3, 224, 224], "layout": "nchw", "channelOrder": "rgb", "normalize": "imagenet" },
+            "output": { "annotation": "classification", "labels": "imagenet" }
+        },
+        {
+            "id": "coco-yolov10n",
+            "useCase": "Object detection (COCO, 80 classes, NMS-free)",
+            "task": "detection",
+            "source": "url",
+            "url": "https://huggingface.co/onnx-community/yolov10n/resolve/main/onnx/model.onnx",
+            "sha256": "a77dd863933f184a19e84361c64b788228a7c7dacc2c78939239a96ad3efca3b",
+            "license": "AGPL-3.0",
+            "input": { "shape": [1, 3, 640, 640], "layout": "nchw", "channelOrder": "rgb", "normalize": "0-1" },
+            "output": { "annotation": "boxes", "boxFormat": "xyxy", "labels": "coco80" }
+        },
+        {
+            "id": "coco-pose-yolov8n",
+            "useCase": "Human pose / 17 keypoints (COCO)",
+            "task": "keypoints",
+            "source": "url",
+            "url": "https://huggingface.co/Xenova/yolov8n-pose/resolve/main/onnx/model.onnx",
+            "sha256": "04f6d2416266f2aba6c5ba8b26de33ed9eba3279f972ac02e33f9f1366547586",
+            "license": "AGPL-3.0",
+            "input": { "shape": [1, 3, 640, 640], "layout": "nchw", "channelOrder": "rgb", "normalize": "0-1" },
+            "output": { "annotation": "keypoints", "decode": "yolo-pose", "skeleton": "coco17" }
+        },
+        {
+            "id": "depth-anything-v2-small",
+            "useCase": "Monocular depth estimation",
+            "task": "depth",
+            "source": "url",
+            "url": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_quantized.onnx",
+            "sha256": "fcf51f1b230362b28690bb9d1809bf0431f29cad20534e3f589bd7285547f20d",
+            "license": "Apache-2.0",
+            "input": { "shape": [1, 3, 252, 252], "layout": "nchw", "channelOrder": "rgb", "normalize": "imagenet" },
+            "output": { "annotation": "heatmap", "colormap": "jet" }
+        },
+        {
+            "id": "surface-defect-seg",
+            "useCase": "Surface defect segmentation (bright pit/spot)",
+            "task": "segmentation",
+            "source": "bundled",
+            "file": "defect_seg.onnx",
+            "license": "MIT",
+            "input": { "shape": [1, 3, 32, 32], "layout": "nchw", "channelOrder": "rgb", "normalize": "0-1" },
+            "output": { "annotation": "segmentation" }
+        },
+        {
+            "id": "bearing-fault-clf",
+            "useCase": "Vibration fault classification (5 classes)",
+            "task": "classification",
+            "source": "bundled",
+            "file": "bearing_fault_clf.onnx",
+            "license": "MIT",
+            "input": {
+                "shape": [1, 5],
+                "layout": "vector",
+                "features": ["rms", "amp_1x", "amp_2x", "amp_3.5x", "amp_0.5x"]
+            },
+            "output": { "annotation": "classification", "labels": "bearing" }
+        }
+    ]
+}

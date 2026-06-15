@@ -1,32 +1,20 @@
 services:
   node-red:
-    image: nodered/node-red:latest
+    image: nodered/node-red:latest-debian
     container_name: node-red-condition-monitoring
     user: "1000:1000"
     ports:
-      - "1880:1880"
+      - "${NODE_RED_PORT:-1880}:1880"
     volumes:
       # Node-RED Daten (Flows, Settings)
       - ./node-red-data:/data
-      # Dein Modul direkt in node_modules mounten
+      # Alle node_modules auf einmal mounten (statt jedes Paket einzeln)
+      - ./node_modules:/data/node_modules
+      # Dein Modul direkt in node_modules mounten (genestet über dem node_modules-Mount)
       - ./nodes:/data/node_modules/node-red-contrib-condition-monitoring/nodes
       - ./package.json:/data/node_modules/node-red-contrib-condition-monitoring/package.json
-      # ML Runtime Dependencies (TensorFlow.js, ONNX)
-      - ./node_modules/@tensorflow:/data/node_modules/@tensorflow
-      - ./node_modules/onnxruntime-node:/data/node_modules/onnxruntime-node
-      - ./node_modules/onnxruntime-common:/data/node_modules/onnxruntime-common
-      # ML und Statistik Libraries
-      - ./node_modules/ml-isolation-forest:/data/node_modules/ml-isolation-forest
-      - ./node_modules/simple-statistics:/data/node_modules/simple-statistics
-      - ./node_modules/ml-pca:/data/node_modules/ml-pca
-      - ./node_modules/ml-matrix:/data/node_modules/ml-matrix
-      - ./node_modules/ml-array-mean:/data/node_modules/ml-array-mean
-      - ./node_modules/ml-array-rescale:/data/node_modules/ml-array-rescale
-      - ./node_modules/ml-array-min:/data/node_modules/ml-array-min
-      - ./node_modules/ml-array-max:/data/node_modules/ml-array-max
-      - ./node_modules/is-any-array:/data/node_modules/is-any-array
-      # FFT Library
-      - ./node_modules/fft.js:/data/node_modules/fft.js
+      # ML model artifacts (for ml-inference)
+      - ./test-models:/data/models
     environment:
       - NODE_OPTIONS=--max_old_space_size=4096
       - TZ=Europe/Berlin

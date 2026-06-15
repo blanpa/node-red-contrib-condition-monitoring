@@ -29,6 +29,10 @@ training/data/usecase_pump/pump_dataset.csv
 node-red-data/*
 !node-red-data/flows.json
 
+# Vision test/demo models + sample images (reproducible via tools/fetch-models.sh
+# and the python generators) — kept out of git to avoid ~50 MB of bloat.
+test-models/
+
 # Trained models (users should train their own or download)
 training/models/*.onnx
 training/models/*.tflite

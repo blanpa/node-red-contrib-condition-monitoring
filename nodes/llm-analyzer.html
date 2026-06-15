@@ -1,6 +1,6 @@
 <script type="text/javascript">
     RED.nodes.registerType('llm-analyzer', {
-        category: 'condition-monitoring',
+        category: 'Condition Monitoring LLM',
         color: '#9482f1',
         defaults: {
             name:                { value: "" },
@@ -45,7 +45,7 @@
         },
         inputs: 1,
         outputs: 1,
-        icon: "font-awesome/fa-comment",
+        icon: "icon.png",
         label: function () {
             return this.name || (this.sensorName ? "llm: " + this.sensorName : "llm-analyzer");
         },

@@ -542,6 +542,17 @@
                 "user": false,
                 "module": "node-red-contrib-condition-monitoring",
                 "file": "/data/node_modules/node-red-contrib-condition-monitoring/nodes/llm-analyzer.js"
+            },
+            "condition-monitoring-source": {
+                "name": "condition-monitoring-source",
+                "types": [
+                    "condition-monitoring-source"
+                ],
+                "enabled": true,
+                "local": true,
+                "user": false,
+                "module": "node-red-contrib-condition-monitoring",
+                "file": "/data/node_modules/node-red-contrib-condition-monitoring/nodes/condition-monitoring-source.js"
             }
         }
     }

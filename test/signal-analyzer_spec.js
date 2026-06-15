@@ -409,7 +409,7 @@ describe("signal-analyzer Node", function () {
     it("should provide correct frequency resolution", function (done) {
         const fftSize = 256;
         const samplingRate = 1000;
-        const expectedResolution = samplingRate / fftSize; // 3.90625 Hz
+        const _expectedResolution = samplingRate / fftSize; // 3.90625 Hz
 
         const flow = [
             {
