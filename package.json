@@ -117,9 +117,9 @@
     "eslint": "^10.5.0",
     "eslint-config-prettier": "^10.1.8",
     "fast-check": "^4.7.0",
-    "globals": "^16.0.0",
+    "globals": "^17.7.0",
     "jest": "^30.3.0",
-    "node-red": "^4.1.8",
+    "node-red": "^5.0.0",
     "node-red-node-test-helper": "^0.3.6",
     "prettier": "^3.3.0"
   },
