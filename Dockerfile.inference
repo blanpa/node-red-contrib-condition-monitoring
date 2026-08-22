@@ -1,0 +1,52 @@
+# Remote Inference Server for Node-RED Condition Monitoring
+# =========================================================
+# Runs nodes/python/inference_server.py as a standalone sidecar container so the
+# ML runtime (TensorFlow / scikit-learn / TFLite) lives outside the Node-RED
+# image and off the Node-RED event loop.
+#
+# The transport server uses only the Python standard library — no web framework
+# is installed, just the ML runtimes the models need.
+#
+# Build:  docker build -f Dockerfile.inference -t cm-inference .
+# Run:    docker run -p 8770:8770 -v "$PWD/test-models:/data/models:ro" cm-inference
+#
+# Node-RED selects this backend by setting CM_INFERENCE_URL (see docker-compose).
+
+FROM python:3.12-slim
+
+LABEL maintainer="Node-RED Condition Monitoring"
+LABEL description="Remote inference sidecar (TFLite / Keras / scikit-learn)"
+
+# curl is only needed for the container HEALTHCHECK below.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ML runtimes. TensorFlow is the heavy one and only needed for Keras/SavedModel
+# models; drop it from this list if you only run scikit-learn or TFLite models.
+RUN pip install --no-cache-dir \
+    numpy \
+    scikit-learn \
+    joblib \
+    tflite-runtime \
+    && pip install --no-cache-dir tensorflow-cpu || echo "tensorflow-cpu not installed (Keras models unavailable)"
+
+WORKDIR /app
+
+# Both files are copied: inference_server.py imports the model loaders from
+# python_bridge.py so the two backends cannot drift apart.
+COPY nodes/python/inference_server.py /app/inference_server.py
+COPY nodes/python/python_bridge.py /app/python_bridge.py
+
+# Models are mounted in at runtime (shared volume with Node-RED). The path must
+# match what Node-RED resolves locally — see docs/REMOTE-INFERENCE.md.
+RUN mkdir -p /data/models
+
+ENV CM_INFERENCE_HOST=0.0.0.0
+ENV CM_INFERENCE_PORT=8770
+EXPOSE 8770
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8770/health || exit 1
+
+CMD ["python", "/app/inference_server.py"]

@@ -1,0 +1,55 @@
+# Horizontal scaling example: multiple inference replicas
+# ========================================================
+# Two named inference replicas, with Node-RED sharding requests by model_id
+# (consistent hashing in nodes/remote-python-bridge.js). Each model's load +
+# predict + unload always hit the same replica, so the stateful in-memory model
+# cache stays correct without an external load balancer.
+#
+# Usage (layered on top of the base compose):
+#   docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --build
+#
+# Add more replicas by copying an `inferenceN` block and appending its URL to
+# CM_INFERENCE_URL. Treat the replica list as fixed for a deployment — changing
+# it reshards models, so restart Node-RED after editing it. For elastic
+# autoscaling instead, front a single URL with a model-server stack (Triton /
+# KServe) — see docs/REMOTE-INFERENCE.md.
+
+services:
+  node-red:
+    environment:
+      - CM_INFERENCE_URL=http://inference1:8770,http://inference2:8770
+
+  inference1:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    image: cm-inference:latest
+    container_name: node-red-cm-inference-1
+    expose:
+      - "8770"
+    volumes:
+      - ./test-models:/data/models:ro
+    environment:
+      - CM_INFERENCE_HOST=0.0.0.0
+      - CM_INFERENCE_PORT=8770
+      - TZ=Europe/Berlin
+    restart: unless-stopped
+    networks:
+      - node-red-network
+
+  inference2:
+    image: cm-inference:latest
+    container_name: node-red-cm-inference-2
+    expose:
+      - "8770"
+    volumes:
+      - ./test-models:/data/models:ro
+    environment:
+      - CM_INFERENCE_HOST=0.0.0.0
+      - CM_INFERENCE_PORT=8770
+      - TZ=Europe/Berlin
+    restart: unless-stopped
+    depends_on:
+      - inference1
+    networks:
+      - node-red-network

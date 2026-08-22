@@ -13,10 +13,44 @@ services:
       # Dein Modul direkt in node_modules mounten (genestet über dem node_modules-Mount)
       - ./nodes:/data/node_modules/node-red-contrib-condition-monitoring/nodes
       - ./package.json:/data/node_modules/node-red-contrib-condition-monitoring/package.json
-      # ML model artifacts (for ml-inference)
+      # ML model artifacts (for ml-inference). Mounted at the SAME path in the
+      # inference sidecar below so model paths resolve identically in both.
       - ./test-models:/data/models
     environment:
       - NODE_OPTIONS=--max_old_space_size=4096
+      - TZ=Europe/Berlin
+      # Empty by default -> ml-inference runs the Python ML path in-process.
+      # Set to http://inference:8770 to offload keras/sklearn/tflite inference
+      # to the sidecar container below (start it with: --profile inference).
+      - CM_INFERENCE_URL=${CM_INFERENCE_URL:-}
+    restart: unless-stopped
+    networks:
+      - node-red-network
+
+  # Optional remote inference sidecar. Only starts with `--profile inference`,
+  # so the default `docker compose up` is unchanged.
+  #
+  #   CM_INFERENCE_URL=http://inference:8770 \
+  #     docker compose --profile inference up -d
+  #
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    image: cm-inference:latest
+    container_name: node-red-cm-inference
+    profiles: ["inference"]
+    expose:
+      - "8770"
+    ports:
+      # Exposed on the host for debugging (curl http://localhost:8770/health).
+      - "${CM_INFERENCE_PORT:-8770}:8770"
+    volumes:
+      # Same models, same path as Node-RED -> resolved paths match across both.
+      - ./test-models:/data/models:ro
+    environment:
+      - CM_INFERENCE_HOST=0.0.0.0
+      - CM_INFERENCE_PORT=8770
       - TZ=Europe/Berlin
     restart: unless-stopped
     networks:
@@ -25,4 +59,3 @@ services:
 networks:
   node-red-network:
     driver: bridge
-

@@ -1,0 +1,69 @@
+# Horizontal scaling, load-on-demand mode: `deploy.replicas` from ONE service
+# ===========================================================================
+# Unlike docker-compose.scale.yml (named workers, sharded by model_id), this
+# runs N identical replicas behind a SINGLE service name. Docker's embedded DNS
+# round-robins requests across them, and each replica loads a model on demand
+# (the predict request carries the model path) — so any replica can serve any
+# request. This is the elastic option: bump `replicas` up or down freely.
+#
+# Trade-offs vs. named workers:
+# - A model may end up resident on several replicas (memory up to xN). Bound it
+#   with CM_INFERENCE_MAX_MODELS (LRU eviction).
+# - First hit on a replica pays a cold-start load.
+# - `unload` only reaches one replica; rely on LRU eviction instead.
+#
+# This file is self-contained (run it on its own):
+#   docker compose -f docker-compose.replicas.yml up -d --build --scale inference=3
+# or set the count declaratively via `deploy.replicas` below and:
+#   docker compose -f docker-compose.replicas.yml up -d --build
+
+services:
+  node-red:
+    image: nodered/node-red:latest-debian
+    container_name: node-red-condition-monitoring
+    user: "1000:1000"
+    ports:
+      - "${NODE_RED_PORT:-1880}:1880"
+    volumes:
+      - ./node-red-data:/data
+      - ./node_modules:/data/node_modules
+      - ./nodes:/data/node_modules/node-red-contrib-condition-monitoring/nodes
+      - ./package.json:/data/node_modules/node-red-contrib-condition-monitoring/package.json
+      - ./test-models:/data/models
+    environment:
+      - NODE_OPTIONS=--max_old_space_size=4096
+      - TZ=Europe/Berlin
+      # Single service name -> Docker DNS round-robins across the replicas.
+      - CM_INFERENCE_URL=http://inference:8770
+    restart: unless-stopped
+    depends_on:
+      - inference
+    networks:
+      - node-red-network
+
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    image: cm-inference:latest
+    # No container_name / host port mapping: both must be omitted so the service
+    # can scale to multiple containers.
+    expose:
+      - "8770"
+    volumes:
+      - ./test-models:/data/models:ro
+    environment:
+      - CM_INFERENCE_HOST=0.0.0.0
+      - CM_INFERENCE_PORT=8770
+      # Bound resident models per replica (LRU). 0 = unlimited.
+      - CM_INFERENCE_MAX_MODELS=${CM_INFERENCE_MAX_MODELS:-8}
+      - TZ=Europe/Berlin
+    deploy:
+      replicas: 3
+    restart: unless-stopped
+    networks:
+      - node-red-network
+
+networks:
+  node-red-network:
+    driver: bridge

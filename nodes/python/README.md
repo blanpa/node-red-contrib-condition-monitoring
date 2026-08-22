@@ -14,6 +14,20 @@ Main Python bridge for ML inference. Communicates with Node.js via JSON over std
 
 **Usage:** Automatically spawned by `python-bridge-manager.js`
 
+### inference_server.py
+Remote inference server — the **HTTP sibling of `python_bridge.py`**. Serves the
+same TFLite/Keras/scikit-learn models from a separate sidecar container so the ML
+runtime lives outside Node-RED. Reuses the model loaders from `python_bridge.py`
+so the two backends cannot drift apart. Standard-library only (no Flask).
+
+**Endpoints:** `GET /health`, `GET /status`, `POST /load`, `POST /predict`,
+`POST /unload` (port `8770`).
+
+**Usage:** Selected automatically when `CM_INFERENCE_URL` is set on the Node-RED
+side (`nodes/remote-python-bridge.js` is the client). See
+[`docs/REMOTE-INFERENCE.md`](../../docs/REMOTE-INFERENCE.md) and
+`Dockerfile.inference`.
+
 ### max_bridge.py
 HTTP server for MAX Engine integration. Provides optimized ONNX inference.
 

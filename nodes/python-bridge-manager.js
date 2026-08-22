@@ -361,11 +361,26 @@ class PythonBridgeManager extends EventEmitter {
 let globalBridge = null;
 
 /**
- * Get or create the global Python bridge instance
+ * Get or create the global Python bridge instance.
+ *
+ * Transport is chosen once, at first use:
+ * - If `CM_INFERENCE_URL` is set, return a RemotePythonBridge that talks to a
+ *   separate inference container (nodes/python/inference_server.py) over HTTP.
+ *   This keeps the ML runtime out of the Node-RED process/image.
+ * - Otherwise return the in-process subprocess bridge (default, unchanged).
+ *
+ * Both expose the same async surface (start/loadModel/predict/unloadModel/stop),
+ * so ml-inference's keras/sklearn/tflite paths work either way.
  */
 function getGlobalBridge() {
     if (!globalBridge) {
-        globalBridge = new PythonBridgeManager();
+        const remoteUrl = process.env.CM_INFERENCE_URL;
+        if (remoteUrl) {
+            const { RemotePythonBridge } = require("./remote-python-bridge");
+            globalBridge = new RemotePythonBridge({ serverUrl: remoteUrl });
+        } else {
+            globalBridge = new PythonBridgeManager();
+        }
     }
     return globalBridge;
 }
