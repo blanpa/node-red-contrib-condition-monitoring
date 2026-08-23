@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ✨ Added
+
+- **`signal-analyzer`: one buffer per device (`groupBy`)** — a single node can now
+  serve an interleaved stream from many machines. Set **Group By** to a message
+  property (typically `topic`, nested paths like `payload.deviceId` work too) and
+  the node keeps an independent sample buffer per value, emitting one result per
+  device tagged with `msg.group`. Works in all five modes (fft, vibration, peaks,
+  envelope, cepstrum). **Max Groups** (default 50) caps memory by dropping the
+  least recently used buffer. Leaving `groupBy` empty preserves the previous
+  single-buffer behaviour. Closes [#25](https://github.com/blanpa/node-red-contrib-condition-monitoring/issues/25).
+- **`signal-analyzer`: `msg.reset` is now group-scoped** — `msg.reset = true`
+  clears the buffer of the group the message belongs to (the single buffer when
+  grouping is off, i.e. unchanged); the new `msg.reset = "all"` clears every group.
+
+### 🐛 Fixed
+
+- **`signal-analyzer`: restoring a persisted buffer silently failed.** The node
+  assigned its `debug` config flag onto `this.debug`, overwriting Node-RED's own
+  `node.debug()` logger. State persistence logs through that method, so every
+  restore threw inside the deserialize `try` and the saved buffer was discarded
+  (enabling Debug Mode broke the node's own logging the same way). The flag now
+  lives on `node.debugEnabled`.
+- Persisted signal buffers are stored per group (format `version: 2`). State
+  written by earlier versions is migrated into the ungrouped buffer on load, and
+  the stale flat keys are dropped.
+
 ---
 
 ## [0.3.1] - 2026-06-15 - Data sources, vision pipeline & hardening

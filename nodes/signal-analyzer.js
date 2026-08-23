@@ -80,52 +80,167 @@ module.exports = function (RED) {
 
         // Advanced settings
         this.outputTopic = config.outputTopic || "";
-        this.debug = config.debug === true;
+        // Kept off `this.debug`: that name is Node-RED's own logger method, and
+        // overwriting it with a boolean breaks every node.debug(...) call — state
+        // persistence logs through it, so a clobbered logger silently threw and
+        // discarded the restored buffer.
+        this.debugEnabled = config.debug === true;
         this.persistState = config.persistState === true;
 
-        // State
-        this.buffer = [];
-        this.timestamps = [];
-        this.sampleCount = 0;
-        this.lastProcessedIndex = 0;
+        // Per-device grouping: keep one independent buffer per value of a message
+        // property (e.g. "topic"), so a single node can serve an interleaved
+        // multi-device stream. Empty = one shared buffer (default, legacy).
+        this.groupBy = typeof config.groupBy === "string" ? config.groupBy.trim() : "";
+        this.maxGroups = clampInt(config.maxGroups, 1, 10000, 50);
+
+        // State: one entry per group, in least-recently-used order.
+        // Messages without a usable group value land in DEFAULT_GROUP.
+        const DEFAULT_GROUP = "";
+        this.groups = new Map();
 
         // Debug logging helper
         const debugLog = function (message) {
-            if (node.debug) {
+            if (node.debugEnabled && typeof node.debug === "function") {
                 node.debug(message);
             }
         };
 
-        // Initialize state persistence using helper
-        const persistence = persistenceHelper.initializeStatePersistence(node, {
+        // Resolve the group key of a message. Anything that is not a non-empty
+        // string or a finite number (missing property, object, null) falls back
+        // to DEFAULT_GROUP, so ungrouped traffic still has a home.
+        function resolveGroupKey(msg) {
+            if (!node.groupBy) {
+                return DEFAULT_GROUP;
+            }
+            let value;
+            try {
+                value = RED.util.getMessageProperty(msg, node.groupBy);
+            } catch (e) {
+                return DEFAULT_GROUP;
+            }
+            if (typeof value === "number" && Number.isFinite(value)) {
+                return String(value);
+            }
+            return typeof value === "string" && value !== "" ? value : DEFAULT_GROUP;
+        }
+
+        // Fetch (or create) the buffer state for a key. Groups are kept in LRU
+        // order: re-inserting on access moves the key to the end, so an unbounded
+        // topic space evicts the least recently used buffer instead of growing
+        // without limit.
+        function getGroupState(key) {
+            let state = node.groups.get(key);
+            if (state) {
+                if (node.groupBy) {
+                    node.groups.delete(key);
+                    node.groups.set(key, state);
+                }
+                return state;
+            }
+
+            state = { key: key, buffer: [], timestamps: [], sampleCount: 0, lastProcessedIndex: 0 };
+            node.groups.set(key, state);
+
+            while (node.groups.size > node.maxGroups) {
+                const oldest = node.groups.keys().next().value;
+                node.groups.delete(oldest);
+                debugLog("Evicted least recently used group '" + oldest + "' (maxGroups=" + node.maxGroups + ")");
+            }
+            return state;
+        }
+
+        // Backwards-compatible read-only view of the default (ungrouped) bucket.
+        // Releases before per-group buffering exposed these directly on the node;
+        // flows and tests that inspect them keep working. With grouping enabled
+        // they only describe traffic that carried no group value.
+        ["buffer", "timestamps"].forEach(function (prop) {
+            Object.defineProperty(node, prop, {
+                configurable: true,
+                get: function () {
+                    const state = node.groups.get(DEFAULT_GROUP);
+                    return state ? state[prop] : [];
+                }
+            });
+        });
+        Object.defineProperty(node, "sampleCount", {
+            configurable: true,
+            get: function () {
+                const state = node.groups.get(DEFAULT_GROUP);
+                return state ? state.sampleCount : 0;
+            }
+        });
+
+        // Prefix status text with the group key so a shared node stays readable
+        function groupText(state, text) {
+            return node.groupBy && state.key !== DEFAULT_GROUP ? state.key + ": " + text : text;
+        }
+
+        // Initialize state persistence using helper.
+        // Declared with `let` so onStateLoaded — which only runs once the async
+        // load resolves, i.e. after this assignment — can reach the manager.
+        let persistence = null;
+        persistence = persistenceHelper.initializeStatePersistence(node, {
             stateKey: "signalAnalyzerState",
             saveInterval: 30000,
-            debug: node.debug,
+            debug: node.debugEnabled,
             onStateLoaded: function (state) {
-                if (state.buffer && state.buffer.length > 0) {
-                    node.buffer = state.buffer;
-                    node.timestamps = state.timestamps || [];
-                    node.sampleCount = state.sampleCount || 0;
-                    node.lastProcessedIndex = state.lastProcessedIndex || 0;
-
-                    node.status({
-                        fill: "green",
-                        shape: "dot",
-                        text: node.mode + " - restored (" + node.buffer.length + " samples)"
-                    });
-                    debugLog("Restored signal buffer from persistence: " + node.buffer.length + " samples");
+                // v2 stores one entry per group; v1 stored a single flat buffer,
+                // which restores into the default (ungrouped) bucket.
+                const saved = state.groups || (state.buffer ? { "": state } : null);
+                if (!saved) {
+                    return;
                 }
+
+                let restored = 0;
+                Object.keys(saved).forEach(function (key) {
+                    const entry = saved[key];
+                    if (!entry || !Array.isArray(entry.buffer) || entry.buffer.length === 0) {
+                        return;
+                    }
+                    const target = getGroupState(key);
+                    target.buffer = entry.buffer;
+                    target.timestamps = Array.isArray(entry.timestamps) ? entry.timestamps : [];
+                    target.sampleCount = entry.sampleCount || 0;
+                    target.lastProcessedIndex = entry.lastProcessedIndex || 0;
+                    restored += entry.buffer.length;
+                });
+
+                if (!state.groups && persistence) {
+                    // Migrated a v1 payload: drop the flat keys so the stored blob
+                    // does not carry a stale copy of the buffer forever.
+                    ["buffer", "timestamps", "sampleCount", "lastProcessedIndex"].forEach(function (key) {
+                        persistence.manager.delete(key);
+                    });
+                }
+
+                if (restored === 0) {
+                    return;
+                }
+
+                const scope = node.groupBy ? " in " + node.groups.size + " groups" : "";
+                node.status({
+                    fill: "green",
+                    shape: "dot",
+                    text: node.mode + " - restored (" + restored + " samples" + scope + ")"
+                });
+                debugLog("Restored signal buffer from persistence: " + restored + " samples" + scope);
             },
             getStateToSave: function () {
-                if (node.buffer.length > 0) {
-                    return {
-                        buffer: node.buffer,
-                        timestamps: node.timestamps,
-                        sampleCount: node.sampleCount,
-                        lastProcessedIndex: node.lastProcessedIndex
+                const groups = {};
+                let count = 0;
+                node.groups.forEach(function (state, key) {
+                    if (state.buffer.length === 0) {
+                        return;
+                    }
+                    groups[key] = {
+                        buffer: state.buffer,
+                        timestamps: state.timestamps,
+                        sampleCount: state.sampleCount,
+                        lastProcessedIndex: state.lastProcessedIndex
                     };
-                }
-                return null;
+                    count++;
+                });
+                return count > 0 ? { version: 2, groups: groups } : null;
             }
         });
 
@@ -1054,20 +1169,20 @@ module.exports = function (RED) {
         }
 
         // Process Cepstrum Analysis
-        function processCepstrum(msg, value) {
-            node.buffer.push(value);
+        function processCepstrum(msg, state, value) {
+            state.buffer.push(value);
 
-            if (node.buffer.length < node.fftSize) {
+            if (state.buffer.length < node.fftSize) {
                 node.status({
                     fill: "yellow",
                     shape: "ring",
-                    text: "Cepstrum: " + node.buffer.length + "/" + node.fftSize
+                    text: groupText(state, "Cepstrum: " + state.buffer.length + "/" + node.fftSize)
                 });
                 return null;
             }
 
-            if (node.buffer.length > node.fftSize) {
-                node.buffer.shift();
+            if (state.buffer.length > node.fftSize) {
+                state.buffer.shift();
             }
 
             const shaftFreq = (node.shaftSpeed || 1800) / 60;
@@ -1075,7 +1190,7 @@ module.exports = function (RED) {
             const maxQuefrency = node.quefrencyRangeHigh || 0.1;
 
             // Perform cepstrum analysis
-            const cepResult = performCepstrum(node.buffer, node.fftSize, node.samplingRate);
+            const cepResult = performCepstrum(state.buffer, node.fftSize, node.samplingRate);
 
             // Find rahmonics (periodic components)
             const rahmonics = findRahmonics(
@@ -1122,26 +1237,26 @@ module.exports = function (RED) {
                   ? "Peak: " + rahmonics[0].fundamentalFrequency.toFixed(1) + " Hz"
                   : "No peaks";
             const statusColor = hasAnomaly ? "red" : "green";
-            node.status({ fill: statusColor, shape: hasAnomaly ? "ring" : "dot", text: statusText });
+            node.status({ fill: statusColor, shape: hasAnomaly ? "ring" : "dot", text: groupText(state, statusText) });
 
             return { normal: hasAnomaly ? null : outputMsg, anomaly: hasAnomaly ? outputMsg : null };
         }
 
         // Process Envelope Analysis
-        function processEnvelope(msg, value) {
-            node.buffer.push(value);
+        function processEnvelope(msg, state, value) {
+            state.buffer.push(value);
 
-            if (node.buffer.length < node.fftSize) {
+            if (state.buffer.length < node.fftSize) {
                 node.status({
                     fill: "yellow",
                     shape: "ring",
-                    text: "Envelope: " + node.buffer.length + "/" + node.fftSize
+                    text: groupText(state, "Envelope: " + state.buffer.length + "/" + node.fftSize)
                 });
                 return null;
             }
 
-            if (node.buffer.length > node.fftSize) {
-                node.buffer.shift();
+            if (state.buffer.length > node.fftSize) {
+                state.buffer.shift();
             }
 
             // Calculate shaft frequency from RPM
@@ -1149,7 +1264,7 @@ module.exports = function (RED) {
 
             // Perform envelope analysis
             const envelope = performEnvelopeAnalysis(
-                node.buffer,
+                state.buffer,
                 node.samplingRate,
                 node.envelopeBandLow,
                 node.envelopeBandHigh
@@ -1205,26 +1320,26 @@ module.exports = function (RED) {
                 ? "FAULT: " + faults[0].type + " " + faults[0].harmonic + "X"
                 : "No faults detected";
             const statusColor = hasAnomaly ? "red" : "green";
-            node.status({ fill: statusColor, shape: hasAnomaly ? "ring" : "dot", text: statusText });
+            node.status({ fill: statusColor, shape: hasAnomaly ? "ring" : "dot", text: groupText(state, statusText) });
 
             return { normal: hasAnomaly ? null : outputMsg, anomaly: hasAnomaly ? outputMsg : null };
         }
 
         // Process FFT
-        function processFFT(msg, value) {
-            node.buffer.push(value);
+        function processFFT(msg, state, value) {
+            state.buffer.push(value);
 
-            if (node.buffer.length < node.fftSize) {
+            if (state.buffer.length < node.fftSize) {
                 node.status({
                     fill: "yellow",
                     shape: "ring",
-                    text: "Buffering: " + node.buffer.length + "/" + node.fftSize
+                    text: groupText(state, "Buffering: " + state.buffer.length + "/" + node.fftSize)
                 });
                 return null;
             }
 
-            if (node.buffer.length > node.fftSize) {
-                node.buffer.shift();
+            if (state.buffer.length > node.fftSize) {
+                state.buffer.shift();
             }
 
             debugLog(
@@ -1236,7 +1351,7 @@ module.exports = function (RED) {
                     node.overlapPercent +
                     "%"
             );
-            const fftResult = performFFT(node.buffer, node.fftSize, node.samplingRate, node.windowFunction);
+            const fftResult = performFFT(state.buffer, node.fftSize, node.samplingRate, node.windowFunction);
             const peaks = findSpectralPeaks(fftResult.frequencies, fftResult.magnitudes, node.peakThreshold);
             const features = calculateSpectralFeatures(fftResult.frequencies, fftResult.magnitudes);
 
@@ -1268,41 +1383,41 @@ module.exports = function (RED) {
             });
 
             const statusText = peaks.length > 0 ? "Peak: " + peaks[0].frequency.toFixed(1) + " Hz" : "No peaks";
-            node.status({ fill: "green", shape: "dot", text: statusText });
+            node.status({ fill: "green", shape: "dot", text: groupText(state, statusText) });
 
             return { normal: outputMsg, anomaly: null };
         }
 
         // Process Vibration with configurable threshold (for msg.config override)
-        function processVibrationWithConfig(msg, values, vibrationThreshold) {
-            node.buffer.push.apply(node.buffer, values);
+        function processVibrationWithConfig(msg, state, values, vibrationThreshold) {
+            state.buffer.push.apply(state.buffer, values);
 
-            if (node.buffer.length > node.windowSize) {
-                node.buffer = node.buffer.slice(-node.windowSize);
+            if (state.buffer.length > node.windowSize) {
+                state.buffer = state.buffer.slice(-node.windowSize);
             }
 
-            if (node.buffer.length < Math.min(10, node.windowSize)) {
+            if (state.buffer.length < Math.min(10, node.windowSize)) {
                 node.status({
                     fill: "yellow",
                     shape: "ring",
-                    text: "Collecting: " + node.buffer.length + "/" + node.windowSize
+                    text: groupText(state, "Collecting: " + state.buffer.length + "/" + node.windowSize)
                 });
                 return null;
             }
 
-            const features = calculateVibrationFeatures(node.buffer);
+            const features = calculateVibrationFeatures(state.buffer);
 
             node.status({
                 fill: "green",
                 shape: "dot",
-                text: "RMS: " + features.rms.toFixed(2) + " | CF: " + features.crestFactor.toFixed(2)
+                text: groupText(state, "RMS: " + features.rms.toFixed(2) + " | CF: " + features.crestFactor.toFixed(2))
             });
 
             const outputMsg = {
                 payload: features,
                 topic: msg.topic || "vibration-features",
                 timestamp: Date.now(),
-                windowSize: node.buffer.length
+                windowSize: state.buffer.length
             };
 
             Object.keys(msg).forEach(function (key) {
@@ -1319,24 +1434,30 @@ module.exports = function (RED) {
         }
 
         // Process Peaks with configurable threshold (for msg.config override)
-        function processPeaksWithConfig(msg, value, timestamp, peakThreshold) {
-            node.sampleCount++;
-            node.buffer.push(value);
-            node.timestamps.push(timestamp);
+        function processPeaksWithConfig(msg, state, value, timestamp, peakThreshold) {
+            state.sampleCount++;
+            state.buffer.push(value);
+            state.timestamps.push(timestamp);
 
-            if (node.buffer.length > node.windowSize) {
-                node.buffer.shift();
-                node.timestamps.shift();
+            if (state.buffer.length > node.windowSize) {
+                state.buffer.shift();
+                state.timestamps.shift();
             }
 
-            if (node.buffer.length < 3) {
+            if (state.buffer.length < 3) {
                 return null;
             }
 
-            const peaks = detectPeaks(node.buffer, node.timestamps, peakThreshold, node.minPeakDistance, node.peakType);
-            const stats = calculatePeakStatistics(peaks, node.buffer);
+            const peaks = detectPeaks(
+                state.buffer,
+                state.timestamps,
+                peakThreshold,
+                node.minPeakDistance,
+                node.peakType
+            );
+            const stats = calculatePeakStatistics(peaks, state.buffer);
 
-            const currentIndex = node.buffer.length - 1;
+            const currentIndex = state.buffer.length - 1;
             const isPeak = peaks.some(function (p) {
                 return p.index === currentIndex;
             });
@@ -1347,7 +1468,7 @@ module.exports = function (RED) {
                 peaks: peaks,
                 peakCount: peaks.length,
                 stats: stats,
-                sampleCount: node.sampleCount,
+                sampleCount: state.sampleCount,
                 timestamp: timestamp
             };
 
@@ -1358,7 +1479,11 @@ module.exports = function (RED) {
             });
 
             const color = isPeak ? "yellow" : "green";
-            node.status({ fill: color, shape: isPeak ? "ring" : "dot", text: "Peaks: " + peaks.length });
+            node.status({
+                fill: color,
+                shape: isPeak ? "ring" : "dot",
+                text: groupText(state, "Peaks: " + peaks.length)
+            });
 
             return { normal: isPeak ? null : outputMsg, anomaly: isPeak ? outputMsg : null };
         }
@@ -1374,11 +1499,23 @@ module.exports = function (RED) {
                 const activePeakThreshold =
                     cfg.peakThreshold !== undefined ? parseFloat(cfg.peakThreshold) : node.peakThreshold;
 
+                // msg.reset clears the buffer of the group this message belongs to;
+                // msg.reset === "all" clears every group at once.
+                if (msg.reset === "all") {
+                    node.groups.clear();
+                    node.status({ fill: "blue", shape: "ring", text: activeMode + " - reset (all groups)" });
+                    done();
+                    return;
+                }
+
+                const state = getGroupState(resolveGroupKey(msg));
+
                 if (msg.reset === true) {
-                    node.buffer = [];
-                    node.timestamps = [];
-                    node.sampleCount = 0;
-                    node.status({ fill: "blue", shape: "ring", text: activeMode + " - reset" });
+                    state.buffer = [];
+                    state.timestamps = [];
+                    state.sampleCount = 0;
+                    state.lastProcessedIndex = 0;
+                    node.status({ fill: "blue", shape: "ring", text: groupText(state, activeMode + " - reset") });
                     done();
                     return;
                 }
@@ -1398,8 +1535,8 @@ module.exports = function (RED) {
                     }
                     if (finite.length === 0) return null;
                     for (let i = 0; i < finite.length - 1; i++) {
-                        node.buffer.push(finite[i]);
-                        if (node.buffer.length > node.fftSize) node.buffer.shift();
+                        state.buffer.push(finite[i]);
+                        if (state.buffer.length > node.fftSize) state.buffer.shift();
                     }
                     return { last: finite[finite.length - 1] };
                 };
@@ -1412,7 +1549,7 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processFFT(msg, framed.last);
+                    result = processFFT(msg, state, framed.last);
                 } else if (activeMode === "vibration") {
                     let values = Array.isArray(msg.payload) ? msg.payload : [msg.payload];
                     values = values.filter(function (v) {
@@ -1423,7 +1560,7 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processVibrationWithConfig(msg, values, activeVibrationThreshold);
+                    result = processVibrationWithConfig(msg, state, values, activeVibrationThreshold);
                 } else if (activeMode === "peaks") {
                     const value = parseFloat(msg.payload);
                     const timestamp = msg.timestamp || Date.now();
@@ -1432,7 +1569,7 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processPeaksWithConfig(msg, value, timestamp, activePeakThreshold);
+                    result = processPeaksWithConfig(msg, state, value, timestamp, activePeakThreshold);
                 } else if (activeMode === "envelope") {
                     const framed = bufferFrameReturnLast(msg.payload);
                     if (!framed) {
@@ -1440,7 +1577,7 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processEnvelope(msg, framed.last);
+                    result = processEnvelope(msg, state, framed.last);
                 } else if (activeMode === "cepstrum") {
                     const framed = bufferFrameReturnLast(msg.payload);
                     if (!framed) {
@@ -1448,10 +1585,16 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processCepstrum(msg, framed.last);
+                    result = processCepstrum(msg, state, framed.last);
                 }
 
                 if (result) {
+                    // Tag the output with the group it was computed from, so a shared
+                    // node stays traceable downstream.
+                    if (node.groupBy) {
+                        if (result.normal) result.normal.group = state.key;
+                        if (result.anomaly) result.anomaly.group = state.key;
+                    }
                     if (result.anomaly) {
                         send([null, result.anomaly]);
                     } else if (result.normal) {
@@ -1471,9 +1614,7 @@ module.exports = function (RED) {
                 await persistence.close();
             }
 
-            node.buffer = [];
-            node.timestamps = [];
-            node.sampleCount = 0;
+            node.groups.clear();
             node.fftInstances = {}; // Clear FFT instance cache
             node.status({});
 
