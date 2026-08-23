@@ -92,7 +92,7 @@ Analyze vibration and frequency data for predictive maintenance.
 
 | Node | Purpose | Modes |
 |------|---------|-------|
-| **signal-analyzer** | Advanced signal processing | FFT, Vibration Analysis, Peak Detection, Envelope Analysis, Cepstrum |
+| **signal-analyzer** | Advanced signal processing | FFT, Vibration Analysis, Peak Detection, Envelope Analysis, Cepstrum; optional per-device buffers keyed by a msg property (`groupBy`) |
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

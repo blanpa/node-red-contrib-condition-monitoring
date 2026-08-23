@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.3.2] - 2026-08-23 - Per-device signal buffers
+
 ### ✨ Added
 
 - **`signal-analyzer`: one buffer per device (`groupBy`)** — a single node can now
@@ -34,6 +38,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persisted signal buffers are stored per group (format `version: 2`). State
   written by earlier versions is migrated into the ungrouped buffer on load, and
   the stale flat keys are dropped.
+
+### 🔒 Dependencies
+
+- Lockfile refreshed with a plain `npm audit fix` (no `--force`, `package.json`
+  untouched): 37 → 29 advisories. Notable in-range moves: node-red 4.1.11 →
+  4.1.13, axios 1.16 → 1.19, tar 7.5.11 → 7.5.22, form-data, ip-address,
+  fast-uri, brace-expansion, js-yaml and the babel toolchain.
+- `onnxruntime-node` is held at 1.24.3 in the lockfile: 1.27.0 aborts the jest
+  worker (SIGABRT) in the ML path-validation integration flow on the CI runner.
+  The declared range stays `^1.24.3`.
+- The remaining advisories all sit in dev or optional dependencies and need
+  breaking changes to clear (jsonata via node-red 4.x, tar via npm's bundled
+  tree, adm-zip via the optional ML runtimes).
+  `npm audit --omit=dev --omit=optional --audit-level=high` stays at **0**.
+
+### 📚 Documentation
+
+- `docs/API.md`: the Signal Analyzer message interfaces were rewritten against
+  the actual implementation. The documented FFT output was wrong (it showed
+  `payload.frequencies` / `payload.spectral` / `sampleRate` / `windowSize`,
+  none of which the node emits) and the Vibration ISO 10816 block did not match
+  the emitted fields. Peaks mode and the per-device grouping are now documented.
 
 ---
 
