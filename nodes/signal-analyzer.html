@@ -32,6 +32,8 @@
             gearToothCount: { value: "" },
             cepstrumThreshold: { value: 0.1 },
             outputTopic: { value: "" },
+            groupBy: { value: "" },
+            maxGroups: { value: 50 },
             debug: { value: false },
             persistState: { value: false }
         },
@@ -342,6 +344,22 @@
                 </div>
                 
                 <div class="cm-config-item">
+                    <label for="node-input-groupBy">
+                        <i class="fa fa-sitemap"></i> Group By (msg property)
+                    </label>
+                    <input type="text" id="node-input-groupBy" placeholder="e.g. topic (empty = single buffer)">
+                    <div class="cm-help-text">One separate buffer per value, so one node can serve many devices</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-maxGroups">
+                        <i class="fa fa-list-ol"></i> Max Groups
+                    </label>
+                    <input type="number" id="node-input-maxGroups" min="1" step="1" placeholder="50">
+                    <div class="cm-help-text">Buffer limit when grouping; least recently used is dropped</div>
+                </div>
+
+                <div class="cm-config-item">
                     <label for="node-input-debug">
                         <i class="fa fa-bug"></i> Debug Mode
                     </label>
@@ -427,8 +445,10 @@
         <dt>msg.timestamp <span class="property-type">number</span></dt>
         <dd>Optional timestamp for peak detection (ms)</dd>
         
-        <dt>msg.reset <span class="property-type">boolean</span></dt>
-        <dd>Set to <code>true</code> to clear the sample buffer</dd>
+        <dt>msg.reset <span class="property-type">boolean | string</span></dt>
+        <dd>Set to <code>true</code> to clear the sample buffer of the group this message
+        belongs to (the single buffer when grouping is off).
+        <br>Set to <code>"all"</code> to clear every group at once.</dd>
         
         <dt>msg.config <span class="property-type">object</span></dt>
         <dd>Optional runtime configuration override. Allows dynamic adjustment of parameters per message:
@@ -447,6 +467,26 @@
         <li><b>Output 1 (Normal)</b> - Regular analysis results</li>
         <li><b>Output 2 (Anomaly/Peak)</b> - Anomalous vibration or detected peaks</li>
     </ol>
+
+    <h3>Multiple Devices per Node (Group By)</h3>
+    <p>By default the node keeps <b>one</b> sample buffer, so an interleaved stream from
+    several machines would be mixed into a single analysis. Set <b>Group By</b> to a message
+    property (typically <code>topic</code>) to keep an <b>independent buffer per device</b> and
+    emit one result per device:</p>
+    <pre>pump-01/vibration --+
+pump-02/vibration --+--&gt; [signal-analyzer]  --&gt; one result per device
+pump-03/vibration --+     groupBy: "topic"</pre>
+    <ul>
+        <li>Nested paths work too, e.g. <code>payload.deviceId</code>.</li>
+        <li>Each result carries <code>msg.group</code> with the key it was computed from.</li>
+        <li>Messages whose group property is missing or empty share one "ungrouped" buffer
+        (<code>msg.group</code> is then <code>""</code>).</li>
+        <li>Buffers fill independently: with <code>fftSize: 256</code> each device needs its
+        own 256 samples before it produces a first result.</li>
+        <li><b>Max Groups</b> caps memory. When exceeded, the least recently used buffer is
+        dropped — size it above your expected device count.</li>
+        <li>Leaving <b>Group By</b> empty preserves the previous single-buffer behaviour.</li>
+    </ul>
     
     <h3>FFT Mode Output</h3>
     <dl>
