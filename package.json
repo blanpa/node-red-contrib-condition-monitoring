@@ -7,7 +7,8 @@
     "examples/",
     "!examples/test-suite.json",
     "CHANGELOG.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    "NOTICE"
   ],
   "scripts": {
     "test": "jest --testTimeout=10000",
@@ -88,7 +89,7 @@
     "vibration-simulation"
   ],
   "author": "blanpa",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/blanpa/node-red-contrib-condition-monitoring.git"
