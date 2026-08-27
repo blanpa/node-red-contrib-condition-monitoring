@@ -52,7 +52,7 @@
             "task": "segmentation",
             "source": "bundled",
             "file": "defect_seg.onnx",
-            "license": "MIT",
+            "license": "Apache-2.0",
             "input": { "shape": [1, 3, 32, 32], "layout": "nchw", "channelOrder": "rgb", "normalize": "0-1" },
             "output": { "annotation": "segmentation" }
         },
@@ -62,7 +62,7 @@
             "task": "classification",
             "source": "bundled",
             "file": "bearing_fault_clf.onnx",
-            "license": "MIT",
+            "license": "Apache-2.0",
             "input": {
                 "shape": [1, 5],
                 "layout": "vector",

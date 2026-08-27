@@ -4,10 +4,12 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 [![npm version](https://img.shields.io/npm/v/node-red-contrib-condition-monitoring.svg)](https://www.npmjs.com/package/node-red-contrib-condition-monitoring)
 [![npm downloads](https://img.shields.io/npm/dm/node-red-contrib-condition-monitoring.svg)](https://www.npmjs.com/package/node-red-contrib-condition-monitoring)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Node-RED](https://img.shields.io/badge/Node--RED-%3E%3D2.0.0-red.svg)](https://nodered.org)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18.0.0-green.svg)](https://nodejs.org)
 [![Status: Beta](https://img.shields.io/badge/Status-Beta-yellow.svg)](CHANGELOG.md)
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/blanpa)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/blanpa)
 
 ---
 
@@ -603,8 +605,8 @@ vision-annotator` chain.
 | Object detection (COCO) | YOLOv10n (NMS-free) | onnx-community | AGPL-3.0 |
 | Human pose / keypoints | YOLOv8n-pose | Xenova | AGPL-3.0 |
 | Monocular depth | Depth-Anything-v2-small | onnx-community | Apache-2.0 |
-| Surface defect segmentation | bundled (trained in-repo) | this package | MIT |
-| Vibration fault classification | bundled (trained in-repo) | this package | MIT |
+| Surface defect segmentation | bundled (trained in-repo) | this package | Apache-2.0 |
+| Vibration fault classification | bundled (trained in-repo) | this package | Apache-2.0 |
 
 - **Fetched on demand**, not redistributed: `url` models download on deploy into
   `ml-models/cache` and are verified against the catalog's SHA-256. Mind each
