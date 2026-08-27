@@ -8,8 +8,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 [![Node-RED](https://img.shields.io/badge/Node--RED-%3E%3D2.0.0-red.svg)](https://nodered.org)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18.0.0-green.svg)](https://nodejs.org)
 [![Status: Beta](https://img.shields.io/badge/Status-Beta-yellow.svg)](CHANGELOG.md)
-[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/blanpa)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/blanpa)
+[![Sponsor](https://img.shields.io/github/sponsors/blanpa?label=Sponsor&logo=githubsponsors&logoColor=white&color=EA4AAA)](https://github.com/sponsors/blanpa)
 
 ---
 
@@ -994,6 +993,18 @@ Contributions are welcome! Please:
 2. Create a feature branch
 3. Add tests if applicable
 4. Submit a pull request
+
+## Sponsor this project
+
+This package is developed and maintained in my own time.
+If it saves you some, consider supporting it:
+
+<a href="https://github.com/sponsors/blanpa">
+  <img height="41" alt="Sponsor on GitHub" src="https://img.shields.io/badge/Sponsor%20on%20GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white">
+</a>
+<a href="https://buymeacoffee.com/blanpa">
+  <img height="41" alt="Buy Me a Coffee" src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png">
+</a>
 
 ## License
 
