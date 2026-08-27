@@ -1,5 +1,9 @@
 module.exports = function (RED) {
     "use strict";
+    const { copyPassthrough } = require("./utils/message");
+
+    // Admin-route auth guard (Node-RED does not apply adminAuth to httpAdmin routes)
+    const { needsPermission } = require("./utils/admin-auth");
 
     // Import shared statistics utilities
     const stats = require("./utils/statistics");
@@ -1225,11 +1229,7 @@ module.exports = function (RED) {
                 outputMsg.topic = node.outputTopic;
             }
 
-            Object.keys(msg).forEach(function (key) {
-                if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                    outputMsg[key] = msg[key];
-                }
-            });
+            copyPassthrough(outputMsg, msg);
 
             const statusText = hasAnomaly
                 ? "FAULT: " + gearFaults[0].type
@@ -1310,11 +1310,7 @@ module.exports = function (RED) {
                 outputMsg.topic = node.outputTopic;
             }
 
-            Object.keys(msg).forEach(function (key) {
-                if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                    outputMsg[key] = msg[key];
-                }
-            });
+            copyPassthrough(outputMsg, msg);
 
             const statusText = hasAnomaly
                 ? "FAULT: " + faults[0].type + " " + faults[0].harmonic + "X"
@@ -1376,11 +1372,7 @@ module.exports = function (RED) {
                 outputMsg.magnitudes = fftResult.magnitudes;
             }
 
-            Object.keys(msg).forEach(function (key) {
-                if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                    outputMsg[key] = msg[key];
-                }
-            });
+            copyPassthrough(outputMsg, msg);
 
             const statusText = peaks.length > 0 ? "Peak: " + peaks[0].frequency.toFixed(1) + " Hz" : "No peaks";
             node.status({ fill: "green", shape: "dot", text: groupText(state, statusText) });
@@ -1420,11 +1412,7 @@ module.exports = function (RED) {
                 windowSize: state.buffer.length
             };
 
-            Object.keys(msg).forEach(function (key) {
-                if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                    outputMsg[key] = msg[key];
-                }
-            });
+            copyPassthrough(outputMsg, msg);
 
             // Check for potential issues (vibrationThreshold overrides default crest factor check)
             const crestFactorThreshold = vibrationThreshold || 6;
@@ -1472,11 +1460,7 @@ module.exports = function (RED) {
                 timestamp: timestamp
             };
 
-            Object.keys(msg).forEach(function (key) {
-                if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                    outputMsg[key] = msg[key];
-                }
-            });
+            copyPassthrough(outputMsg, msg);
 
             const color = isPeak ? "yellow" : "green";
             node.status({
@@ -1625,7 +1609,7 @@ module.exports = function (RED) {
     RED.nodes.registerType("signal-analyzer", SignalAnalyzerNode);
 
     // API endpoint to check FFT library availability
-    RED.httpAdmin.get("/signal-analyzer/fft-status", function (req, res) {
+    RED.httpAdmin.get("/signal-analyzer/fft-status", needsPermission(RED, "signal-analyzer.read"), function (req, res) {
         res.json({
             available: FFT !== null,
             library: FFT ? "fft.js (Radix-4)" : "fallback DFT",

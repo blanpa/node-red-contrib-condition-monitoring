@@ -13,6 +13,7 @@ module.exports = function (RED) {
 
     // Import MAX Engine bridge
     const { getMaxBridge, shutdownMaxBridge } = require("./max-bridge-manager");
+    const registerAdminRoutes = require("./ml-inference-admin");
 
     // Path validator for sandboxed model loading
     const { assertPath } = require("./utils/path-validator");
@@ -275,6 +276,11 @@ module.exports = function (RED) {
     // Minimal MLflow REST request helper: picks http/https from the URL scheme
     // (registry URIs are commonly plain http, e.g. http://mlflow-server:5000)
     // and supports both GET (with query params) and POST (with a JSON body).
+    // MLflow's registry API returns small JSON control-plane payloads; these
+    // bounds keep a hostile or wedged endpoint from stalling/exhausting the runtime.
+    const MAX_MLFLOW_RESPONSE_BYTES = 8 * 1024 * 1024;
+    const MLFLOW_TIMEOUT_MS = 15000;
+
     function mlflowApiRequest(url, method, token, body) {
         return new Promise((resolve, reject) => {
             const isHttps = url.startsWith("https");
@@ -291,8 +297,20 @@ module.exports = function (RED) {
 
             const req = protocol.request(options, (res) => {
                 let data = "";
-                res.on("data", (chunk) => (data += chunk));
+                let overflow = false;
+                res.on("data", (chunk) => {
+                    if (overflow) return;
+                    data += chunk;
+                    // JSON control-plane responses are small; refuse to buffer a
+                    // hostile or misconfigured endpoint's unbounded stream.
+                    if (data.length > MAX_MLFLOW_RESPONSE_BYTES) {
+                        overflow = true;
+                        res.destroy();
+                        reject(new Error("MLflow response exceeds " + MAX_MLFLOW_RESPONSE_BYTES + " bytes"));
+                    }
+                });
                 res.on("end", () => {
+                    if (overflow) return;
                     if (res.statusCode >= 200 && res.statusCode < 300) {
                         try {
                             resolve(data ? JSON.parse(data) : {});
@@ -305,6 +323,9 @@ module.exports = function (RED) {
                 });
             });
             req.on("error", reject);
+            req.setTimeout(MLFLOW_TIMEOUT_MS, () => {
+                req.destroy(new Error("MLflow request timed out after " + MLFLOW_TIMEOUT_MS + "ms"));
+            });
             if (body) req.write(JSON.stringify(body));
             req.end();
         });
@@ -992,6 +1013,15 @@ module.exports = function (RED) {
 
         // Load TensorFlow.js model
         async function loadTFJSModel(modelPath, authType, authToken, expectedSha256) {
+            // Validate the path BEFORE probing for the optional runtime. A path
+            // the allowlist rejects must be reported as such whether or not the
+            // runtime happens to be installed — otherwise the security check is
+            // shadowed by an availability check, and which error you get depends
+            // on the install. The other four loaders already validate first.
+            if (!modelPath.startsWith("http://") && !modelPath.startsWith("https://")) {
+                resolveLocalModelPath(modelPath);
+            }
+
             const tensorflow = loadTensorFlowJS();
             if (!tensorflow) {
                 throw new Error("TensorFlow.js not available. Install: npm install @tensorflow/tfjs-node");
@@ -1072,6 +1102,15 @@ module.exports = function (RED) {
 
         // Load ONNX model
         async function loadONNXModel(modelPath, authType, authToken, expectedSha256) {
+            // Validate the path BEFORE probing for the optional runtime. A path
+            // the allowlist rejects must be reported as such whether or not the
+            // runtime happens to be installed — otherwise the security check is
+            // shadowed by an availability check, and which error you get depends
+            // on the install. The other four loaders already validate first.
+            if (!modelPath.startsWith("http://") && !modelPath.startsWith("https://")) {
+                resolveLocalModelPath(modelPath);
+            }
+
             const onnxruntime = loadONNXRuntime();
             if (!onnxruntime) {
                 throw new Error("ONNX Runtime not available. Install: npm install onnxruntime-node");
@@ -1974,472 +2013,21 @@ module.exports = function (RED) {
 
     RED.nodes.registerType("ml-inference", MLInferenceNode);
 
-    // Curated pretrained-model catalog (common use cases). Bundled entries are
-    // exposed with a RELATIVE "models/<file>" path — the loader's allowlist already
-    // includes path.join(__dirname, "models"), so the absolute server path never
-    // needs to leave the server (avoids disclosing the install path to editor clients).
-    RED.httpAdmin.get(
-        "/ml-inference/model-catalog",
-        RED.auth.needsPermission("ml-inference.read"),
-        function (req, res) {
-            try {
-                const cat = JSON.parse(fs.readFileSync(path.join(__dirname, "model-catalog.json"), "utf8"));
-                (cat.models || []).forEach(function (m) {
-                    if (m.source === "bundled" && m.file) m.resolvedPath = "models/" + m.file;
-                });
-                res.json(cat);
-            } catch (e) {
-                res.status(500).json({ error: e.message });
-            }
-        }
-    );
-
-    // API endpoint for model info
-    RED.httpAdmin.get("/ml-inference/runtimes", function (req, res) {
-        const runtimes = {
-            tfjs: loadTensorFlowJS() !== null,
-            onnx: loadONNXRuntime() !== null
-        };
-        res.json(runtimes);
-    });
-
-    // API endpoint to check Python bridge status
-    RED.httpAdmin.get("/ml-inference/python-bridge", async function (req, res) {
-        try {
-            if (pythonBridge && pythonBridgeReady) {
-                const status = await pythonBridge.getStatus();
-                const stats = pythonBridge.getStats();
-                res.json({
-                    available: true,
-                    mode: "persistent",
-                    ...status,
-                    stats: stats
-                });
-            } else {
-                res.json({
-                    available: false,
-                    mode: "none",
-                    reason: pythonBridgeError ? pythonBridgeError.message : "Not started"
-                });
-            }
-        } catch (err) {
-            res.json({
-                available: false,
-                mode: "none",
-                error: err.message
-            });
-        }
-    });
-
-    // API endpoint to check Python availability
-    RED.httpAdmin.get("/ml-inference/python-status", function (req, res) {
-        const { spawn } = require("child_process");
-        const pythonCandidates = ["python3", "python"];
-
-        function checkPython(candidates, index) {
-            if (index >= candidates.length) {
-                res.json({ available: false, version: null, packages: [] });
-                return;
-            }
-
-            const proc = spawn(candidates[index], ["-c", "import sys; print(sys.version.split()[0])"], {
-                stdio: ["pipe", "pipe", "pipe"],
-                timeout: 5000
-            });
-
-            let stdout = "";
-            proc.stdout.on("data", (data) => {
-                stdout += data.toString();
-            });
-
-            proc.on("close", (code) => {
-                if (code === 0 && stdout.trim()) {
-                    // Check for ML packages
-                    const checkPackages = spawn(
-                        candidates[index],
-                        [
-                            "-c",
-                            `
-import json
-packages = []
-try:
-    import sklearn; packages.append('sklearn')
-except: pass
-try:
-    import tensorflow; packages.append('tensorflow')
-except: pass
-try:
-    import tflite_runtime; packages.append('tflite')
-except: pass
-print(json.dumps(packages))
-`
-                        ],
-                        { stdio: ["pipe", "pipe", "pipe"], timeout: 10000 }
-                    );
-
-                    let pkgOut = "";
-                    checkPackages.stdout.on("data", (data) => {
-                        pkgOut += data.toString();
-                    });
-
-                    // Safety kill if process hangs beyond timeout
-                    const pkgKillTimer = setTimeout(() => {
-                        if (!checkPackages.killed) checkPackages.kill();
-                    }, 12000);
-
-                    checkPackages.on("close", () => {
-                        clearTimeout(pkgKillTimer);
-                        let packages = [];
-                        try {
-                            packages = JSON.parse(pkgOut.trim());
-                        } catch (e) {}
-                        res.json({
-                            available: true,
-                            version: stdout.trim(),
-                            python: candidates[index],
-                            packages: packages
-                        });
-                    });
-
-                    checkPackages.on("error", () => {
-                        clearTimeout(pkgKillTimer);
-                        res.json({ available: true, version: stdout.trim(), python: candidates[index], packages: [] });
-                    });
-                } else {
-                    checkPython(candidates, index + 1);
-                }
-            });
-
-            proc.on("error", () => {
-                checkPython(candidates, index + 1);
-            });
-        }
-
-        checkPython(pythonCandidates, 0);
-    });
-
-    // API endpoint to check MAX Engine availability
-    RED.httpAdmin.get("/ml-inference/max-status", async function (req, res) {
-        try {
-            const bridge = getMaxBridge({
-                serverUrl: process.env.MAX_ENGINE_URL || "http://localhost:8765"
-            });
-
-            const status = await bridge.getStatus();
-            res.json({
-                available: true,
-                backend: status.backend,
-                max_available: status.max_available,
-                onnx_available: status.onnx_available,
-                models_loaded: status.models,
-                stats: status.stats
-            });
-        } catch (err) {
-            res.json({
-                available: false,
-                error: err.message
-            });
-        }
-    });
-
-    // API endpoint to check Coral TPU availability
-    RED.httpAdmin.get("/ml-inference/coral-status", function (req, res) {
-        const { spawn } = require("child_process");
-        const proc = spawn(
-            "python3",
-            ["-c", "from pycoral.utils.edgetpu import list_edge_tpus; print(len(list_edge_tpus()))"],
-            {
-                stdio: ["pipe", "pipe", "pipe"],
-                timeout: 5000
-            }
-        );
-
-        let stdout = "";
-        proc.stdout.on("data", (data) => {
-            stdout += data.toString();
-        });
-
-        proc.on("close", () => {
-            const count = parseInt(stdout.trim()) || 0;
-            res.json({ available: count > 0, count: count });
-        });
-
-        proc.on("error", () => {
-            res.json({ available: false, count: 0 });
-        });
-    });
-
-    // Ensure models directory exists
-    function ensureModelsDir() {
-        if (!fs.existsSync(MODELS_DIR)) {
-            fs.mkdirSync(MODELS_DIR, { recursive: true });
-        }
-        return MODELS_DIR;
-    }
-
-    // API endpoint to list uploaded models
-    RED.httpAdmin.get("/ml-inference/models", function (req, res) {
-        try {
-            ensureModelsDir();
-            const files = fs.readdirSync(MODELS_DIR);
-            const fileModels = files
-                .filter((f) => {
-                    const filePath = path.join(MODELS_DIR, f);
-                    if (!fs.existsSync(filePath)) return false;
-                    const stats = fs.statSync(filePath);
-                    if (stats.isDirectory()) return false;
-                    const ext = path.extname(f).toLowerCase();
-                    return ext === ".onnx" || ext === ".json" || ext === ".tflite";
-                })
-                .map((f) => {
-                    const filePath = path.join(MODELS_DIR, f);
-                    const stats = fs.statSync(filePath);
-                    const metadata = loadModelMetadata(filePath);
-                    const ext = path.extname(f).toLowerCase();
-                    return {
-                        name: f,
-                        path: filePath,
-                        size: stats.size,
-                        modified: stats.mtime,
-                        type: ext === ".onnx" ? "onnx" : ext === ".tflite" ? "tflite" : "tfjs",
-                        version: metadata?.version || "1.0.0",
-                        metadata: metadata || null
-                    };
-                });
-
-            // Also include directories (for TFJS models)
-            const dirModels = files
-                .filter((f) => {
-                    const dirPath = path.join(MODELS_DIR, f);
-                    if (!fs.existsSync(dirPath)) return false;
-                    return fs.statSync(dirPath).isDirectory();
-                })
-                .map((d) => {
-                    const dirPath = path.join(MODELS_DIR, d);
-                    const modelJsonPath = path.join(dirPath, "model.json");
-                    const metadata = fs.existsSync(modelJsonPath) ? loadModelMetadata(modelJsonPath) : null;
-                    return {
-                        name: d,
-                        path: dirPath,
-                        type: "tfjs",
-                        version: metadata?.version || "1.0.0",
-                        metadata: metadata || null
-                    };
-                });
-
-            res.json({ models: [...fileModels, ...dirModels], modelsDir: MODELS_DIR });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    });
-
-    // API endpoint to upload a model
-    RED.httpAdmin.post("/ml-inference/upload", function (req, res) {
-        try {
-            ensureModelsDir();
-
-            const chunks = [];
-            req.on("data", (chunk) => chunks.push(chunk));
-            req.on("end", () => {
-                try {
-                    const buffer = Buffer.concat(chunks);
-                    const filename = req.headers["x-filename"] || "model_" + Date.now() + ".onnx";
-                    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-                    const filePath = path.join(MODELS_DIR, safeName);
-
-                    fs.writeFileSync(filePath, buffer);
-
-                    // Create initial metadata
-                    const metadata = {
-                        name: safeName,
-                        version: "1.0.0",
-                        type: path.extname(safeName).toLowerCase() === ".onnx" ? "onnx" : "tflite",
-                        path: filePath,
-                        source: "local",
-                        format: path.extname(safeName).toLowerCase() === ".onnx" ? "onnx" : "tflite",
-                        uploaded: new Date().toISOString(),
-                        size: buffer.length,
-                        metadata: {}
-                    };
-                    saveModelMetadata(filePath, metadata);
-
-                    res.json({
-                        success: true,
-                        path: filePath,
-                        name: safeName,
-                        size: buffer.length,
-                        metadata: metadata
-                    });
-                } catch (err) {
-                    res.status(500).json({ error: err.message });
-                }
-            });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    });
-
-    // API endpoint to upload TensorFlow.js model (multiple files)
-    RED.httpAdmin.post("/ml-inference/upload-tfjs", function (req, res) {
-        try {
-            ensureModelsDir();
-
-            const chunks = [];
-            req.on("data", (chunk) => chunks.push(chunk));
-            req.on("end", () => {
-                try {
-                    const buffer = Buffer.concat(chunks);
-                    const data = JSON.parse(buffer.toString());
-
-                    // Create a subdirectory for the TFJS model
-                    const modelName = data.name || "tfjs_model_" + Date.now();
-                    const safeName = modelName.replace(/[^a-zA-Z0-9._-]/g, "_");
-                    const modelDir = path.join(MODELS_DIR, safeName);
-
-                    if (!fs.existsSync(modelDir)) {
-                        fs.mkdirSync(modelDir, { recursive: true });
-                    }
-
-                    // Save model.json
-                    const modelJsonPath = path.join(modelDir, "model.json");
-                    fs.writeFileSync(modelJsonPath, data.modelJson);
-
-                    // Save weight files
-                    if (data.weights && Array.isArray(data.weights)) {
-                        data.weights.forEach((w) => {
-                            const weightPath = path.join(modelDir, w.name);
-                            const weightBuffer = Buffer.from(w.data, "base64");
-                            fs.writeFileSync(weightPath, weightBuffer);
-                        });
-                    }
-
-                    // Create initial metadata
-                    const metadata = {
-                        name: safeName,
-                        version: "1.0.0",
-                        type: "tfjs",
-                        path: modelDir,
-                        source: "local",
-                        format: "tfjs",
-                        uploaded: new Date().toISOString(),
-                        metadata: {}
-                    };
-                    saveModelMetadata(path.join(modelDir, "model.json"), metadata);
-
-                    res.json({
-                        success: true,
-                        path: modelDir,
-                        name: safeName,
-                        metadata: metadata
-                    });
-                } catch (err) {
-                    res.status(500).json({ error: err.message });
-                }
-            });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    });
-
-    // API endpoint to delete a model
-    RED.httpAdmin.delete("/ml-inference/models/:name", function (req, res) {
-        try {
-            const modelName = req.params.name;
-            const safeName = modelName.replace(/[^a-zA-Z0-9._-]/g, "_");
-            const modelPath = path.join(MODELS_DIR, safeName);
-
-            if (!fs.existsSync(modelPath)) {
-                return res.status(404).json({ error: "Model not found" });
-            }
-
-            const stats = fs.statSync(modelPath);
-            if (stats.isDirectory()) {
-                // Delete directory recursively
-                fs.rmSync(modelPath, { recursive: true, force: true });
-            } else {
-                fs.unlinkSync(modelPath);
-            }
-
-            res.json({ success: true });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    });
-
-    // Registry API Endpoints (Phase 2-4)
-
-    // List available registries
-    RED.httpAdmin.get("/ml-inference/registries", function (req, res) {
-        res.json({
-            registries: [
-                { id: "huggingface", name: "Hugging Face Hub", enabled: true },
-                { id: "mlflow", name: "MLflow Registry", enabled: true },
-                { id: "custom", name: "Custom Registry", enabled: true }
-            ]
-        });
-    });
-
-    // Get models from MLflow Registry
-    RED.httpAdmin.get("/ml-inference/registries/mlflow/models", function (req, res) {
-        const registryUri = req.query.registryUri;
-        const token = req.query.token || "";
-
-        if (!registryUri) {
-            return res.status(400).json({ error: "registryUri parameter required" });
-        }
-
-        const baseUrl = registryUri.replace(/\/$/, "");
-        const apiUrl = `${baseUrl}/api/2.0/mlflow/registered-models/search`;
-
-        const protocol = https;
-        const options = {
-            headers: {
-                "Content-Type": "application/json"
-            }
-        };
-
-        if (token) {
-            options.headers["Authorization"] = "Bearer " + token;
-        }
-
-        protocol
-            .get(apiUrl, options, (response) => {
-                let data = "";
-                response.on("data", (chunk) => (data += chunk));
-                response.on("end", () => {
-                    if (response.statusCode === 200) {
-                        try {
-                            const result = JSON.parse(data);
-                            res.json({ models: result.registered_models || [] });
-                        } catch (e) {
-                            res.status(500).json({ error: "Invalid JSON response from MLflow" });
-                        }
-                    } else {
-                        res.status(response.statusCode).json({ error: `MLflow API error: ${response.statusMessage}` });
-                    }
-                });
-            })
-            .on("error", (err) => {
-                res.status(500).json({ error: err.message });
-            });
-    });
-
-    // Get model versions
-    RED.httpAdmin.get("/ml-inference/models/:name/versions", function (req, res) {
-        try {
-            const modelName = req.params.name;
-            const safeName = modelName.replace(/[^a-zA-Z0-9._-]/g, "_");
-            const modelPath = path.join(MODELS_DIR, safeName);
-
-            // For now, return single version from metadata
-            const metadata = loadModelMetadata(modelPath);
-            if (metadata) {
-                res.json({ versions: [{ version: metadata.version, metadata: metadata }] });
-            } else {
-                res.json({ versions: [] });
-            }
-        } catch (err) {
-            res.status(500).json({ error: err.message });
+    // The editor-facing HTTP surface lives in its own module — see
+    // ml-inference-admin.js. Runtime state it needs is injected; the Python
+    // bridge is handed over as a getter because it is created lazily and
+    // replaced whenever the sidecar exits.
+    registerAdminRoutes(RED, {
+        MODELS_DIR: MODELS_DIR,
+        nodeDir: __dirname,
+        loadModelMetadata: loadModelMetadata,
+        saveModelMetadata: saveModelMetadata,
+        mlflowApiRequest: mlflowApiRequest,
+        loadTensorFlowJS: loadTensorFlowJS,
+        loadONNXRuntime: loadONNXRuntime,
+        getMaxBridge: getMaxBridge,
+        getPythonBridgeState: function () {
+            return { bridge: pythonBridge, ready: pythonBridgeReady, error: pythonBridgeError };
         }
     });
 };

@@ -1,6 +1,14 @@
 module.exports = function (RED) {
     "use strict";
 
+    // Upper bound for the sliding window. Every sample touches the live window,
+    // so the ceiling is a usability guard, not a formality — the old 1_000_000
+    // let a single message cost a million-element pass.
+    const MAX_WINDOW_SIZE = 100000;
+
+    // Admin-route auth guard (Node-RED does not apply adminAuth to httpAdmin routes)
+    const { needsPermission } = require("./utils/admin-auth");
+
     const fs = require("fs");
     const path = require("path");
     const zlib = require("zlib");
@@ -72,7 +80,7 @@ module.exports = function (RED) {
 
         // Buffer settings
         this.bufferSize = clampInt(config.bufferSize, 1, 10000000, 1000);
-        this.windowSize = clampInt(config.windowSize, 2, 1000000, 100); // For timeseries mode
+        this.windowSize = clampInt(config.windowSize, 2, MAX_WINDOW_SIZE, 100); // For timeseries mode
         this.windowOverlap = clampInt(config.windowOverlap, 0, 99, 50); // Percent
         this.flushOnDeploy = config.flushOnDeploy !== false;
 
@@ -1053,74 +1061,86 @@ module.exports = function (RED) {
     // ========================================
 
     // Get available datasets
-    RED.httpAdmin.get("/training-data-collector/datasets", function (req, res) {
-        try {
-            const dataDir = getDataDir(RED);
-            if (!fs.existsSync(dataDir)) {
-                return res.json({ datasets: [], path: dataDir });
+    RED.httpAdmin.get(
+        "/training-data-collector/datasets",
+        needsPermission(RED, "training-data-collector.read"),
+        function (req, res) {
+            try {
+                const dataDir = getDataDir(RED);
+                if (!fs.existsSync(dataDir)) {
+                    return res.json({ datasets: [], path: dataDir });
+                }
+
+                const files = fs.readdirSync(dataDir);
+                const datasets = files
+                    .filter(function (f) {
+                        return (
+                            f.endsWith(".csv") ||
+                            f.endsWith(".json") ||
+                            f.endsWith(".jsonl") ||
+                            f.endsWith(".csv.gz") ||
+                            f.endsWith(".json.gz") ||
+                            f.endsWith(".jsonl.gz")
+                        );
+                    })
+                    .map(function (f) {
+                        const filePath = path.join(dataDir, f);
+                        const stats = fs.statSync(filePath);
+                        return {
+                            name: f,
+                            path: filePath,
+                            size: stats.size,
+                            modified: stats.mtime,
+                            compressed: f.endsWith(".gz")
+                        };
+                    });
+
+                res.json({ datasets: datasets, path: dataDir });
+            } catch (err) {
+                res.status(500).json({ error: err.message });
             }
-
-            const files = fs.readdirSync(dataDir);
-            const datasets = files
-                .filter(function (f) {
-                    return (
-                        f.endsWith(".csv") ||
-                        f.endsWith(".json") ||
-                        f.endsWith(".jsonl") ||
-                        f.endsWith(".csv.gz") ||
-                        f.endsWith(".json.gz") ||
-                        f.endsWith(".jsonl.gz")
-                    );
-                })
-                .map(function (f) {
-                    const filePath = path.join(dataDir, f);
-                    const stats = fs.statSync(filePath);
-                    return {
-                        name: f,
-                        path: filePath,
-                        size: stats.size,
-                        modified: stats.mtime,
-                        compressed: f.endsWith(".gz")
-                    };
-                });
-
-            res.json({ datasets: datasets, path: dataDir });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
         }
-    });
+    );
 
     // Check S3 availability
-    RED.httpAdmin.get("/training-data-collector/s3-status", function (req, res) {
-        res.json({
-            available: S3Client !== null,
-            message: S3Client ? "AWS SDK available" : "Install @aws-sdk/client-s3 for S3 support"
-        });
-    });
+    RED.httpAdmin.get(
+        "/training-data-collector/s3-status",
+        needsPermission(RED, "training-data-collector.read"),
+        function (req, res) {
+            res.json({
+                available: S3Client !== null,
+                message: S3Client ? "AWS SDK available" : "Install @aws-sdk/client-s3 for S3 support"
+            });
+        }
+    );
 
     // Download dataset
-    RED.httpAdmin.get("/training-data-collector/download/:filename", function (req, res) {
-        try {
-            const dataDir = getDataDir(RED);
-            // SECURITY: strip directory components to prevent path traversal
-            // (e.g. ../../etc/passwd) via the :filename route parameter.
-            const filename = path.basename(req.params.filename || "");
-            const filePath = path.join(dataDir, filename);
+    RED.httpAdmin.get(
+        "/training-data-collector/download/:filename",
+        needsPermission(RED, "training-data-collector.read"),
+        function (req, res) {
+            try {
+                const dataDir = getDataDir(RED);
+                // SECURITY: strip directory components to prevent path traversal
+                // (e.g. ../../etc/passwd) via the :filename route parameter.
+                const filename = path.basename(req.params.filename || "");
+                const filePath = path.join(dataDir, filename);
 
-            // Defence in depth: ensure the resolved path stays within dataDir.
-            const resolvedPath = path.resolve(filePath);
-            const resolvedBase = path.resolve(dataDir);
-            if (resolvedPath !== resolvedBase && !resolvedPath.startsWith(resolvedBase + path.sep)) {
-                return res.status(400).json({ error: "Invalid filename" });
+                // Defence in depth: ensure the resolved path stays within dataDir.
+                const resolvedPath = path.resolve(filePath);
+                const resolvedBase = path.resolve(dataDir);
+                if (resolvedPath !== resolvedBase && !resolvedPath.startsWith(resolvedBase + path.sep)) {
+                    return res.status(400).json({ error: "Invalid filename" });
+                }
+
+                if (!filename || !fs.existsSync(filePath)) {
+                    return res.status(404).json({ error: "File not found" });
+                }
+
+                res.download(filePath);
+            } catch (err) {
+                res.status(500).json({ error: err.message });
             }
-
-            if (!filename || !fs.existsSync(filePath)) {
-                return res.status(404).json({ error: "File not found" });
-            }
-
-            res.download(filePath);
-        } catch (err) {
-            res.status(500).json({ error: err.message });
         }
-    });
+    );
 };

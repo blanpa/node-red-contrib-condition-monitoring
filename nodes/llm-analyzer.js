@@ -90,10 +90,20 @@ module.exports = function (RED) {
         node.providerNeedsApiKey = providerMeta.needsApiKey;
         node.providerNeedsApiUrl = providerMeta.needsApiUrl === true;
 
-        // API key from credentials, with an inline backstop for dev/test.
+        // API key. Credentials are the supported path: Node-RED keeps them out of
+        // the flow file and out of every flow export. `config.apiKey` is an inline
+        // backstop for dev/test that still works, but a key stored there travels
+        // with the flow — so say so loudly, the same way training-data-collector
+        // does for S3 credentials.
         const credKey =
             node.credentials && typeof node.credentials.apiKey === "string" ? node.credentials.apiKey.trim() : "";
         const inlineKey = (config.apiKey || "").trim();
+        if (inlineKey && !credKey) {
+            node.warn(
+                "llm-analyzer: apiKey is set in the node config, which stores it in plain text in flows.json " +
+                    "and in every flow export. Move it to the node's credential field."
+            );
+        }
         node.apiKey = credKey || inlineKey || null;
 
         // ------------------------------------------------------------------

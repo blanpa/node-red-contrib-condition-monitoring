@@ -1,6 +1,14 @@
 module.exports = function (RED) {
     "use strict";
 
+    // Upper bound for the sliding window. Every sample touches the live window,
+    // so the ceiling is a usability guard, not a formality — the old 1_000_000
+    // let a single message cost a million-element pass.
+    const MAX_WINDOW_SIZE = 100000;
+
+    // Admin-route auth guard (Node-RED does not apply adminAuth to httpAdmin routes)
+    const { needsPermission } = require("./utils/admin-auth");
+
     // Import shared statistics utilities
     const stats = require("./utils/statistics");
 
@@ -22,7 +30,7 @@ module.exports = function (RED) {
         }
 
         this.contamination = clampFloat(config.contamination, 0.001, 0.5, 0.1);
-        this.windowSize = clampInt(config.windowSize, 2, 1000000, 100);
+        this.windowSize = clampInt(config.windowSize, 2, MAX_WINDOW_SIZE, 100);
         this.numEstimators = clampInt(config.numEstimators, 1, 10000, 100);
         this.maxSamples = clampInt(config.maxSamples, 1, 1000000, 256);
         this.outputTopic = config.outputTopic || "";
@@ -346,14 +354,18 @@ module.exports = function (RED) {
     RED.nodes.registerType("isolation-forest-anomaly", IsolationForestAnomalyNode);
 
     // API endpoint to check ml-isolation-forest availability
-    RED.httpAdmin.get("/isolation-forest-anomaly/status", function (req, res) {
-        let available = false;
-        try {
-            require("ml-isolation-forest");
-            available = true;
-        } catch (err) {
-            available = false;
+    RED.httpAdmin.get(
+        "/isolation-forest-anomaly/status",
+        needsPermission(RED, "isolation-forest-anomaly.read"),
+        function (req, res) {
+            let available = false;
+            try {
+                require("ml-isolation-forest");
+                available = true;
+            } catch (err) {
+                available = false;
+            }
+            res.json({ available: available });
         }
-        res.json({ available: available });
-    });
+    );
 };

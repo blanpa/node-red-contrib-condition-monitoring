@@ -106,7 +106,9 @@ async function startRed(options = {}) {
         // would extend it; for tests this is enough and lets us prove rejection.
         conditionMonitoring: {
             allowedModelPaths: [path.join(userDir, "models")]
-        }
+        },
+        // Per-test overrides (e.g. mlInferenceMaxUploadBytes) merged last.
+        ...(options.settings || {})
     };
 
     RED.init(server, settings);
@@ -181,7 +183,7 @@ async function startRed(options = {}) {
     function expand(flow) {
         const json = JSON.stringify(flow)
             .split("$RED_PORT")
-            .join(String(port))
+            .join(String(listenPort))
             .split("$TMP_DIR")
             .join(userDir.replace(/\\/g, "/"));
         return JSON.parse(json);
@@ -316,7 +318,9 @@ async function startRed(options = {}) {
     }
 
     return {
-        port,
+        // The bound port, not the first one we tried: the EADDRINUSE loop above
+        // may have moved us, and every consumer needs where we actually listen.
+        port: listenPort,
         userDir,
         deploy,
         inject,

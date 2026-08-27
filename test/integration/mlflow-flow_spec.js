@@ -22,6 +22,20 @@ const { startRed, buildFlow } = require("./red-runtime");
 
 const ONNX_FIXTURE = path.resolve(__dirname, "..", "..", "nodes", "models", "bearing_fault_clf.onnx");
 
+// The registry-resolution cases only inspect the HTTP calls, so they run
+// anywhere. The tracking case needs a model to actually load before a run is
+// started, which needs the optional ONNX runtime — CI's main matrix installs
+// with --omit=optional, the `optional-runtimes` job covers the other side.
+const ONNX_RUNTIME_AVAILABLE = (() => {
+    try {
+        require("onnxruntime-node");
+        return true;
+    } catch {
+        return false;
+    }
+})();
+const testWithOnnx = ONNX_RUNTIME_AVAILABLE ? test : test.skip;
+
 describe("integration: ml-inference MLflow registry resolution", () => {
     let harness;
     let mock;
@@ -156,59 +170,65 @@ describe("integration: ml-inference MLflow registry resolution", () => {
         expect(verReq.url).toContain("version=2");
     }, 25000);
 
-    test("tracking: creates a run, logs params + metrics, ends the run on close", async () => {
-        requests.length = 0;
-        const modelPath = path.resolve(__dirname, "..", "fixtures", "model.onnx");
-        const flow = buildFlow("mlf-track", "mlflow tracking", [
-            {
-                id: "mlf-track-node",
-                type: "ml-inference",
-                modelSource: "local",
-                modelPath, // real fixture (allowlisted via process.cwd())
-                modelType: "onnx",
-                inputShape: "1,10",
-                preprocessMode: "array",
-                warmup: false,
-                mlflowTrackingEnabled: true,
-                mlflowTrackingUri: `http://127.0.0.1:${mockPort}`,
-                mlflowExperimentName: "node-red-ml-inference",
-                mlflowLogInferenceTime: true,
-                mlflowBatchSize: 1, // flush each metric immediately (no 10s wait)
-                wires: [[]]
-            }
-        ]);
-        await harness.deploy(flow);
+    testWithOnnx(
+        "tracking: creates a run, logs params + metrics, ends the run on close",
+        async () => {
+            requests.length = 0;
+            const modelPath = path.resolve(__dirname, "..", "fixtures", "model.onnx");
+            const flow = buildFlow("mlf-track", "mlflow tracking", [
+                {
+                    id: "mlf-track-node",
+                    type: "ml-inference",
+                    modelSource: "local",
+                    modelPath, // real fixture (allowlisted via process.cwd())
+                    modelType: "onnx",
+                    inputShape: "1,10",
+                    preprocessMode: "array",
+                    warmup: false,
+                    mlflowTrackingEnabled: true,
+                    mlflowTrackingUri: `http://127.0.0.1:${mockPort}`,
+                    mlflowExperimentName: "node-red-ml-inference",
+                    mlflowLogInferenceTime: true,
+                    mlflowBatchSize: 1, // flush each metric immediately (no 10s wait)
+                    wires: [[]]
+                }
+            ]);
+            await harness.deploy(flow);
 
-        // Run lifecycle: experiment lookup + run creation + params logged.
-        const runCreate = await waitFor((r) => r.method === "POST" && r.url.includes("runs/create"));
-        expect(runCreate).toBeTruthy();
-        expect(
-            requests.some((r) => r.url.includes("experiments/get-by-name") || r.url.includes("experiments/create"))
-        ).toBe(true);
-        const paramLog = await waitFor((r) => r.url.includes("runs/log-batch") && r.body.includes('"params"'));
-        expect(paramLog).toBeTruthy();
-        expect(JSON.parse(paramLog.body).run_id).toBe("run-abc-123");
+            // Run lifecycle: experiment lookup + run creation + params logged.
+            const runCreate = await waitFor((r) => r.method === "POST" && r.url.includes("runs/create"));
+            expect(runCreate).toBeTruthy();
+            expect(
+                requests.some((r) => r.url.includes("experiments/get-by-name") || r.url.includes("experiments/create"))
+            ).toBe(true);
+            const paramLog = await waitFor((r) => r.url.includes("runs/log-batch") && r.body.includes('"params"'));
+            expect(paramLog).toBeTruthy();
+            expect(JSON.parse(paramLog.body).run_id).toBe("run-abc-123");
 
-        // Metric flush path: drive the live node's tracker directly. (Real ONNX
-        // inference can't run inside jest's VM — onnxruntime rejects the tensor
-        // because jest's sandboxed Float32Array is a different realm's constructor;
-        // that path is covered by the standalone test/smoke-onnx.js.) bufferSize=1
-        // means each logMetrics call flushes immediately to the mock.
-        const node = harness.getNode("mlf-track-node");
-        expect(node.mlflowTracker).toBeTruthy();
-        node.mlflowTracker.logMetrics({ inference_time_ms: 12.5 });
-        const metricLog = await waitFor(
-            (r) =>
-                r.url.includes("runs/log-batch") && r.body.includes('"metrics"') && r.body.includes("inference_time_ms")
-        );
-        expect(metricLog).toBeTruthy();
-        expect(JSON.parse(metricLog.body).run_id).toBe("run-abc-123");
+            // Metric flush path: drive the live node's tracker directly. (Real ONNX
+            // inference can't run inside jest's VM — onnxruntime rejects the tensor
+            // because jest's sandboxed Float32Array is a different realm's constructor;
+            // that path is covered by the standalone test/smoke-onnx.js.) bufferSize=1
+            // means each logMetrics call flushes immediately to the mock.
+            const node = harness.getNode("mlf-track-node");
+            expect(node.mlflowTracker).toBeTruthy();
+            node.mlflowTracker.logMetrics({ inference_time_ms: 12.5 });
+            const metricLog = await waitFor(
+                (r) =>
+                    r.url.includes("runs/log-batch") &&
+                    r.body.includes('"metrics"') &&
+                    r.body.includes("inference_time_ms")
+            );
+            expect(metricLog).toBeTruthy();
+            expect(JSON.parse(metricLog.body).run_id).toBe("run-abc-123");
 
-        // Closing the node (redeploy empty) ends the run.
-        requests.length = 0;
-        await harness.deploy([{ id: "empty-tab", type: "tab", label: "empty", disabled: false }]);
-        const endRun = await waitFor((r) => r.method === "POST" && r.url.includes("runs/update"));
-        expect(endRun).toBeTruthy();
-        expect(JSON.parse(endRun.body)).toMatchObject({ run_id: "run-abc-123", status: "FINISHED" });
-    }, 30000);
+            // Closing the node (redeploy empty) ends the run.
+            requests.length = 0;
+            await harness.deploy([{ id: "empty-tab", type: "tab", label: "empty", disabled: false }]);
+            const endRun = await waitFor((r) => r.method === "POST" && r.url.includes("runs/update"));
+            expect(endRun).toBeTruthy();
+            expect(JSON.parse(endRun.body)).toMatchObject({ run_id: "run-abc-123", status: "FINISHED" });
+        },
+        30000
+    );
 });
