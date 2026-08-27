@@ -36,8 +36,10 @@ jobs:
           registry-url: https://registry.npmjs.org/
 
       # OIDC trusted publishing requires npm >= 11.5.1; Node 20 ships npm 10.x.
+      # Pinned to the 11 line on purpose: npm@latest is now 12.x, which requires
+      # node ^22.22.2 || ^24.15.0 || >=26 and fails to install on this runner.
       - name: Upgrade npm (trusted publishing needs npm >= 11.5.1)
-        run: npm install -g npm@latest
+        run: npm install -g npm@^11
 
       - run: npm ci
 

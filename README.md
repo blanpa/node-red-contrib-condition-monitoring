@@ -15,7 +15,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ## Table of Contents
 
-- [Project Status: v0.3.1 Beta](#project-status-v031-beta)
+- [Project Status: v0.3.2 Beta](#project-status-v032-beta)
 - [Important Disclaimer](#important-disclaimer)
 - [Background & Industry Context](#background--industry-context)
 - [Features](#features)
@@ -37,9 +37,9 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## Project Status: v0.3.1 Beta
+## Project Status: v0.3.2 Beta
 
-**LLM Analyzer, Vision Pipeline & Data-Source Simulators**
+**Per-device signal buffers, LLM Analyzer, Vision Pipeline & Data-Source Simulators**
 
 - **15 Nodes** - analysis, ML inference, vision pipeline, LLM analysis, and data-source simulators
 - **ISO 10816-3 Integration** - Vibration severity assessment with zones A-D
@@ -317,6 +317,18 @@ flowchart LR
 - 2nd order IIR filter for envelope analysis
 - Zero-phase filtering (filtfilt) - no phase distortion
 - Automatic fallback for edge cases
+
+**Multiple devices per node:** set **Group By** to a message property
+(typically `topic`, nested paths like `payload.deviceId` work too) and the node
+keeps an **independent buffer per device**, emitting one result per device
+tagged with `msg.group`. `Max Groups` (default 50) caps memory by dropping the
+least recently used buffer. Left empty, the node keeps a single shared buffer.
+
+```
+pump-01/vibration ─┐
+pump-02/vibration ─┼─→ [Signal Analyzer]  ─→ one result per device
+pump-03/vibration ─┘    groupBy: "topic"
+```
 
 **Example:**
 ```

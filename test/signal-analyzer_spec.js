@@ -876,4 +876,551 @@ describe("signal-analyzer Node", function () {
     //
     // The filter is used in envelope analysis for bearing fault detection.
     // See performEnvelopeAnalysis() -> bandpassFilter() -> butterworthBandpass()
+
+    // ============================================
+    // Per-device grouping (issue #25)
+    // ============================================
+    describe("per-device grouping (groupBy)", function () {
+        const SETTLE_MS = 150;
+
+        // Deterministic alternating signal: |value| is constant, so RMS equals
+        // the amplitude exactly and a mixed buffer is trivially distinguishable.
+        function alternating(amplitude, i) {
+            return i % 2 === 0 ? amplitude : -amplitude;
+        }
+
+        function twoOutputFlow(extra) {
+            return [
+                Object.assign({ id: "n1", type: "signal-analyzer", name: "test", wires: [["n2"], ["n3"]] }, extra),
+                { id: "n2", type: "helper" },
+                { id: "n3", type: "helper" }
+            ];
+        }
+
+        // Collect from both outputs; grouping is orthogonal to routing.
+        function collectBoth(n2, n3, sink) {
+            n2.on("input", function (msg) {
+                sink.push(msg);
+            });
+            n3.on("input", function (msg) {
+                sink.push(msg);
+            });
+        }
+
+        it("keeps one shared buffer when groupBy is not set (legacy behaviour)", function (done) {
+            const flow = twoOutputFlow({ mode: "fft", fftSize: 64, samplingRate: 1000 });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const received = [];
+                collectBoth(helper.getNode("n2"), helper.getNode("n3"), received);
+
+                // 32 samples per topic — mixed into a single buffer this reaches
+                // fftSize on the 64th message.
+                for (let i = 0; i < 64; i++) {
+                    n1.receive({ topic: i % 2 === 0 ? "pump-01" : "pump-02", payload: Math.sin(i * 0.3) });
+                }
+
+                setTimeout(function () {
+                    expect(received.length).toBe(1);
+                    // No group tagging while grouping is off
+                    expect(received[0].group).toBeUndefined();
+                    done();
+                }, SETTLE_MS);
+            });
+        });
+
+        it("buffers each topic independently and emits one result per device", function (done) {
+            const flow = twoOutputFlow({ mode: "fft", fftSize: 64, samplingRate: 1000, groupBy: "topic" });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const received = [];
+                collectBoth(helper.getNode("n2"), helper.getNode("n3"), received);
+
+                // 63 samples for each of two topics: neither buffer is full yet.
+                for (let i = 0; i < 63; i++) {
+                    n1.receive({ topic: "pump-01", payload: Math.sin(i * 0.3) });
+                    n1.receive({ topic: "pump-02", payload: Math.cos(i * 0.3) });
+                }
+
+                setTimeout(function () {
+                    expect(received.length).toBe(0);
+
+                    // 64th sample completes pump-01's buffer only
+                    n1.receive({ topic: "pump-01", payload: 0.5 });
+
+                    setTimeout(function () {
+                        expect(received.length).toBe(1);
+                        expect(received[0].group).toBe("pump-01");
+                        expect(received[0].topic).toBe("pump-01");
+
+                        // ...then pump-02 completes on its own 64th sample
+                        n1.receive({ topic: "pump-02", payload: 0.5 });
+
+                        setTimeout(function () {
+                            expect(received.length).toBe(2);
+                            expect(received[1].group).toBe("pump-02");
+                            expect(received[1].topic).toBe("pump-02");
+                            done();
+                        }, SETTLE_MS);
+                    }, SETTLE_MS);
+                }, SETTLE_MS);
+            });
+        });
+
+        it("computes vibration features per topic without cross-contamination", function (done) {
+            const flow = twoOutputFlow({ mode: "vibration", windowSize: 10, groupBy: "topic" });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const received = [];
+                collectBoth(helper.getNode("n2"), helper.getNode("n3"), received);
+
+                // Interleaved: amplitude 1 on pump-01, amplitude 10 on pump-02.
+                // A shared buffer would yield RMS ~7.1 for both.
+                for (let i = 0; i < 10; i++) {
+                    n1.receive({ topic: "pump-01", payload: alternating(1, i) });
+                    n1.receive({ topic: "pump-02", payload: alternating(10, i) });
+                }
+
+                setTimeout(function () {
+                    expect(received.length).toBe(2);
+
+                    const first = received.find(function (m) {
+                        return m.group === "pump-01";
+                    });
+                    const second = received.find(function (m) {
+                        return m.group === "pump-02";
+                    });
+
+                    expect(first).toBeDefined();
+                    expect(second).toBeDefined();
+                    expect(first.payload.rms).toBeCloseTo(1, 6);
+                    expect(second.payload.rms).toBeCloseTo(10, 6);
+                    expect(first.windowSize).toBe(10);
+                    expect(second.windowSize).toBe(10);
+                    done();
+                }, SETTLE_MS);
+            });
+        });
+
+        it("counts samples per topic in peaks mode", function (done) {
+            const flow = twoOutputFlow({ mode: "peaks", windowSize: 50, groupBy: "topic" });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const received = [];
+                collectBoth(helper.getNode("n2"), helper.getNode("n3"), received);
+
+                // Monotonically rising ramps — deterministic, no random baselines.
+                for (let i = 1; i <= 5; i++) {
+                    n1.receive({ topic: "pump-01", payload: i });
+                }
+                for (let i = 1; i <= 3; i++) {
+                    n1.receive({ topic: "pump-02", payload: i });
+                }
+
+                setTimeout(function () {
+                    const forTopic = function (topic) {
+                        return received.filter(function (m) {
+                            return m.group === topic;
+                        });
+                    };
+
+                    const a = forTopic("pump-01");
+                    const b = forTopic("pump-02");
+
+                    // Emission starts at the 3rd sample of each buffer
+                    expect(a.length).toBe(3);
+                    expect(b.length).toBe(1);
+                    expect(a[a.length - 1].sampleCount).toBe(5);
+                    expect(b[b.length - 1].sampleCount).toBe(3);
+                    done();
+                }, SETTLE_MS);
+            });
+        });
+
+        it("supports a nested group property path", function (done) {
+            const flow = twoOutputFlow({ mode: "vibration", windowSize: 10, groupBy: "meta.device" });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const received = [];
+                collectBoth(helper.getNode("n2"), helper.getNode("n3"), received);
+
+                for (let i = 0; i < 10; i++) {
+                    n1.receive({ payload: alternating(1, i), meta: { device: "mixer-a" } });
+                    n1.receive({ payload: alternating(10, i), meta: { device: "mixer-b" } });
+                }
+
+                setTimeout(function () {
+                    expect(received.length).toBe(2);
+                    const keys = received
+                        .map(function (m) {
+                            return m.group;
+                        })
+                        .sort();
+                    expect(keys).toEqual(["mixer-a", "mixer-b"]);
+                    done();
+                }, SETTLE_MS);
+            });
+        });
+
+        it("routes messages without a group value into one shared ungrouped buffer", function (done) {
+            const flow = twoOutputFlow({ mode: "vibration", windowSize: 10, groupBy: "topic" });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const received = [];
+                collectBoth(helper.getNode("n2"), helper.getNode("n3"), received);
+
+                for (let i = 0; i < 10; i++) {
+                    n1.receive({ payload: alternating(2, i) });
+                }
+
+                setTimeout(function () {
+                    expect(received.length).toBe(1);
+                    expect(received[0].group).toBe("");
+                    expect(received[0].payload.rms).toBeCloseTo(2, 6);
+                    // The ungrouped bucket is what the legacy node.buffer view exposes
+                    expect(n1.buffer.length).toBe(10);
+                    done();
+                }, SETTLE_MS);
+            });
+        });
+
+        it("keeps the legacy node.buffer view scoped to ungrouped traffic", function (done) {
+            const flow = twoOutputFlow({ mode: "vibration", windowSize: 50, groupBy: "topic" });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+
+                for (let i = 0; i < 5; i++) {
+                    n1.receive({ topic: "pump-01", payload: i });
+                }
+
+                setTimeout(function () {
+                    expect(n1.buffer.length).toBe(0);
+
+                    for (let i = 0; i < 3; i++) {
+                        n1.receive({ payload: i });
+                    }
+
+                    setTimeout(function () {
+                        expect(n1.buffer.length).toBe(3);
+                        expect(n1.groups.get("pump-01").buffer.length).toBe(5);
+                        done();
+                    }, SETTLE_MS);
+                }, SETTLE_MS);
+            });
+        });
+
+        it("evicts the least recently used buffer once maxGroups is exceeded", function (done) {
+            const flow = twoOutputFlow({ mode: "fft", fftSize: 8, samplingRate: 1000, groupBy: "topic", maxGroups: 2 });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const received = [];
+                collectBoth(helper.getNode("n2"), helper.getNode("n3"), received);
+
+                // Fill two buffers to one sample short of fftSize
+                for (let i = 0; i < 7; i++) {
+                    n1.receive({ topic: "pump-01", payload: Math.sin(i * 0.3) });
+                }
+                for (let i = 0; i < 7; i++) {
+                    n1.receive({ topic: "pump-02", payload: Math.sin(i * 0.3) });
+                }
+
+                setTimeout(function () {
+                    expect(n1.groups.size).toBe(2);
+
+                    // A third topic evicts pump-01 (least recently used)
+                    n1.receive({ topic: "pump-03", payload: 0.1 });
+
+                    setTimeout(function () {
+                        expect(n1.groups.size).toBe(2);
+                        expect(n1.groups.has("pump-01")).toBe(false);
+
+                        // pump-01 starts from scratch, so its 8th message must NOT
+                        // complete a buffer. It also evicts pump-02 in turn.
+                        n1.receive({ topic: "pump-01", payload: 0.2 });
+
+                        setTimeout(function () {
+                            expect(received.length).toBe(0);
+                            expect(n1.groups.size).toBe(2);
+                            expect(n1.groups.has("pump-02")).toBe(false);
+                            expect(n1.groups.get("pump-01").buffer.length).toBe(1);
+                            done();
+                        }, SETTLE_MS);
+                    }, SETTLE_MS);
+                }, SETTLE_MS);
+            });
+        });
+
+        it("resets only the group the reset message belongs to", function (done) {
+            const flow = twoOutputFlow({ mode: "fft", fftSize: 8, samplingRate: 1000, groupBy: "topic" });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const received = [];
+                collectBoth(helper.getNode("n2"), helper.getNode("n3"), received);
+
+                for (let i = 0; i < 7; i++) {
+                    n1.receive({ topic: "pump-01", payload: Math.sin(i * 0.3) });
+                    n1.receive({ topic: "pump-02", payload: Math.sin(i * 0.3) });
+                }
+
+                setTimeout(function () {
+                    n1.receive({ topic: "pump-01", reset: true });
+
+                    setTimeout(function () {
+                        expect(n1.groups.get("pump-01").buffer.length).toBe(0);
+                        expect(n1.groups.get("pump-02").buffer.length).toBe(7);
+
+                        // pump-02 still completes on its 8th sample, pump-01 does not
+                        n1.receive({ topic: "pump-01", payload: 0.1 });
+                        n1.receive({ topic: "pump-02", payload: 0.1 });
+
+                        setTimeout(function () {
+                            expect(received.length).toBe(1);
+                            expect(received[0].group).toBe("pump-02");
+                            done();
+                        }, SETTLE_MS);
+                    }, SETTLE_MS);
+                }, SETTLE_MS);
+            });
+        });
+
+        it("clears every group on msg.reset === 'all'", function (done) {
+            const flow = twoOutputFlow({ mode: "fft", fftSize: 8, samplingRate: 1000, groupBy: "topic" });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+                const received = [];
+                collectBoth(helper.getNode("n2"), helper.getNode("n3"), received);
+
+                for (let i = 0; i < 7; i++) {
+                    n1.receive({ topic: "pump-01", payload: Math.sin(i * 0.3) });
+                    n1.receive({ topic: "pump-02", payload: Math.sin(i * 0.3) });
+                }
+
+                setTimeout(function () {
+                    n1.receive({ reset: "all" });
+
+                    setTimeout(function () {
+                        expect(n1.groups.size).toBe(0);
+
+                        n1.receive({ topic: "pump-01", payload: 0.1 });
+                        n1.receive({ topic: "pump-02", payload: 0.1 });
+
+                        setTimeout(function () {
+                            expect(received.length).toBe(0);
+                            expect(n1.groups.get("pump-01").buffer.length).toBe(1);
+                            done();
+                        }, SETTLE_MS);
+                    }, SETTLE_MS);
+                }, SETTLE_MS);
+            });
+        });
+
+        it("still resets the single buffer when grouping is off", function (done) {
+            const flow = twoOutputFlow({ mode: "vibration", windowSize: 50 });
+            helper.load(signalAnalyzerNode, flow, function () {
+                const n1 = helper.getNode("n1");
+
+                for (let i = 0; i < 5; i++) {
+                    n1.receive({ payload: i });
+                }
+
+                setTimeout(function () {
+                    expect(n1.buffer.length).toBe(5);
+                    n1.receive({ payload: 0, reset: true });
+
+                    setTimeout(function () {
+                        expect(n1.buffer.length).toBe(0);
+                        done();
+                    }, SETTLE_MS);
+                }, SETTLE_MS);
+            });
+        });
+    });
+
+    // ============================================
+    // Per-group state persistence (v1 -> v2 format)
+    // ============================================
+    // The helper-based tests above cannot pre-seed context storage before the
+    // node's async state load runs, so these drive the node against a minimal
+    // RED stub with a controlled context store.
+    describe("grouped state persistence", function () {
+        const EventEmitter = require("events");
+
+        function buildStubbedNode(config, seededContext) {
+            const store = Object.assign({}, seededContext);
+            const context = {
+                get: function (key, storeName, cb) {
+                    if (typeof cb === "function") {
+                        cb(null, store[key]);
+                        return undefined;
+                    }
+                    return store[key];
+                },
+                set: function (key, value, storeName, cb) {
+                    store[key] = value;
+                    if (typeof cb === "function") cb(null);
+                }
+            };
+
+            let Constructor = null;
+            signalAnalyzerNode({
+                nodes: {
+                    createNode: function (node) {
+                        node.status = function () {};
+                        node.debug = function () {};
+                        node.warn = function () {};
+                        node.error = function () {};
+                        node.log = function () {};
+                        node.send = function () {};
+                        node.context = function () {
+                            return context;
+                        };
+                    },
+                    registerType: function (name, ctor) {
+                        Constructor = ctor;
+                    }
+                },
+                util: {
+                    getMessageProperty: function (msg, path) {
+                        return path.split(".").reduce(function (obj, key) {
+                            return obj === null || obj === undefined ? undefined : obj[key];
+                        }, msg);
+                    }
+                },
+                httpAdmin: { get: function () {} }
+            });
+
+            const node = new EventEmitter();
+            Constructor.call(node, config);
+            return { node: node, store: store };
+        }
+
+        function feed(node, msg) {
+            return new Promise(function (resolve, reject) {
+                node.emit(
+                    "input",
+                    msg,
+                    function () {},
+                    function (err) {
+                        if (err) reject(err);
+                        else resolve();
+                    }
+                );
+            });
+        }
+
+        function closeNode(node) {
+            return new Promise(function (resolve) {
+                node.emit("close", resolve);
+            });
+        }
+
+        // Let the async context load settle
+        function settle() {
+            return new Promise(function (resolve) {
+                setTimeout(resolve, 20);
+            });
+        }
+
+        it("migrates a legacy flat buffer into the ungrouped bucket", async function () {
+            const stub = buildStubbedNode(
+                { id: "n1", mode: "vibration", windowSize: 50, persistState: true, groupBy: "topic" },
+                {
+                    signalAnalyzerState: {
+                        buffer: [1, 2, 3, 4, 5],
+                        timestamps: [10, 20, 30, 40, 50],
+                        sampleCount: 5,
+                        lastProcessedIndex: 2
+                    }
+                }
+            );
+
+            await settle();
+
+            expect(stub.node.groups.size).toBe(1);
+            expect(stub.node.groups.get("").buffer).toEqual([1, 2, 3, 4, 5]);
+            expect(stub.node.groups.get("").sampleCount).toBe(5);
+            expect(stub.node.groups.get("").lastProcessedIndex).toBe(2);
+            // Legacy view still reports the same buffer
+            expect(stub.node.buffer.length).toBe(5);
+
+            await closeNode(stub.node);
+
+            // Saved back in v2 form, with the stale flat keys dropped
+            const saved = stub.store.signalAnalyzerState;
+            expect(saved.version).toBe(2);
+            expect(saved.groups[""].buffer).toEqual([1, 2, 3, 4, 5]);
+            expect(saved.buffer).toBeUndefined();
+            expect(saved.sampleCount).toBeUndefined();
+        });
+
+        it("restores one buffer per group from v2 state", async function () {
+            const stub = buildStubbedNode(
+                { id: "n1", mode: "vibration", windowSize: 50, persistState: true, groupBy: "topic" },
+                {
+                    signalAnalyzerState: {
+                        version: 2,
+                        groups: {
+                            "pump-01": { buffer: [1, 2, 3], timestamps: [], sampleCount: 3, lastProcessedIndex: 0 },
+                            "pump-02": { buffer: [4, 5], timestamps: [], sampleCount: 2, lastProcessedIndex: 0 }
+                        }
+                    }
+                }
+            );
+
+            await settle();
+
+            expect(stub.node.groups.size).toBe(2);
+            expect(stub.node.groups.get("pump-01").buffer).toEqual([1, 2, 3]);
+            expect(stub.node.groups.get("pump-02").buffer).toEqual([4, 5]);
+            expect(stub.node.groups.get("pump-02").sampleCount).toBe(2);
+
+            await closeNode(stub.node);
+        });
+
+        it("saves every group on close", async function () {
+            const stub = buildStubbedNode(
+                { id: "n1", mode: "vibration", windowSize: 50, persistState: true, groupBy: "topic" },
+                {}
+            );
+
+            await settle();
+
+            await feed(stub.node, { topic: "pump-01", payload: 1 });
+            await feed(stub.node, { topic: "pump-01", payload: 2 });
+            await feed(stub.node, { topic: "pump-02", payload: 3 });
+
+            await closeNode(stub.node);
+
+            const saved = stub.store.signalAnalyzerState;
+            expect(saved.version).toBe(2);
+            expect(Object.keys(saved.groups).sort()).toEqual(["pump-01", "pump-02"]);
+            expect(saved.groups["pump-01"].buffer).toEqual([1, 2]);
+            expect(saved.groups["pump-02"].buffer).toEqual([3]);
+        });
+
+        it("does not exceed maxGroups when restoring persisted state", async function () {
+            const groups = {};
+            for (let i = 0; i < 5; i++) {
+                groups["pump-0" + i] = { buffer: [i], timestamps: [], sampleCount: 1, lastProcessedIndex: 0 };
+            }
+
+            const stub = buildStubbedNode(
+                {
+                    id: "n1",
+                    mode: "vibration",
+                    windowSize: 50,
+                    persistState: true,
+                    groupBy: "topic",
+                    maxGroups: 2
+                },
+                { signalAnalyzerState: { version: 2, groups: groups } }
+            );
+
+            await settle();
+
+            expect(stub.node.groups.size).toBe(2);
+
+            await closeNode(stub.node);
+        });
+    });
 });

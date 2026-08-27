@@ -408,26 +408,37 @@ msg = {
 
 ### Signal Analyzer Output (FFT Mode)
 
+`msg.payload` stays the raw sample that completed the window; the analysis is
+attached as sibling properties.
+
 ```javascript
 msg = {
-  payload: {
-    frequencies: [0, 50, 100, ...],    // Hz
-    magnitudes: [0.1, 0.8, 0.3, ...],
-    phases: [0, 1.2, -0.5, ...],       // radians
-    peaks: [
-      { frequency: 50, magnitude: 0.8, index: 10 },
-      { frequency: 150, magnitude: 0.5, index: 30 }
-    ],
-    spectral: {
-      centroid: 125.5,      // Hz
-      crestFactor: 2.3,
-      rms: 0.45
-    }
+  payload: 0.45,                 // the sample that triggered this result
+  peaks: [
+    { frequency: 46.875, magnitude: 0.24, normalized: 1 },
+    { frequency: 140.6, magnitude: 0.08, normalized: 0.33 }
+  ],
+  dominantFrequency: 46.875,     // null when no peak passes the threshold
+  features: {
+    spectralCentroid: 85.2,      // Hz
+    spectralSpread: 41.7,        // Hz
+    rms: 0.42,
+    crestFactor: 3.5,
+    totalEnergy: 12.4
   },
-  sampleRate: 1000,           // Hz
-  windowSize: 1024,
-  windowFunction: "hann"
+  samplingRate: 1000,            // Hz
+  fftSize: 256,
+  windowFunction: "hann",        // hann | hamming | blackman | rectangular
+  overlapPercent: 50
 }
+```
+
+With **Output Format = `full`** the raw spectrum is added as two more top-level
+arrays (omitted in the default `peaks` format to keep messages small):
+
+```javascript
+msg.frequencies = [0, 3.9, 7.8, ...];   // Hz, fftSize/2 bins
+msg.magnitudes  = [0.01, 0.24, 0.03, ...];
 ```
 
 ### Signal Analyzer Output (Vibration Mode)
@@ -435,29 +446,93 @@ msg = {
 ```javascript
 msg = {
   payload: {
-    rms: 4.5,                 // mm/s
-    peak: 12.3,
-    crestFactor: 2.73,
-    kurtosis: 3.2,
-    skewness: 0.1,
+    rms: 3.0,
+    peakToPeak: 6.0,
+    peak: 3.0,
+    crestFactor: 1.0,
+    kurtosis: 1.0,
+    skewness: 0.0,
+    mean: 0.0,
+    stdDev: 3.0,
+    formFactor: 1.0,
+    impulseFactor: 1.0,
+    sampleEntropy: 0.12,
+    autocorrelation: -1.0,
+    periodicity: 0.98,
+    healthScore: 62,             // 0-100
 
     // ISO 10816-3 assessment
     iso10816: {
-      machineClass: "II",     // I, II, III, IV
-      zone: "B",              // A, B, C, D
-      assessment: "Acceptable",
-      thresholds: {
-        A_B: 2.8,
-        B_C: 7.1,
-        C_D: 18.0
-      }
-    },
-
-    healthScore: 78           // 0-100
+      zone: "C",                 // A | B | C | D
+      severity: "warning",       // ok | warning | alarm
+      recommendation: "Acceptable only for limited periods - schedule maintenance",
+      rmsVelocity: 3.0,          // mm/s, converted from inputUnit
+      machineClass: "class2",    // class1 | class2 | class3 | class4
+      limits: { ab: 1.12, bc: 2.8, cd: 7.1 },   // mm/s zone boundaries
+      zoneProgress: 4.65,        // % through the current zone
+      isAlarm: false,
+      isWarning: true,
+      inputUnit: "mm_s",         // mm_s | m_s | g | in_s
+      isValid: true              // false if the unit conversion is not applicable
+    }
   },
-  severity: "warning"
+  topic: "vibration-features",   // msg.topic is preserved when present
+  timestamp: 1750000000000,
+  windowSize: 20                 // samples actually used
 }
 ```
+
+Anomalies (crest factor above the configured threshold, or `|kurtosis| > 4`) are
+routed to **output 2** with the same shape.
+
+### Signal Analyzer Output (Peaks Mode)
+
+```javascript
+msg = {
+  payload: 8,                    // the current sample
+  isPeak: true,                  // true -> routed to output 2
+  peaks: [
+    { index: 1, value: 5, timestamp: 1750000000000, direction: "positive" }
+  ],
+  peakCount: 1,
+  stats: {
+    averagePeakHeight: 5,
+    maxPeakHeight: 5,
+    minPeakHeight: 5,
+    peakFrequency: 0.2           // peaks per sample
+  },
+  sampleCount: 5,                // samples seen in this buffer since start/reset
+  timestamp: 1750000000000
+}
+```
+
+### Signal Analyzer: per-device buffers
+
+By default the node keeps one buffer, so an interleaved stream from several
+machines is blended into a single analysis. Set **Group By** (`groupBy`) to a
+message property to keep an independent buffer per device:
+
+```javascript
+// Node config
+{ mode: "fft", fftSize: 256, groupBy: "topic", maxGroups: 50 }
+
+// Input — one node, many devices
+msg = { topic: "pump-01/vibration", payload: 0.45 };
+
+// Output — tagged with the buffer it was computed from
+msg = { topic: "pump-01/vibration", group: "pump-01/vibration", peaks: [...], ... };
+```
+
+- `groupBy` accepts nested paths, e.g. `payload.deviceId`.
+- Messages whose group property is missing or empty share one ungrouped buffer,
+  and their `msg.group` is `""`.
+- Each buffer fills independently: with `fftSize: 256` every device needs its own
+  256 samples before it produces a first result.
+- `maxGroups` (default 50) caps memory — the least recently used buffer is
+  dropped once the limit is exceeded.
+- `msg.reset = true` clears only the group the message belongs to;
+  `msg.reset = "all"` clears every group.
+
 
 ### Trend Predictor Output (RUL Mode)
 

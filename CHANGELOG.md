@@ -13,8 +13,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.3] - 2026-08-26 - Relicensed to Apache-2.0
 
-> Note: version `0.3.2` was published to npm directly without a corresponding commit on `main`. This release continues from `0.3.1` and skips `0.3.2` to avoid version drift.
-
 ### Changed
 
 - **License changed from MIT to Apache-2.0.** Apache-2.0 is the license
@@ -30,6 +28,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their own package name are asked to rename their Node-RED node type IDs and
   use their own palette category, so both packages can be installed side by
   side.
+
+---
+
+## [0.3.2] - 2026-08-23 - Per-device signal buffers
+
+### ✨ Added
+
+- **`signal-analyzer`: one buffer per device (`groupBy`)** — a single node can now
+  serve an interleaved stream from many machines. Set **Group By** to a message
+  property (typically `topic`, nested paths like `payload.deviceId` work too) and
+  the node keeps an independent sample buffer per value, emitting one result per
+  device tagged with `msg.group`. Works in all five modes (fft, vibration, peaks,
+  envelope, cepstrum). **Max Groups** (default 50) caps memory by dropping the
+  least recently used buffer. Leaving `groupBy` empty preserves the previous
+  single-buffer behaviour. Closes [#25](https://github.com/blanpa/node-red-contrib-condition-monitoring/issues/25).
+- **`signal-analyzer`: `msg.reset` is now group-scoped** — `msg.reset = true`
+  clears the buffer of the group the message belongs to (the single buffer when
+  grouping is off, i.e. unchanged); the new `msg.reset = "all"` clears every group.
+
+### 🐛 Fixed
+
+- **`signal-analyzer`: restoring a persisted buffer silently failed.** The node
+  assigned its `debug` config flag onto `this.debug`, overwriting Node-RED's own
+  `node.debug()` logger. State persistence logs through that method, so every
+  restore threw inside the deserialize `try` and the saved buffer was discarded
+  (enabling Debug Mode broke the node's own logging the same way). The flag now
+  lives on `node.debugEnabled`.
+- Persisted signal buffers are stored per group (format `version: 2`). State
+  written by earlier versions is migrated into the ungrouped buffer on load, and
+  the stale flat keys are dropped.
+
+### 🔒 Dependencies
+
+- Lockfile refreshed with a plain `npm audit fix` (no `--force`, `package.json`
+  untouched): 37 → 29 advisories. Notable in-range moves: node-red 4.1.11 →
+  4.1.13, axios 1.16 → 1.19, tar 7.5.11 → 7.5.22, form-data, ip-address,
+  fast-uri, brace-expansion, js-yaml and the babel toolchain.
+- `onnxruntime-node` is held at 1.24.3 in the lockfile: 1.27.0 aborts the jest
+  worker (SIGABRT) in the ML path-validation integration flow on the CI runner.
+  The declared range stays `^1.24.3`.
+- The remaining advisories all sit in dev or optional dependencies and need
+  breaking changes to clear (jsonata via node-red 4.x, tar via npm's bundled
+  tree, adm-zip via the optional ML runtimes).
+  `npm audit --omit=dev --omit=optional --audit-level=high` stays at **0**.
+
+### 📚 Documentation
+
+- `docs/API.md`: the Signal Analyzer message interfaces were rewritten against
+  the actual implementation. The documented FFT output was wrong (it showed
+  `payload.frequencies` / `payload.spectral` / `sampleRate` / `windowSize`,
+  none of which the node emits) and the Vibration ISO 10816 block did not match
+  the emitted fields. Peaks mode and the per-device grouping are now documented.
+
+---
 
 ## [0.3.1] - 2026-06-15 - Data sources, vision pipeline & hardening
 
