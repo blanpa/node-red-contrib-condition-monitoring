@@ -1,5 +1,11 @@
 module.exports = function (RED) {
     "use strict";
+    const { copyPassthrough } = require("./utils/message");
+
+    // Upper bound for the sliding window. Every sample touches the live window,
+    // so the ceiling is a usability guard, not a formality — the old 1_000_000
+    // let a single message cost a million-element pass.
+    const MAX_WINDOW_SIZE = 100000;
 
     // Import shared statistics utilities
     const stats = require("./utils/statistics");
@@ -31,7 +37,7 @@ module.exports = function (RED) {
         this.anomalyMethod = config.anomalyMethod || "zscore"; // zscore, iqr, threshold, mahalanobis
         this.threshold = clampFloat(config.threshold, 0.1, 1000, 3.0);
         this.warningThreshold = clampFloat(config.warningThreshold, 0.1, 1000, 2.0); // For Mahalanobis warning level
-        this.windowSize = clampInt(config.windowSize, 2, 1000000, 100);
+        this.windowSize = clampInt(config.windowSize, 2, MAX_WINDOW_SIZE, 100);
         this.minThreshold =
             config.minThreshold !== "" && config.minThreshold !== undefined ? parseFloat(config.minThreshold) : null;
         this.maxThreshold =
@@ -771,11 +777,7 @@ module.exports = function (RED) {
                 };
             }
 
-            Object.keys(msg).forEach((key) => {
-                if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                    outputMsg[key] = msg[key];
-                }
-            });
+            copyPassthrough(outputMsg, msg);
 
             const statusColor = isAnomalous ? "red" : "green";
             node.status({ fill: statusColor, shape: "dot", text: "ρ=" + correlation.toFixed(3) });

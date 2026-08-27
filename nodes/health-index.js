@@ -1,5 +1,6 @@
 module.exports = function (RED) {
     "use strict";
+    const { copyPassthrough } = require("./utils/message");
 
     // Import state persistence helper
     const persistenceHelper = require("./utils/persistence-helper");
@@ -35,6 +36,11 @@ module.exports = function (RED) {
         node.healthHistory = [];
         node.lastHealthIndex = null;
         node.lastStatus = null;
+        // Monotonic sample counter driving the persistence throttle. It must NOT
+        // be derived from the buffer length: the buffer is capped, so once it
+        // saturates `length % N` is a constant — the throttle then fires on
+        // every sample or on none, depending on the configured window size.
+        node.sampleCount = 0;
 
         // Initialize state persistence using helper
         // Note: We need to set persistState on node for the helper to work
@@ -221,16 +227,9 @@ module.exports = function (RED) {
                 outputMsg.topic = outputTopic;
             }
 
-            // Copy original message properties
-            Object.keys(msg).forEach((key) => {
-                if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                    outputMsg[key] = msg[key];
-                }
-                // Preserve original topic if no output topic configured
-                if (key === "topic" && !outputTopic) {
-                    outputMsg.topic = msg.topic;
-                }
-            });
+            // Copy original message properties; keep the inbound topic when no
+            // output topic is configured.
+            copyPassthrough(outputMsg, msg, { preserveTopic: !outputTopic });
 
             // Set status
             const statusText =
@@ -259,7 +258,8 @@ module.exports = function (RED) {
             node.lastStatus = status;
 
             // Persist state periodically (every 10th sample)
-            if (node.stateManager && node.healthHistory.length % 10 === 0) {
+            node.sampleCount++;
+            if (node.stateManager && node.sampleCount % 10 === 0) {
                 persistCurrentState();
             }
 

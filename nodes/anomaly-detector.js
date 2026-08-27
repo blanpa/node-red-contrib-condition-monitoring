@@ -1,5 +1,12 @@
 module.exports = function (RED) {
     "use strict";
+    const { copyPassthrough } = require("./utils/message");
+
+    // Upper bound for the sliding window. Every sample walks the live window —
+    // and the order-statistic methods (IQR, percentile) sort it — so the ceiling
+    // is a usability guard, not a formality: the old 1_000_000 let a single
+    // message cost a million-element pass.
+    const MAX_WINDOW_SIZE = 100000;
 
     // Import shared statistics utilities
     const stats = require("./utils/statistics");
@@ -27,7 +34,7 @@ module.exports = function (RED) {
 
         // Common Configuration
         this.method = config.method || "zscore"; // zscore, iqr, threshold, percentile, ema, cusum, moving-average
-        this.windowSize = clampInt(config.windowSize, 2, 1000000, 100);
+        this.windowSize = clampInt(config.windowSize, 2, MAX_WINDOW_SIZE, 100);
 
         // Z-Score specific
         this.zscoreThreshold = clampFloat(config.zscoreThreshold, 0.1, 1000, 3.0);
@@ -110,6 +117,27 @@ module.exports = function (RED) {
 
         // State
         this.dataBuffer = [];
+        // Monotonic sample counter driving the persistence throttle. It must NOT
+        // be derived from the buffer length: the buffer is capped, so once it
+        // saturates `length % N` is a constant — the throttle then fires on
+        // every sample or on none, depending on the configured window size.
+        this.sampleCount = 0;
+        // Live window kept in lockstep with dataBuffer.
+        //
+        //   windowValues — the bare numbers, so the hot path stops rebuilding
+        //     the whole window with `.map()` on every single message.
+        //   running      — a Welford accumulator giving mean/σ in O(1) for the
+        //     moment-based methods (zscore / ema / cusum / moving-average).
+        //     `remove()` drifts over long run-lengths (see utils/statistics), so
+        //     it is rebuilt once per full window turnover: amortised O(1), and
+        //     the drift can never span more than one window of removals.
+        //
+        // Everything that mutates the window must go through pushWindow() or
+        // resyncWindow() — keeping three structures in sync by hand is how they
+        // silently diverge.
+        this.windowValues = [];
+        this.running = new stats.RunningStats();
+        this.runningRemovals = 0;
         this.lastAnomalyState = false; // Track previous anomaly state for hysteresis
         this.consecutiveAnomalies = 0; // Counter for consecutive anomalies
         this.consecutiveNormals = 0; // Counter for consecutive normal values
@@ -139,6 +167,46 @@ module.exports = function (RED) {
         this.cusumNeg = 0;
         this.initialized = false;
 
+        /** Rebuild windowValues + the accumulator from the authoritative dataBuffer. */
+        function resyncWindow() {
+            node.windowValues = node.dataBuffer.map(function (d) {
+                return d.value;
+            });
+            node.running.reset();
+            node.runningRemovals = 0;
+            for (let i = 0; i < node.windowValues.length; i++) {
+                node.running.push(node.windowValues[i]);
+            }
+        }
+
+        /** Append a sample to the live window, evicting the oldest once it is full. */
+        function pushWindow(value) {
+            node.dataBuffer.push({ timestamp: Date.now(), value: value });
+            node.windowValues.push(value);
+            node.running.push(value);
+
+            if (node.dataBuffer.length > node.windowSize) {
+                node.dataBuffer.shift();
+                const dropped = node.windowValues.shift();
+                node.running.remove(dropped);
+                node.runningRemovals++;
+                if (node.runningRemovals >= node.windowSize) {
+                    resyncWindow();
+                }
+            }
+        }
+
+        /**
+         * Mean/σ of the live window, straight from the accumulator.
+         *
+         * Returned as a `moments` hint to the moment-based detectors; they fall
+         * back to the O(n) computation in utils/statistics when it is absent
+         * (batch mode, multi-sensor mode), which stays the canonical definition.
+         */
+        function liveMoments() {
+            return { mean: node.running.mean(), stdDev: node.running.stdDev(), n: node.running.count() };
+        }
+
         // Initialize state persistence using helper
         const persistence = persistenceHelper.initializeStatePersistence(node, {
             stateKey: "anomalyDetectorState",
@@ -147,6 +215,7 @@ module.exports = function (RED) {
             onStateLoaded: function (state) {
                 if (state.dataBuffer && Array.isArray(state.dataBuffer)) {
                     node.dataBuffer = state.dataBuffer;
+                    resyncWindow();
                 }
                 if (state.ema !== undefined) {
                     node.ema = state.ema;
@@ -250,9 +319,18 @@ module.exports = function (RED) {
         }
 
         // Z-Score method with configurable thresholds (for msg.config override)
-        function detectZScoreWithConfig(value, values, threshold, warning) {
-            // Single source of truth for mean/stdDev — utils/statistics is the canonical implementation.
-            const z = stats.calculateZScore(value, values);
+        function detectZScoreWithConfig(value, values, threshold, warning, moments) {
+            // Single source of truth for mean/stdDev — utils/statistics is the canonical
+            // implementation. `moments` is the streaming shortcut for the live window
+            // (O(1) Welford); it must reproduce calculateZScore, degenerate case included.
+            const z =
+                moments && moments.n >= 2
+                    ? {
+                          mean: moments.mean,
+                          stdDev: moments.stdDev,
+                          zScore: moments.stdDev === 0 ? 0 : (value - moments.mean) / moments.stdDev
+                      }
+                    : stats.calculateZScore(value, values);
             const mean = z.mean;
             const stdDev = z.stdDev;
             const zScore = z.zScore;
@@ -411,7 +489,7 @@ module.exports = function (RED) {
         }
 
         // EMA method
-        function detectEMA(value, values) {
+        function detectEMA(value, values, moments) {
             if (!node.initialized) {
                 node.ema = value;
                 node.initialized = true;
@@ -420,8 +498,8 @@ module.exports = function (RED) {
 
             node.ema = node.emaAlpha * value + (1 - node.emaAlpha) * node.ema;
 
-            const mean = calculateMean(values);
-            const stdDev = calculateStdDev(values, mean);
+            const mean = moments ? moments.mean : calculateMean(values);
+            const stdDev = moments ? moments.stdDev : calculateStdDev(values, mean);
             const deviation = Math.abs(value - node.ema);
             const deviationFactor = stdDev === 0 ? 0 : deviation / stdDev;
 
@@ -466,8 +544,9 @@ module.exports = function (RED) {
         }
 
         // CUSUM method
-        function detectCUSUM(value, values) {
-            const target = node.cusumTarget !== null ? node.cusumTarget : calculateMean(values);
+        function detectCUSUM(value, values, moments) {
+            const target =
+                node.cusumTarget !== null ? node.cusumTarget : moments ? moments.mean : calculateMean(values);
 
             const deviation = value - target;
             node.cusumPos = Math.max(0, node.cusumPos + deviation - node.cusumDrift);
@@ -509,9 +588,9 @@ module.exports = function (RED) {
         }
 
         // Moving Average method
-        function detectMovingAverage(value, values) {
-            const movingAverage = calculateMean(values);
-            const stdDev = calculateStdDev(values, movingAverage);
+        function detectMovingAverage(value, values, moments) {
+            const movingAverage = moments ? moments.mean : calculateMean(values);
+            const stdDev = moments ? moments.stdDev : calculateStdDev(values, movingAverage);
             const deviation = Math.abs(value - movingAverage);
             const deviationFactor = stdDev === 0 ? 0 : deviation / stdDev;
 
@@ -1206,6 +1285,7 @@ module.exports = function (RED) {
                 // Reset function
                 if (msg.reset === true) {
                     node.dataBuffer = [];
+                    resyncWindow();
                     node.sensorBuffers = {}; // For multi-sensor mode
                     node.sensorStates = {}; // Hysteresis states per sensor
                     node.ema = null;
@@ -1280,17 +1360,17 @@ module.exports = function (RED) {
                 }
 
                 // Add to buffer
-                node.dataBuffer.push({ timestamp: Date.now(), value: value });
-                if (node.dataBuffer.length > node.windowSize) {
-                    node.dataBuffer.shift();
-                }
+                pushWindow(value);
 
                 // Persist state periodically (every 10th sample to reduce overhead)
-                if (node.stateManager && node.dataBuffer.length % 10 === 0) {
+                node.sampleCount++;
+                if (node.stateManager && node.sampleCount % 10 === 0) {
                     persistCurrentState();
                 }
 
-                const values = node.dataBuffer.map((d) => d.value);
+                // No per-message allocation: windowValues is maintained in lockstep.
+                const values = node.windowValues;
+                const moments = liveMoments();
 
                 // Minimum data check
                 const minRequired = node.method === "iqr" ? 4 : 2;
@@ -1309,7 +1389,13 @@ module.exports = function (RED) {
                 let result;
                 switch (activeMethod) {
                     case "zscore":
-                        result = detectZScoreWithConfig(value, values, activeZscoreThreshold, activeZscoreWarning);
+                        result = detectZScoreWithConfig(
+                            value,
+                            values,
+                            activeZscoreThreshold,
+                            activeZscoreWarning,
+                            moments
+                        );
                         break;
                     case "iqr":
                         result = detectIQRWithConfig(value, values, activeIqrMultiplier);
@@ -1321,16 +1407,22 @@ module.exports = function (RED) {
                         result = detectPercentile(value, values);
                         break;
                     case "ema":
-                        result = detectEMA(value, values);
+                        result = detectEMA(value, values, moments);
                         break;
                     case "cusum":
-                        result = detectCUSUM(value, values);
+                        result = detectCUSUM(value, values, moments);
                         break;
                     case "moving-average":
-                        result = detectMovingAverage(value, values);
+                        result = detectMovingAverage(value, values, moments);
                         break;
                     default:
-                        result = detectZScoreWithConfig(value, values, activeZscoreThreshold, activeZscoreWarning);
+                        result = detectZScoreWithConfig(
+                            value,
+                            values,
+                            activeZscoreThreshold,
+                            activeZscoreWarning,
+                            moments
+                        );
                 }
 
                 // Apply hysteresis to prevent alarm flickering
@@ -1444,15 +1536,12 @@ module.exports = function (RED) {
                 // Add method-specific details
                 Object.assign(outputMsg, result.details);
 
-                // Copy original message properties
-                Object.keys(msg).forEach(function (key) {
-                    if (!Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                        outputMsg[key] = msg[key];
-                    }
-                    // Preserve original topic if no output topic configured
-                    if (key === "topic" && !node.outputTopic) {
-                        outputMsg.topic = msg.topic;
-                    }
+                // Copy original message properties (payload included — this node
+                // only sets outputMsg.payload in some branches); keep the inbound
+                // topic when no output topic is configured.
+                copyPassthrough(outputMsg, msg, {
+                    includePayload: true,
+                    preserveTopic: !node.outputTopic
                 });
 
                 // Output: normal to output 1, anomaly to output 2
@@ -1478,6 +1567,7 @@ module.exports = function (RED) {
             // The manager has its own cleanup via Node-RED lifecycle
 
             node.dataBuffer = [];
+            resyncWindow();
             node.ema = null;
             node.cusumPos = 0;
             node.cusumNeg = 0;

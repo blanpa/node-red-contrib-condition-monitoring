@@ -1,5 +1,11 @@
 module.exports = function (RED) {
     "use strict";
+    const { copyPassthrough } = require("./utils/message");
+
+    // Upper bound for the sliding window. Every sample touches the live window,
+    // so the ceiling is a usability guard, not a formality — the old 1_000_000
+    // let a single message cost a million-element pass.
+    const MAX_WINDOW_SIZE = 100000;
 
     // Import state persistence helper
     const persistenceHelper = require("./utils/persistence-helper");
@@ -13,7 +19,7 @@ module.exports = function (RED) {
         this.mode = config.mode || "prediction"; // prediction, rate-of-change, rul
         this.method = config.method || "linear"; // linear, exponential
         this.predictionSteps = clampInt(config.predictionSteps, 1, 100000, 10);
-        this.windowSize = clampInt(config.windowSize, 2, 1000000, 50);
+        this.windowSize = clampInt(config.windowSize, 2, MAX_WINDOW_SIZE, 50);
         this.threshold =
             config.threshold !== "" && config.threshold !== undefined ? parseFloat(config.threshold) : null;
 
@@ -47,6 +53,11 @@ module.exports = function (RED) {
 
         // State
         this.buffer = [];
+        // Monotonic sample counter driving the persistence throttle. It must NOT
+        // be derived from the buffer length: the buffer is capped, so once it
+        // saturates `length % N` is a constant — the throttle then fires on
+        // every sample or on none, depending on the configured window size.
+        this.sampleCount = 0;
 
         // Debug logging helper
         const debugLog = function (message) {
@@ -633,7 +644,8 @@ module.exports = function (RED) {
             }
 
             // Persist state periodically (every 10th sample to reduce overhead)
-            if (node.stateManager && node.buffer.length % 10 === 0) {
+            node.sampleCount++;
+            if (node.stateManager && node.sampleCount % 10 === 0) {
                 persistCurrentState();
             }
 
@@ -722,11 +734,7 @@ module.exports = function (RED) {
                 timestamp: timestamp
             };
 
-            Object.keys(msg).forEach(function (key) {
-                if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                    outputMsg[key] = msg[key];
-                }
-            });
+            copyPassthrough(outputMsg, msg);
 
             // Status display
             const statusColor =
@@ -774,7 +782,8 @@ module.exports = function (RED) {
             }
 
             // Persist state periodically (every 10th sample to reduce overhead)
-            if (node.stateManager && node.buffer.length % 10 === 0) {
+            node.sampleCount++;
+            if (node.stateManager && node.sampleCount % 10 === 0) {
                 persistCurrentState();
             }
 
@@ -820,11 +829,7 @@ module.exports = function (RED) {
                 timestamp: timestamp
             };
 
-            Object.keys(msg).forEach(function (key) {
-                if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                    outputMsg[key] = msg[key];
-                }
-            });
+            copyPassthrough(outputMsg, msg);
 
             if (prediction) {
                 const trendIcon = prediction.slope > 0 ? "↗" : prediction.slope < 0 ? "↘" : "→";
@@ -902,11 +907,7 @@ module.exports = function (RED) {
                 timestamp: timestamp
             };
 
-            Object.keys(msg).forEach(function (key) {
-                if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                    outputMsg[key] = msg[key];
-                }
-            });
+            copyPassthrough(outputMsg, msg);
 
             if (rateOfChange !== null) {
                 const sign = rateOfChange >= 0 ? "+" : "";

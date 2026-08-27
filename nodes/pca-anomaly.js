@@ -1,5 +1,11 @@
 module.exports = function (RED) {
     "use strict";
+    const { copyPassthrough } = require("./utils/message");
+
+    // Upper bound for the sliding window. Every sample touches the live window,
+    // so the ceiling is a usability guard, not a formality — the old 1_000_000
+    // let a single message cost a million-element pass.
+    const MAX_WINDOW_SIZE = 100000;
 
     // Import state persistence helper
     const persistenceHelper = require("./utils/persistence-helper");
@@ -29,7 +35,7 @@ module.exports = function (RED) {
 
         // Configuration
         this.nComponents = clampInt(config.nComponents, 1, 1000, 2);
-        this.windowSize = clampInt(config.windowSize, 2, 1000000, 100);
+        this.windowSize = clampInt(config.windowSize, 2, MAX_WINDOW_SIZE, 100);
         this.threshold = clampFloat(config.threshold, 0.1, 1000, 3.0);
         this.method = config.method || "t2"; // t2 (Hotelling's T²), spe (Squared Prediction Error), combined
         this.autoComponents = config.autoComponents !== false; // Auto-select components by explained variance
@@ -507,11 +513,7 @@ module.exports = function (RED) {
                 }
 
                 // Preserve original message properties
-                Object.keys(msg).forEach(function (key) {
-                    if (key !== "payload" && !Object.prototype.hasOwnProperty.call(outputMsg, key)) {
-                        outputMsg[key] = msg[key];
-                    }
-                });
+                copyPassthrough(outputMsg, msg);
 
                 // Update status
                 const statusColor = isAnomaly ? "red" : "green";
