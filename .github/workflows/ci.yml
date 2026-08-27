@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# No job here writes to the repo, the API, or the package registry.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -24,7 +28,7 @@ jobs:
           cache: npm
 
       - name: Install (without optional ML runtimes)
-        run: npm install --ignore-optional --no-audit --no-fund
+        run: npm ci --omit=optional --no-audit --no-fund
 
       - name: Run unit tests
         run: npm test
@@ -40,7 +44,7 @@ jobs:
           cache: npm
 
       - name: Install (without optional ML runtimes)
-        run: npm install --ignore-optional --no-audit --no-fund
+        run: npm ci --omit=optional --no-audit --no-fund
 
       - name: Run coverage
         run: npm run test:coverage
@@ -64,7 +68,7 @@ jobs:
           cache: npm
 
       - name: Install (without optional ML runtimes)
-        run: npm install --ignore-optional --no-audit --no-fund
+        run: npm ci --omit=optional --no-audit --no-fund
 
       - name: ESLint
         run: npm run lint
@@ -87,7 +91,7 @@ jobs:
           cache: npm
 
       - name: Install (without optional ML runtimes)
-        run: npm install --ignore-optional --no-audit --no-fund
+        run: npm ci --omit=optional --no-audit --no-fund
 
       - name: npm audit (required deps, fail on high)
         run: npm audit --omit=dev --omit=optional --audit-level=high
@@ -106,7 +110,7 @@ jobs:
           cache: npm
 
       - name: Install (with optional ML runtimes)
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: ONNX smoke test
         run: npm run test:smoke-onnx

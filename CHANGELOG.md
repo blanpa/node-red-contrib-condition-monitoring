@@ -9,6 +9,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🔒 Security
+
+- **All `RED.httpAdmin` routes are now permission-guarded.** Node-RED does not
+  apply `adminAuth` to routes a node registers itself — 17 of the 18 routes in
+  this package had no `RED.auth.needsPermission()` guard and stayed reachable on
+  the editor port even with adminAuth configured. They now require
+  `<node>.read` / `<node>.write`. The new `nodes/utils/admin-auth.js` wrapper
+  **fails closed** (401) when `RED.auth` is unavailable, and a test asserts
+  structurally that no unguarded registration can be added back.
+- **`POST /ml-inference/upload-tfjs`: arbitrary file write (path traversal).**
+  TF.js weight-shard names came straight from the request body into
+  `path.join(modelDir, w.name)`, so a weight named `../../…` wrote anywhere the
+  Node-RED process could reach. All request-supplied names — weight shards, the
+  model name, `x-filename`, and the delete/versions route parameters — now go
+  through `safeChildPath()`, which strips directory components and re-validates
+  the result against the allowlist in `utils/path-validator`.
+- **Model uploads are size-capped.** Both upload endpoints buffered the entire
+  request body in memory with no ceiling. The limit is 128 MB, configurable via
+  `mlInferenceMaxUploadBytes` in `settings.js`; over-sized requests get a 413
+  instead of an OOM.
+- **`GET /ml-inference/registries/mlflow/models` validates its target.** The
+  operator-supplied `registryUri` was fetched unchecked, making the editor port a
+  request proxy. Non-`http(s)` schemes, malformed URLs and URL-embedded
+  credentials are now rejected, and `mlInferenceAllowedRegistryHosts` in
+  `settings.js` pins the registry host when set. The MLflow token moved from the
+  query string (which lands in proxy logs and browser history) to an
+  `x-mlflow-token` header. Responses are capped at 8 MB with a 15 s timeout.
+- **`llm-analyzer` warns when the API key is in the node config**, where it is
+  stored in plain text in `flows.json` and every flow export. Credentials remain
+  the supported path. Mirrors the existing S3 warning in `training-data-collector`.
+
+### 🐛 Fixed
+
+- **Model uploads hung behind Node-RED's admin body parser.** Both upload routes
+  read the raw request stream, but Node-RED mounts body parsers on the admin
+  router — with the stream already drained, `data`/`end` never fired and the
+  JSON `upload-tfjs` request hung until it timed out. The handlers now use the
+  parsed body when one exists and only stream as a fallback.
+- **`GET /ml-inference/registries/mlflow/models` forced `https`**, so an
+  `http://` MLflow registry could never be reached. It now shares the node's own
+  MLflow client, which honours the URL's scheme.
+- **The persistence throttle never throttled.** Four nodes gated their periodic
+  state save on `buffer.length % 10 === 0`, but the buffer is capped — once it
+  saturates that expression is a constant, so the save fired on *every* message
+  (any window size that is a multiple of 10, including the default 100) or on
+  *none*. Replaced with a monotonic sample counter in `anomaly-detector`,
+  `health-index` and `trend-predictor`.
+- **Integration harness: the EADDRINUSE retry left every consumer on the old
+  port.** `startRed()` re-listened on a fresh port but still reported and
+  substituted (`$RED_PORT`) the first one it tried.
+
+### ⚡ Performance
+
+- **`anomaly-detector` no longer rebuilds its window on every message.** The hot
+  path called `dataBuffer.map()` per sample and then re-reduced the result. A
+  `windowValues` array is now maintained in lockstep with the buffer, and the
+  moment-based methods (z-score, EMA, CUSUM, moving-average) read mean/σ from a
+  Welford accumulator in O(1) — the `RunningStats` class that already existed in
+  `utils/statistics` but had no production consumer. The accumulator is rebuilt
+  once per full window turnover, which bounds the reverse-update drift; tests
+  assert the streaming figures and the resulting anomaly decisions match the
+  canonical batch computation sample for sample.
+- **`windowSize` is capped at 100 000 instead of 1 000 000.** Every sample walks
+  (and for the order-statistic methods sorts) the live window, so the old ceiling
+  made a single message cost a million-element pass.
+
+### 🧹 Changed
+
+- **`ml-inference.js` split** — the ~575 lines of HTTP surface moved to
+  `nodes/ml-inference-admin.js`, which takes the runtime state it needs by
+  injection. The node module drops from 2618 to ~1900 lines and the security
+  posture of the admin API is reviewable in one file.
+- **`utils/message.js`** — the "copy the incoming message's properties onto the
+  outgoing one" loop was duplicated verbatim 12 times across six nodes. Now one
+  `copyPassthrough()` with the two variants (`includePayload`, `preserveTopic`)
+  the call sites actually needed.
+- **CI installs with `npm ci`**, not `npm install` — the lockfile is tracked
+  precisely so it can be enforced. Both workflows also declare a least-privilege
+  `permissions: contents: read` default.
+- **Coverage gate raised** from 55/45/55/55 to 60/51/64/61, measured the way CI
+  measures it — with `--omit=optional` (64.8/55.8/70.4/66.0). The margin is wide
+  on purpose: one run came in ~4.5 points low and did not reproduce, so the gate
+  sits below that outlier rather than just below the typical reading.
+- **Test Runner settle delay raised 12 s → 45 s** and made configurable via
+  `TEST_SUITE_SETTLE_SECONDS`. The delay is a ceiling, not a measurement:
+  `/test` always waits that long and reports whatever answered in the meantime,
+  so a short one turns a slow test into a *false negative*. On a cold run — 23
+  ONNX sessions opening at once with ~52 MB of pretrained weights still outside
+  the page cache — 12 s under-reported (22 of 48 tests, `ok: false`, with every
+  chain actually working). `tools/build-test-suite.js` also refuses to overwrite
+  the committed suite with a partial one when the `test-models/` fixtures are
+  missing (it used to silently drop 11 tabs), and the stale "3s settle"
+  description on the runner comment is corrected.
+- **Removed `.npmignore`.** The `files` allowlist in `package.json` takes
+  precedence, so the file had no effect — verified with `npm pack --dry-run`,
+  which lists an identical 69 files with and without it.
+
 ---
 
 ## [0.3.2] - 2026-08-23 - Per-device signal buffers

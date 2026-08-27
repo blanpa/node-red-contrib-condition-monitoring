@@ -943,6 +943,14 @@ pip install "numpy<2"
 
 ## Performance Features
 
+### Sliding-window statistics
+
+The Anomaly Detector keeps its live window as a plain value array plus a Welford
+accumulator, so the moment-based methods (z-score, EMA, CUSUM, moving average)
+read mean and standard deviation in **O(1)** per message instead of re-reducing
+the window. The order-statistic methods (IQR, percentile) still sort the window,
+which is inherent to them. `windowSize` is capped at 100 000.
+
 ### High-Performance FFT
 
 The Signal Analyzer uses `fft.js` with the Radix-4 Cooley-Tukey algorithm:
@@ -975,6 +983,58 @@ contextStorage: {
 }
 ```
 Or use the provided Docker image which includes all dependencies.
+
+---
+
+## Security
+
+### Admin API permissions
+
+Every HTTP route these nodes register on the Node-RED admin API is guarded by
+`RED.auth.needsPermission()`. Node-RED does **not** apply `adminAuth` to routes a
+node registers itself, so this is the node's own responsibility. If you use
+`adminAuth` with per-user permissions, grant:
+
+| Permission | Grants |
+|---|---|
+| `ml-inference.read` | Runtime/bridge probing, model listing, registry browsing |
+| `ml-inference.write` | Model upload and deletion |
+| `training-data-collector.read` | Dataset listing and download |
+| `signal-analyzer.read`, `isolation-forest-anomaly.read` | Library availability probes |
+
+A wildcard permission (`*`) covers all of them.
+
+### Settings
+
+Optional hardening knobs for `settings.js`:
+
+```javascript
+module.exports = {
+    // Ceiling for POST /ml-inference/upload and /upload-tfjs.
+    // Default: 134217728 (128 MB). Bodies above this get a 413.
+    mlInferenceMaxUploadBytes: 128 * 1024 * 1024,
+
+    // When set, the MLflow registry proxy only accepts these hostnames.
+    // Leave unset to allow any http/https host (schemes other than
+    // http/https and URL-embedded credentials are always rejected).
+    mlInferenceAllowedRegistryHosts: ["mlflow.internal.example.com"],
+
+    // Restricts which directories model paths may resolve into.
+    conditionMonitoring: {
+        allowedModelPaths: ["/data/models"]
+    }
+};
+```
+
+### Credentials
+
+Store API keys in a node's **credential** field, never in the plain config
+field. Credentials are kept out of `flows.json` and out of flow exports;
+`llm-analyzer` warns at startup if it finds a key in the config instead. S3
+credentials for `training-data-collector` come from `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` only — values in the node config are ignored.
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
 
 ---
 

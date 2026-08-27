@@ -19,10 +19,26 @@
  *   - A Test Runner tab exposes GET /test: it broadcasts a trigger to every
  *     generator (via link nodes), collects each validator's verdict, and after
  *     a settle delay returns a JSON pass/fail summary.
+ *
+ *     The settle delay is a fixed ceiling, not a measurement: /test always takes
+ *     that long and reports whatever came back in the meantime. Too short and it
+ *     under-reports — a *false negative*, since a test that had not answered yet
+ *     is indistinguishable from one that never will. That shows up on a cold run
+ *     (23 ONNX sessions opening at once, ~52 MB of pretrained weights still
+ *     outside the page cache), so the default has margin for it. Override with
+ *     TEST_SUITE_SETTLE_SECONDS when regenerating for a slower machine.
  */
 
 const fs = require("fs");
 const path = require("path");
+
+// Seconds the Test Runner waits before summarising. See the note above: this is
+// a ceiling, so err generous — the cost of overshooting is a slower /test, the
+// cost of undershooting is a run that reports passes it never collected.
+const SETTLE_SECONDS = (() => {
+    const n = parseInt(process.env.TEST_SUITE_SETTLE_SECONDS, 10);
+    return Number.isFinite(n) && n > 0 ? n : 45;
+})();
 const { PNG } = require("pngjs");
 const jpeg = require("jpeg-js");
 
@@ -2251,7 +2267,7 @@ if (DEFECT_OK) {
     comment(
         z,
         "Run all tests:  curl http://localhost:1890/test   |   Errors:  curl http://localhost:1890/errors",
-        "Broadcasts to every generator, collects validator verdicts + caught errors, replies with JSON after a 3s settle.",
+        "Broadcasts to every generator, collects validator verdicts + caught errors, replies with JSON once the settle delay elapses.",
         40
     );
 
@@ -2309,9 +2325,9 @@ if (DEFECT_OK) {
         id: delayId,
         type: "delay",
         z,
-        name: "settle 12s",
+        name: "settle " + SETTLE_SECONDS + "s",
         pauseType: "delay",
-        timeout: "12",
+        timeout: String(SETTLE_SECONDS),
         timeoutUnits: "seconds",
         x: 520,
         y: 160,
@@ -2607,9 +2623,37 @@ if (DEFECT_OK) {
 
 // ---- write ------------------------------------------------------------------
 
+// Tabs are emitted conditionally on the presence of their model/image fixtures
+// in ./test-models. Regenerating without those files therefore produces a
+// *smaller* suite and overwrites the committed one with it — a silent
+// truncation that looks like a successful build. Refuse to do that unless it
+// was asked for explicitly.
+const SKIPPED = [
+    [!SAMPLES, "test-models/samples.json (trained defect-segmentation tabs)"],
+    [!PRETRAINED, "test-models/{dog,person}.jpg + imagenet_classes.txt (pretrained-photo tabs)"],
+    [!YOLO_OK, "test-models/yolov10n.onnx (YOLOv10 tab)"],
+    [!DEPTH_OK, "test-models/depth.onnx (depth tab)"],
+    [!POSE_OK, "test-models/yolov8n-pose.onnx (pose tab)"],
+    [!DEFECT_OK, "test-models/defect_seg.onnx (defect tabs)"]
+]
+    .filter(([missing]) => missing)
+    .map(([, what]) => what);
+
 const outPath = path.join(__dirname, "..", "examples", "test-suite.json");
-fs.writeFileSync(outPath, JSON.stringify(nodes, null, 2) + "\n");
 const tabs = nodes.filter((n) => n.type === "tab").length;
 const tests = resultLinkOutIds.length;
+
+if (SKIPPED.length && !process.argv.includes("--allow-partial")) {
+    console.error("Refusing to write a partial suite — these fixtures are missing:");
+    SKIPPED.forEach((w) => console.error("  - " + w));
+    console.error("");
+    console.error(`Would have written only ${tabs} tabs / ${tests} tests, overwriting the full suite.`);
+    console.error("Run `bash tools/fetch-models.sh` first, or pass --allow-partial if that is what you want.");
+    process.exit(1);
+}
+
+fs.writeFileSync(outPath, JSON.stringify(nodes, null, 2) + "\n");
 console.log(`Wrote ${outPath}`);
 console.log(`Tabs: ${tabs} | Auto-validated tests: ${tests} | Total nodes: ${nodes.length}`);
+console.log(`Settle delay: ${SETTLE_SECONDS}s (override with TEST_SUITE_SETTLE_SECONDS)`);
+if (SKIPPED.length) console.warn(`PARTIAL SUITE — missing: ${SKIPPED.join(", ")}`);
