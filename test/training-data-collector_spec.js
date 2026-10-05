@@ -11,8 +11,11 @@ describe("training-data-collector Node", function () {
     let testDataDir;
 
     beforeEach(function (done) {
-        testDataDir = path.join(os.tmpdir(), "node-red-test-" + Date.now());
-        fs.mkdirSync(testDataDir, { recursive: true });
+        testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "node-red-test-"));
+        // The node writes below RED.settings.userDir. Point it at the temp dir:
+        // helper.load()'s third argument is credentials, not settings, so
+        // without this every export landed in <repo>/training-data/.
+        helper.settings({ userDir: testDataDir });
         helper.startServer(done);
     });
 
@@ -24,7 +27,7 @@ describe("training-data-collector Node", function () {
                     if (fs.existsSync(testDataDir)) {
                         fs.rmSync(testDataDir, { recursive: true, force: true });
                     }
-                } catch (err) {
+                } catch {
                     // Ignore cleanup errors
                 }
                 done();
@@ -73,7 +76,6 @@ describe("training-data-collector Node", function () {
         helper.load(trainingDataCollectorNode, flow, { userDir: testDataDir }, function () {
             const n1 = helper.getNode("n1");
             try {
-                expect(n1).toBeDefined();
                 expect(n1.name).toBe("test-collector");
                 expect(n1.datasetName).toBe("test_dataset");
                 expect(n1.mode).toBe("batch");
@@ -97,9 +99,12 @@ describe("training-data-collector Node", function () {
             // Check buffer
             setTimeout(function () {
                 try {
-                    expect(n1.dataBuffer).toBeDefined();
-                    expect(n1.dataBuffer.length).toBe(3);
-                    expect(n1.dataBuffer[0].features.value).toBe(42.5);
+                    expect(n1.dataBuffer.map((s) => s.features)).toEqual([
+                        { value: 42.5 },
+                        { value: 43.2 },
+                        { value: 41.8 }
+                    ]);
+                    expect(n1.dataBuffer.map((s) => s.label)).toEqual(["normal", "normal", "normal"]);
                     done();
                 } catch (err) {
                     done(err);
@@ -246,7 +251,8 @@ describe("training-data-collector Node", function () {
 
             setTimeout(function () {
                 try {
-                    n1.statistics.should.have.property("value");
+                    Object.keys(n1.statistics).should.eql(["value"]);
+                    n1.statistics.value.sumSquares.should.equal(1400);
                     n1.statistics.value.count.should.equal(3);
                     n1.statistics.value.min.should.equal(10);
                     n1.statistics.value.max.should.equal(30);
@@ -273,10 +279,12 @@ describe("training-data-collector Node", function () {
                 try {
                     msg.should.have.property("topic", "stats");
                     msg.payload.should.have.property("samples", 2);
-                    msg.payload.should.have.property("features");
-                    msg.payload.should.have.property("labelDistribution");
-                    msg.payload.labelDistribution.should.have.property("normal", 1);
-                    msg.payload.labelDistribution.should.have.property("fault", 1);
+                    msg.payload.features.should.eql(["temp"]);
+                    msg.payload.labelDistribution.should.eql({ normal: 1, fault: 1 });
+                    msg.payload.classes.should.eql(["normal", "fault"]);
+                    msg.payload.totalCollected.should.equal(2);
+                    msg.payload.statistics.temp.mean.should.equal(67.5);
+                    msg.payload.bufferUsage.should.equal("2.0%");
                     done();
                 } catch (err) {
                     done(err);
@@ -352,13 +360,24 @@ describe("training-data-collector Node", function () {
                     msg.should.have.property("topic", "export");
                     msg.payload.should.have.property("success", true);
                     msg.payload.should.have.property("samples", 2);
-                    msg.payload.should.have.property("files");
-                    msg.payload.files.length.should.be.greaterThan(0);
+                    // 2 samples at the default 80/10/10 split, unshuffled:
+                    // 1 → train, 0 → val, 1 → test; plus the metadata file.
+                    msg.payload.splits.should.eql({ train: 1, val: 0, test: 1 });
+                    msg.payload.files
+                        .map((f) => path.basename(f).replace(/^.*_(?=train|test|metadata)/, ""))
+                        .should.eql(["train.csv", "test.csv", "metadata.json"]);
+                    msg.payload.files
+                        .every((f) => path.dirname(f) === path.join(testDataDir, "training-data"))
+                        .should.be.true();
 
-                    // Check CSV file exists
-                    const csvFile = msg.payload.files.find((f) => f.endsWith(".csv"));
-                    csvFile.should.be.ok();
-                    fs.existsSync(csvFile).should.be.true();
+                    // The files must contain the samples, not just exist.
+                    const rows = (f) => fs.readFileSync(f, "utf8").trim().split("\n");
+                    const train = rows(msg.payload.files[0]);
+                    const test = rows(msg.payload.files[1]);
+                    train[0].should.equal("timestamp,temp,vib,label,severity");
+                    train.length.should.equal(2);
+                    train[1].split(",").slice(1).should.eql(["65", "0.5", "normal", "0"]);
+                    test[1].split(",").slice(1).should.eql(["70", "0.8", "fault", "0"]);
 
                     done();
                 } catch (err) {
@@ -384,17 +403,17 @@ describe("training-data-collector Node", function () {
             n2.on("input", function (msg) {
                 try {
                     msg.payload.should.have.property("success", true);
-                    const jsonlFile = msg.payload.files.find((f) => f.endsWith(".jsonl"));
-                    jsonlFile.should.be.ok();
-                    fs.existsSync(jsonlFile).should.be.true();
-
-                    // Verify JSONL content - may have 1 or 2 lines depending on clear
-                    const content = fs.readFileSync(jsonlFile, "utf8");
-                    const lines = content.trim().split("\n");
-                    lines.length.should.be.greaterThanOrEqual(1);
-
-                    const line1 = JSON.parse(lines[0]);
-                    line1.should.have.property("features");
+                    // Default 80/10/10 split of 2 unshuffled samples → one
+                    // line in the train file, one in the test file.
+                    const records = msg.payload.files
+                        .filter((f) => f.endsWith(".jsonl"))
+                        .map((f) => fs.readFileSync(f, "utf8").trim().split("\n"))
+                        .map((lines) => lines.map((l) => JSON.parse(l)));
+                    records.map((r) => r.length).should.eql([1, 1]);
+                    const strip = (r) => ({ features: r.features, label: r.label });
+                    strip(records[0][0]).should.eql({ features: [0.5, 0.6], label: "normal" });
+                    strip(records[1][0]).should.eql({ features: [0.7, 0.8], label: "fault" });
+                    Number.isNaN(Date.parse(records[0][0].timestamp)).should.be.false();
 
                     done();
                 } catch (err) {
@@ -421,17 +440,25 @@ describe("training-data-collector Node", function () {
                     msg.payload.should.have.property("success", true);
 
                     const jsonFile = msg.payload.files.find((f) => f.endsWith(".json") && !f.includes("metadata"));
-                    jsonFile.should.be.ok();
 
                     const content = JSON.parse(fs.readFileSync(jsonFile, "utf8"));
-                    content.should.have.property("datasetInfo");
-                    content.should.have.property("data");
-                    content.datasetInfo.should.have.property("features");
-                    content.datasetInfo.should.have.property("statistics");
+                    content.data.should.eql([{ x: [65], y: "normal" }]);
+                    content.datasetInfo.name.should.equal("test_dataset");
+                    content.datasetInfo.samples.should.equal(1);
+                    content.datasetInfo.features.should.eql(["temp"]);
+                    content.datasetInfo.classes.should.eql(["normal"]);
+                    content.datasetInfo.featureDimension.should.equal(1);
+                    content.datasetInfo.statistics.should.eql({
+                        temp: { count: 1, mean: 65, std: 0, min: 65, max: 65 }
+                    });
 
-                    // Check metadata file
+                    // Check metadata file content
                     const metaFile = msg.payload.files.find((f) => f.includes("metadata"));
-                    metaFile.should.be.ok();
+                    const meta = JSON.parse(fs.readFileSync(metaFile, "utf8"));
+                    meta.datasetInfo.exportedSamples.should.equal(1);
+                    meta.features.names.should.eql(["temp"]);
+                    meta.labels.should.eql({ mode: "manual", classes: ["normal"], distribution: { normal: 1 } });
+                    meta.config.exportFormat.should.equal("json");
 
                     done();
                 } catch (err) {
@@ -600,13 +627,24 @@ describe("training-data-collector Node", function () {
             n2.on("input", function (msg) {
                 try {
                     msg.payload.should.have.property("success", true);
-                    msg.payload.should.have.property("splits");
-                    msg.payload.splits.train.should.equal(6);
-                    msg.payload.splits.val.should.equal(2);
-                    msg.payload.splits.test.should.equal(2);
+                    msg.payload.splits.should.eql({ train: 6, val: 2, test: 2 });
 
-                    // Should have 3 CSV files + metadata
-                    msg.payload.files.length.should.be.greaterThanOrEqual(3);
+                    // 3 CSV files + metadata, and (unshuffled) the samples
+                    // land in the splits in arrival order.
+                    msg.payload.files.length.should.equal(4);
+                    const values = (suffix) =>
+                        fs
+                            .readFileSync(
+                                msg.payload.files.find((f) => f.endsWith(suffix)),
+                                "utf8"
+                            )
+                            .trim()
+                            .split("\n")
+                            .slice(1)
+                            .map((row) => Number(row.split(",")[1]));
+                    values("_train.csv").should.eql([0, 1, 2, 3, 4, 5]);
+                    values("_val.csv").should.eql([6, 7]);
+                    values("_test.csv").should.eql([8, 9]);
 
                     done();
                 } catch (err) {
@@ -657,7 +695,7 @@ describe("training-data-collector Node", function () {
             n2.on("input", function (msg) {
                 try {
                     msg.payload.should.have.property("success", false);
-                    msg.payload.should.have.property("error");
+                    msg.payload.error.should.equal("No data to export");
                     msg.payload.samples.should.equal(0);
                     done();
                 } catch (err) {

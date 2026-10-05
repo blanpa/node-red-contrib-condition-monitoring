@@ -15,21 +15,26 @@
             minPeakHeight: { value: "" },
             minPeakDistance: { value: 5 },
             peakType: { value: "both" },
-            vibOutputMode: { value: "all" },
             vibInputUnit: { value: "mm_s" },
-            iso10816Class: { value: "class2" },
+            iso10816Class: { value: "group2_rigid" },
             // Envelope analysis settings
             envelopeBandLow: { value: 500 },
             envelopeBandHigh: { value: 5000 },
+            envelopePeakFloor: { value: 8 },
             bearingBPFO: { value: "" },
             bearingBPFI: { value: "" },
             bearingBSF: { value: "" },
             bearingFTF: { value: "" },
+            bearingBalls: { value: "" },
+            bearingBallDiameter: { value: "" },
+            bearingPitchDiameter: { value: "" },
+            bearingContactAngle: { value: "" },
             shaftSpeed: { value: "" },
             // Cepstrum analysis settings
             quefrencyRangeLow: { value: 0.001 },
             quefrencyRangeHigh: { value: 0.1 },
             gearToothCount: { value: "" },
+            gearSerThreshold: { value: 1 },
             cepstrumThreshold: { value: 0.1 },
             outputTopic: { value: "" },
             groupBy: { value: "" },
@@ -59,6 +64,15 @@
             });
             
             showModeConfig(this.mode || "fft");
+
+            // The shaft speed is one setting shown in two mode panels. Only one
+            // element may carry the node-input id (a duplicate id is never read
+            // back on save), so the cepstrum panel mirrors the real field.
+            var shaftSpeed = $("#node-input-shaftSpeed");
+            var shaftSpeedMirror = $("#cm-cepstrum-shaftSpeed");
+            shaftSpeedMirror.val(shaftSpeed.val());
+            shaftSpeedMirror.on("change input", function() { shaftSpeed.val($(this).val()); });
+            shaftSpeed.on("change input", function() { shaftSpeedMirror.val($(this).val()); });
             
             $(".cm-section-header").on("click", function() {
                 var $content = $(this).next(".cm-section-content");
@@ -145,7 +159,7 @@
                     <div class="cm-config-item">
                         <label>Overlap (%)</label>
                         <input type="number" id="node-input-overlapPercent" min="0" max="90" value="50">
-                        <div class="cm-help-text">Overlap between consecutive FFT frames (0-90%)</div>
+                        <div class="cm-help-text">Overlap between consecutive analyses of a sample-by-sample stream (0-90%): 50 % = one result every half FFT size. Array payloads are analysed once per message.</div>
                     </div>
                     <div class="cm-config-item">
                         <label>Peak Threshold (default: 0.1)</label>
@@ -166,43 +180,43 @@
                 <h4><i class="fa fa-vibrate"></i> Vibration Settings</h4>
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
-                        <label>Output Mode</label>
-                        <select id="node-input-vibOutputMode">
-                            <option value="all">All features in one message</option>
-                            <option value="separate">Separate outputs</option>
-                        </select>
-                        <div class="cm-help-text">How to output calculated features</div>
-                    </div>
-                    <div class="cm-config-item">
                         <label><i class="fa fa-ruler"></i> Input Data Unit</label>
                         <select id="node-input-vibInputUnit">
-                            <option value="mm_s" selected>Velocity (mm/s) - ISO 10816 native</option>
+                            <option value="mm_s" selected>Velocity (mm/s) - ISO 20816 native</option>
                             <option value="m_s">Velocity (m/s)</option>
                             <option value="g">Acceleration (g)</option>
                             <option value="m_s2">Acceleration (m/s²)</option>
-                            <option value="raw">Raw/Dimensionless (ISO 10816 disabled)</option>
+                            <option value="raw">Raw/Dimensionless (ISO rating disabled)</option>
                         </select>
-                        <div class="cm-help-text">Unit of incoming vibration data for correct ISO 10816 evaluation</div>
+                        <div class="cm-help-text">Unit of incoming vibration data. Acceleration is integrated to velocity over 10–1000 Hz using the configured sampling rate.</div>
                     </div>
                 </div>
                 <div class="cm-config-grid" style="margin-top: 10px;">
                     <div class="cm-config-item">
-                        <label><i class="fa fa-industry"></i> ISO 10816 Machine Class</label>
+                        <label><i class="fa fa-industry"></i> ISO 20816-3 Machine Group</label>
                         <select id="node-input-iso10816Class">
-                            <option value="class1">Class I: Small machines (≤15 kW)</option>
-                            <option value="class2" selected>Class II: Medium machines (15-75 kW)</option>
-                            <option value="class3">Class III: Large rigid foundation (&gt;75 kW)</option>
-                            <option value="class4">Class IV: Large soft foundation (turbines)</option>
+                            <optgroup label="ISO 20816-3 (industrial machines > 15 kW)">
+                                <option value="group1_rigid">Group 1: large machines 300 kW – 50 MW, rigid foundation</option>
+                                <option value="group1_flexible">Group 1: large machines 300 kW – 50 MW, flexible foundation</option>
+                                <option value="group2_rigid" selected>Group 2: medium machines 15 – 300 kW, rigid foundation</option>
+                                <option value="group2_flexible">Group 2: medium machines 15 – 300 kW, flexible foundation</option>
+                            </optgroup>
+                            <optgroup label="ISO 10816-1 / ISO 2372 classes (legacy)">
+                                <option value="class1">Class I: small machines up to 15 kW</option>
+                                <option value="class2">Class II: medium machines 15 – 75 kW</option>
+                                <option value="class3">Class III: large machines, rigid foundation</option>
+                                <option value="class4">Class IV: large machines, flexible foundation</option>
+                            </optgroup>
                         </select>
-                        <div class="cm-help-text">ISO 10816-3 classification for vibration severity</div>
+                        <div class="cm-help-text">Zone table for the vibration severity rating. Rigid: foundation natural frequency above the main excitation; flexible: below.</div>
                     </div>
                 </div>
                 <div class="cm-info-box" style="margin-top: 10px;">
                     <i class="fa fa-info-circle"></i>
-                    <b>ISO 10816-3:</b> Vibration severity evaluation based on RMS velocity (mm/s). 
-                    Select correct input unit above for accurate zone (A-D) assessment.
-                    <br><b>Note:</b> Acceleration data is converted to velocity using f=50Hz (typical industrial frequency).
-                </div>
+                    <b>ISO 20816-3:</b> Vibration severity evaluation based on broadband RMS velocity (mm/s, 10–1000 Hz), zones A–D.
+                    Select the correct input unit above.
+                    <br><b>Acceleration input:</b> waveform frames (array payloads of at least 16 samples, sampling rate above 20 Hz) are integrated to velocity bin-wise in the frequency domain; scalar streams use the single-frequency relation v = a / (2πf) at the shaft frequency.
+                    </div>
             </div>
             
             <!-- Peak Detection Config -->
@@ -212,7 +226,7 @@
                     <div class="cm-config-item">
                         <label>Minimum Peak Height</label>
                         <input type="number" id="node-input-minPeakHeight" step="any" placeholder="auto">
-                        <div class="cm-help-text">Leave empty for auto-threshold</div>
+                        <div class="cm-help-text">Leave empty for automatic (mean ± 2σ of the window)</div>
                     </div>
                     <div class="cm-config-item">
                         <label>Minimum Peak Distance (default: 5)</label>
@@ -248,12 +262,37 @@
                         <div class="cm-help-text">Upper cutoff frequency for bandpass</div>
                     </div>
                     <div class="cm-config-item">
+                        <label>Peak Floor (× noise)</label>
+                        <input type="number" id="node-input-envelopePeakFloor" min="1" step="any" placeholder="8">
+                        <div class="cm-help-text">A line must exceed this multiple of the local spectral noise floor. 8 = no noise peaks; lower for weaker early defects.</div>
+                    </div>
+                    <div class="cm-config-item">
                         <label>Shaft Speed (RPM)</label>
                         <input type="number" id="node-input-shaftSpeed" min="0" step="any" placeholder="e.g. 1800">
-                        <div class="cm-help-text">Rotation speed for fault frequency calc</div>
+                        <div class="cm-help-text">Default rotation speed. Override per message with <code>msg.rpm</code> for variable-speed drives.</div>
                     </div>
                 </div>
-                <h5 style="margin-top: 16px; color: #666;"><i class="fa fa-cog"></i> Bearing Fault Frequencies (Hz)</h5>
+                <h5 style="margin-top: 16px; color: #666;"><i class="fa fa-circle-o"></i> Bearing Geometry (derives the fault frequencies)</h5>
+                <div class="cm-config-grid">
+                    <div class="cm-config-item">
+                        <label>Rolling Elements (n)</label>
+                        <input type="number" id="node-input-bearingBalls" min="0" step="1" placeholder="e.g. 9">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Element Diameter d</label>
+                        <input type="number" id="node-input-bearingBallDiameter" min="0" step="any" placeholder="e.g. 7.94">
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Pitch Diameter D</label>
+                        <input type="number" id="node-input-bearingPitchDiameter" min="0" step="any" placeholder="e.g. 39.04">
+                        <div class="cm-help-text">Same unit as d</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Contact Angle α (°)</label>
+                        <input type="number" id="node-input-bearingContactAngle" min="0" max="90" step="any" placeholder="0">
+                    </div>
+                </div>
+                <h5 style="margin-top: 16px; color: #666;"><i class="fa fa-cog"></i> Bearing Fault Frequencies (Hz) — optional, override the derived values</h5>
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
                         <label>BPFO (Outer Race)</label>
@@ -274,8 +313,9 @@
                 </div>
                 <div style="margin-top: 12px; padding: 10px; background: #e3f2fd; border-radius: 4px; font-size: 11px;">
                     <i class="fa fa-info-circle" style="color: #1976d2;"></i>
-                    <strong>Tip:</strong> Calculate bearing frequencies from manufacturer data sheet using:
-                    <br>BPFO = n/2 × (1 - Bd/Pd × cos(θ)) × RPM/60
+                    <strong>How the frequencies are resolved:</strong> a typed-in value wins; anything left empty is derived
+                    from the geometry and the current shaft speed (BPFO = n/2 · f<sub>r</sub> · (1 − d/D · cos α), BPFI = n/2 · f<sub>r</sub> · (1 + d/D · cos α),
+                    BSF = D/2d · f<sub>r</sub> · (1 − (d/D · cos α)²), FTF = f<sub>r</sub>/2 · (1 − d/D · cos α)). Output <code>bearingFreqs.source</code> says which.
                 </div>
             </div>
             
@@ -306,8 +346,8 @@
                 <div class="cm-config-grid">
                     <div class="cm-config-item">
                         <label>Shaft Speed (RPM)</label>
-                        <input type="number" id="node-input-shaftSpeed" min="0" step="any" value="1800">
-                        <div class="cm-help-text">Shaft rotation speed for GMF calculation</div>
+                        <input type="number" id="cm-cepstrum-shaftSpeed" min="0" step="any" placeholder="e.g. 1800">
+                        <div class="cm-help-text">Shaft speed for the gear-mesh calculation (same setting as in envelope mode). Required for gear diagnosis; override per message with <code>msg.rpm</code>.</div>
                     </div>
                 </div>
                 <h5 style="margin-top: 16px; color: #666;"><i class="fa fa-cog"></i> Gear Configuration</h5>
@@ -315,13 +355,18 @@
                     <div class="cm-config-item">
                         <label>Gear Tooth Count</label>
                         <input type="text" id="node-input-gearToothCount" placeholder="e.g., 20,45,18">
-                        <div class="cm-help-text">Comma-separated tooth counts for each gear</div>
+                        <div class="cm-help-text">Comma-separated tooth counts of the gears on this shaft</div>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Sideband Energy Ratio limit</label>
+                        <input type="number" id="node-input-gearSerThreshold" min="0.01" step="0.1" placeholder="1">
+                        <div class="cm-help-text">A gear is reported when the summed amplitude of its first 6 sidebands on each side exceeds this multiple of the mesh amplitude (twice the limit = high). Typical: below 1 healthy; trend it per machine.</div>
                     </div>
                 </div>
                 <div style="margin-top: 12px; padding: 10px; background: #fff3e0; border-radius: 4px; font-size: 11px;">
                     <i class="fa fa-lightbulb" style="color: #ff9800;"></i>
                     <strong>Gear Mesh Frequency:</strong> GMF = Shaft_RPM/60 × Tooth_Count
-                    <br>Sidebands at GMF ± n×Shaft_Freq indicate gear damage.
+                    <br>Sidebands at GMF ± n×Shaft_Freq indicate gear damage; the node reports their summed amplitude relative to the mesh line (<code>msg.gears[].sidebandEnergyRatio</code>). Needs the shaft speed and a frame long enough to separate the sidebands (FFT bin width below a quarter of the shaft frequency). The cepstrum peaks themselves are reported for inspection.
                 </div>
             </div>
         </div>
@@ -462,6 +507,12 @@
         <b>Use cases:</b> Adaptive analysis based on operating conditions or equipment type.</dd>
     </dl>
     
+    <p><b>Shaft speed per message:</b> in vibration, envelope and cepstrum mode <code>msg.rpm</code> (or <code>msg.shaftSpeed</code>,
+    <code>msg.config.shaftSpeed</code>) overrides the configured shaft speed, so variable-speed drives get correct fault
+    frequencies and acceleration-to-velocity conversion. Bearing values (<code>msg.config.bearingBPFO</code> …,
+    <code>msg.config.bearingBalls</code>, <code>bearingBallDiameter</code>, <code>bearingPitchDiameter</code>,
+    <code>bearingContactAngle</code>) can be overridden the same way.</p>
+
     <h3>Outputs</h3>
     <ol>
         <li><b>Output 1 (Normal)</b> - Regular analysis results</li>
@@ -549,16 +600,19 @@ pump-03/vibration --+     groupBy: "topic"</pre>
         <dt>healthScore <span class="property-type">number</span></dt>
         <dd>Simplified 0-100 health indicator based on all metrics</dd>
         
-        <dt>iso10816 <span class="property-type">object</span></dt>
-        <dd>ISO 10816-3 vibration severity assessment:
+        <dt>iso20816 <span class="property-type">object</span></dt>
+        <dd>ISO 20816-3 vibration severity assessment (<code>iso10816</code> is kept as an alias of the same object):
         <pre>{
   "zone": "A"|"B"|"C"|"D"|"N/A",
   "severity": "good"|"acceptable"|"warning"|"critical"|"unknown",
   "recommendation": "...",
   "rmsVelocity": 2.5,
-  "machineClass": "class2",
-  "limits": { "ab": 1.12, "bc": 2.8, "cd": 7.1 },
+  "machineClass": "group2_rigid",
+  "standard": "ISO 20816-3",
+  "limits": { "ab": 1.4, "bc": 2.8, "cd": 4.5 },
   "zoneProgress": 45,
+  "conversion": "none"|"scale"|"spectral-integration"|"single-frequency",
+  "band": [10, 500],
   "isAlarm": false,
   "isWarning": false,
   "inputUnit": "mm_s",
@@ -573,25 +627,24 @@ pump-03/vibration --+     groupBy: "topic"</pre>
     </dl>
     
     <h3>Input Data Unit Conversion</h3>
-    <p>ISO 10816-3 requires RMS velocity in mm/s. The node automatically converts:</p>
+    <p>The severity rating needs broadband RMS velocity in mm/s (10–1000 Hz). The node converts:</p>
     <table>
         <tr><th>Input Unit</th><th>Conversion</th></tr>
         <tr><td>Velocity (mm/s)</td><td>Direct use - no conversion</td></tr>
         <tr><td>Velocity (m/s)</td><td>× 1000</td></tr>
-        <tr><td>Acceleration (g)</td><td>v = (g × 9810) / (2π × 50Hz)</td></tr>
-        <tr><td>Acceleration (m/s²)</td><td>v = (a × 1000) / (2π × 50Hz)</td></tr>
-        <tr><td>Raw/Dimensionless</td><td>ISO 10816 disabled</td></tr>
+        <tr><td>Acceleration (g, m/s²)</td><td>Frame payloads (array, ≥ 16 samples, sampling rate &gt; 20 Hz): spectral integration — each FFT bin divided by 2πf, RMS over 10 Hz … min(1000 Hz, f<sub>s</sub>/2). Scalar streams: v = a / (2π · f<sub>shaft</sub>) (marked <code>single-frequency</code>).</td></tr>
+        <tr><td>Raw/Dimensionless</td><td>Rating disabled</td></tr>
     </table>
-    <p><b>Note:</b> Acceleration conversion uses 50Hz as typical industrial frequency. For accurate results, use velocity sensors or adjust the conversion externally.</p>
     
-    <h3>ISO 10816-3 Machine Classes</h3>
+    <h3>ISO 20816-3 Zone Limits (mm/s RMS)</h3>
     <table>
-        <tr><th>Class</th><th>Description</th><th>Zone A/B</th><th>Zone B/C</th><th>Zone C/D</th></tr>
-        <tr><td>I</td><td>Small machines ≤15 kW</td><td>0.71 mm/s</td><td>1.8 mm/s</td><td>4.5 mm/s</td></tr>
-        <tr><td>II</td><td>Medium 15-75 kW</td><td>1.12 mm/s</td><td>2.8 mm/s</td><td>7.1 mm/s</td></tr>
-        <tr><td>III</td><td>Large rigid foundation</td><td>1.8 mm/s</td><td>4.5 mm/s</td><td>11.2 mm/s</td></tr>
-        <tr><td>IV</td><td>Large soft foundation</td><td>2.8 mm/s</td><td>7.1 mm/s</td><td>18.0 mm/s</td></tr>
+        <tr><th>Machine group</th><th>Foundation</th><th>A/B</th><th>B/C</th><th>C/D</th></tr>
+        <tr><td>Group 1: 300 kW – 50 MW</td><td>rigid</td><td>2.3</td><td>4.5</td><td>7.1</td></tr>
+        <tr><td>Group 1: 300 kW – 50 MW</td><td>flexible</td><td>3.5</td><td>7.1</td><td>11.0</td></tr>
+        <tr><td>Group 2: 15 – 300 kW</td><td>rigid</td><td>1.4</td><td>2.8</td><td>4.5</td></tr>
+        <tr><td>Group 2: 15 – 300 kW</td><td>flexible</td><td>2.3</td><td>4.5</td><td>7.1</td></tr>
     </table>
+    <p>The legacy ISO 10816-1 / ISO 2372 classes I–IV (0.71/1.8/4.5 · 1.12/2.8/7.1 · 1.8/4.5/11.2 · 2.8/7.1/18.0) remain selectable for existing flows.</p>
     
     <h3>Peak Detection Output</h3>
     <dl>
@@ -614,6 +667,27 @@ pump-03/vibration --+     groupBy: "topic"</pre>
         <br>• <code>peakFrequency</code>: Peaks per sample</dd>
     </dl>
     
+    <h3>Envelope Mode Output</h3>
+    <dl class="message-properties">
+        <dt>bearingFaults <span class="property-type">array</span></dt>
+        <dd>Matches between envelope-spectrum peaks and the expected frequencies. Peaks count only when they exceed
+        <b>Peak Floor</b> × the local spectral noise floor (30th percentile of ±0.4 % of the spectrum), matching tolerance is
+        5 % but at most 0.15 × shaft frequency and at least 1.5 bins, harmonics of a bearing line count only when its
+        fundamental is present, and a line that also sits on a shaft harmonic carries <code>coincidesWith1X</code>.
+        Each entry carries <code>type</code>, <code>harmonic</code>, <code>description</code>, <code>expectedFreq</code>,
+        <code>detectedFreq</code>, <code>magnitude</code>, <code>severity</code>. Types:
+        <br>• <b>BPFO / BPFI / BSF / FTF</b> — bearing line (fundamental to 3rd harmonic)
+        <br>• <b>BPFI-Sideband</b> — BPFI harmonic with a ±1X / ±2X sideband (<code>sideband</code> = ±1, ±2): inner-race defect passing through the load zone, a firmer diagnosis than the line alone
+        <br>• <b>1X</b> imbalance, <b>2X</b> misalignment
+        <br>• <b>Looseness</b> — four or more harmonics of 1X present (<code>harmonics</code> lists them)
+        <br>• <b>SubSynchronous</b> — component at 0.38–0.48X (<code>order</code>): oil whirl or rub; suppressed when it matches the configured FTF</dd>
+        <dt>bearingFreqs <span class="property-type">object</span></dt>
+        <dd><code>{ BPFO, BPFI, BSF, FTF, source }</code> — the frequencies used, <code>source</code> is
+        <code>manual</code>, <code>geometry</code>, <code>mixed</code> or <code>none</code></dd>
+        <dt>shaftSpeed / shaftFrequency <span class="property-type">number</span></dt>
+        <dd>RPM and Hz actually used for this analysis</dd>
+    </dl>
+
     <h3>Frequency Analysis Guidelines</h3>
     <table>
         <tr><th>Fault Type</th><th>Typical Frequency</th></tr>

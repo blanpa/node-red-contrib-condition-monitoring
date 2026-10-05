@@ -723,6 +723,7 @@ function comment(z, name, info, y) {
         outputs: 2,
         nodeConfig: {
             method: "cusum",
+            cusumMode: "raw", // drift / thresholds in signal units
             cusumTarget: 10,
             cusumThreshold: 5,
             cusumWarning: 3.5,
@@ -731,6 +732,28 @@ function comment(z, name, info, y) {
         },
         seq: [10, 10, 13, 13, 13, 13, 13],
         expect: { isAnomaly: true }
+    });
+    // Same detector in σ units (the editor default for new nodes): a baseline of
+    // 10 ± 0.1 gives σ = 0.1, so a shift of +0.4 is a 4σ step. First shifted
+    // sample: 4 − 0.5 = 3.5 (not yet above the warning level); second: the sum
+    // passes the critical threshold of 5.
+    makeTest({
+        z,
+        y: 600,
+        name: "CUSUM drift (sigma)",
+        nodeType: "anomaly-detector",
+        outputs: 2,
+        nodeConfig: {
+            method: "cusum",
+            cusumMode: "sigma",
+            cusumTarget: 10,
+            cusumThreshold: 5,
+            cusumWarning: 3.5,
+            cusumDrift: 0.5,
+            hysteresisEnabled: false
+        },
+        seq: [9.9, 10.1, 9.9, 10.1, 9.9, 10.1, 9.9, 10.1, 9.9, 10.1, 9.9, 10.1, 10.4, 10.4],
+        expect: { isAnomaly: true, severity: "critical" }
     });
 }
 
@@ -2621,6 +2644,77 @@ if (DEFECT_OK) {
     }
 }
 
+// ---- editor defaults ----------------------------------------------------------
+
+// A node dropped from the palette carries every property of its editor
+// `defaults`; the nodes built above only set what a test cares about. Importing
+// them as-is leaves the missing select fields blank in the edit dialog, and one
+// press of "Done" then stores those blanks. Fill the gaps from each node's own
+// editor definition so the imported suite looks like hand-built flows.
+//
+// The definition lives in the <script> block of nodes/<type>.html as an
+// argument to RED.nodes.registerType; evaluating that block against a stub
+// captures it without parsing JavaScript by hand.
+const vm = require("vm");
+const editorDefaultsCache = {};
+function editorDefaults(type) {
+    if (type in editorDefaultsCache) return editorDefaultsCache[type];
+    let defaults = null;
+    try {
+        const html = fs.readFileSync(path.join(__dirname, "..", "nodes", type + ".html"), "utf8");
+        const captured = {};
+        const anything = new Proxy(function () {}, {
+            get: (target, prop) => (prop === Symbol.toPrimitive ? () => "" : anything),
+            apply: () => anything
+        });
+        const sandbox = {
+            // everything but registerType (validators, comms, …) is a no-op
+            RED: new Proxy(
+                { nodes: { registerType: (name, def) => (captured[name] = def) } },
+                { get: (target, prop) => (prop in target ? target[prop] : anything) }
+            ),
+            $: anything,
+            jQuery: anything,
+            window: {},
+            document: anything,
+            console: console
+        };
+        const scripts = html.match(/<script type="text\/javascript">[\s\S]*?<\/script>/g) || [];
+        scripts.forEach(function (block) {
+            const code = block.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "");
+            try {
+                vm.runInNewContext(code, sandbox, { timeout: 2000 });
+            } catch (e) {
+                // a block that needs a real browser at load time: skip it
+            }
+        });
+        if (captured[type] && captured[type].defaults) {
+            defaults = {};
+            Object.keys(captured[type].defaults).forEach(function (key) {
+                defaults[key] = captured[type].defaults[key].value;
+            });
+        }
+    } catch (e) {
+        // not one of this package's nodes
+    }
+    editorDefaultsCache[type] = defaults;
+    return defaults;
+}
+
+let filledNodes = 0;
+nodes.forEach(function (n) {
+    const defaults = editorDefaults(n.type);
+    if (!defaults) return;
+    let filled = false;
+    Object.keys(defaults).forEach(function (key) {
+        if (!(key in n) && defaults[key] !== undefined) {
+            n[key] = defaults[key];
+            filled = true;
+        }
+    });
+    if (filled) filledNodes++;
+});
+
 // ---- write ------------------------------------------------------------------
 
 // Tabs are emitted conditionally on the presence of their model/image fixtures
@@ -2656,4 +2750,5 @@ fs.writeFileSync(outPath, JSON.stringify(nodes, null, 2) + "\n");
 console.log(`Wrote ${outPath}`);
 console.log(`Tabs: ${tabs} | Auto-validated tests: ${tests} | Total nodes: ${nodes.length}`);
 console.log(`Settle delay: ${SETTLE_SECONDS}s (override with TEST_SUITE_SETTLE_SECONDS)`);
+console.log(`Editor defaults filled in on ${filledNodes} nodes`);
 if (SKIPPED.length) console.warn(`PARTIAL SUITE — missing: ${SKIPPED.join(", ")}`);

@@ -111,3 +111,61 @@ describe("json-source Node", function () {
         });
     });
 });
+
+describe("json-source hardening", function () {
+    beforeEach(function (done) {
+        helper.startServer(done);
+    });
+    afterEach(function (done) {
+        helper.unload().then(function () {
+            helper.stopServer(done);
+        });
+    });
+
+    it("ignores non-numeric min/max instead of emitting NaN", function (done) {
+        const flow = [
+            {
+                id: "n1",
+                type: "json-source",
+                seed: 1,
+                fields: '{"t":{"mean":60,"noise":0,"min":"abc","max":"zzz"},"p":{"mean":60,"noise":0,"max":"10"}}',
+                wires: [["n2"]]
+            },
+            { id: "n2", type: "helper" }
+        ];
+        helper.load(jsNode, flow, function () {
+            helper.getNode("n2").on("input", function (m) {
+                try {
+                    expect(m.payload.t).toBe(60);
+                    expect(m.payload.p).toBe(10); // numeric string bound still applies
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            });
+            helper.getNode("n1").receive({ payload: 1 });
+        });
+    });
+
+    it("shows a stopped status after 'stop' and clears the timer", function (done) {
+        const flow = [{ id: "n1", type: "json-source", intervalMs: 50, wires: [[]] }];
+        helper.load(jsNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const statuses = [];
+            n1.status = (s) => statuses.push(s);
+            n1.receive({ payload: "start" });
+            setTimeout(function () {
+                n1.receive({ payload: "stop" });
+                try {
+                    expect(n1.timer).toBeNull();
+                    const last = statuses[statuses.length - 1];
+                    expect(last.shape).toBe("ring");
+                    expect(last.text).toMatch(/^stopped/);
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            }, 130);
+        });
+    });
+});

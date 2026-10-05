@@ -114,6 +114,12 @@ function initializeStatePersistence(node, options) {
          * Save current state immediately
          */
         saveNow: function () {
+            // Until the persisted state has been read back, the node only
+            // holds the few samples that arrived since startup. Writing those
+            // now would overwrite the history we are about to restore.
+            if (!stateManager.isLoaded) {
+                return;
+            }
             try {
                 const state = getStateToSave();
                 if (state && typeof state === "object") {
@@ -197,9 +203,14 @@ function createCloseHandler(node, persistence, cleanupFn) {
             await persistence.close();
         }
 
-        // Run additional cleanup
-        if (typeof cleanupFn === "function") {
-            cleanupFn();
+        // Run additional cleanup. A throwing cleanup must not swallow done():
+        // Node-RED would then sit out its full close timeout on every deploy.
+        try {
+            if (typeof cleanupFn === "function") {
+                cleanupFn();
+            }
+        } catch (err) {
+            node.warn("Error during node cleanup: " + err.message);
         }
 
         if (done) done();

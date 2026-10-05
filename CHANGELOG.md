@@ -9,6 +9,255 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-05 - Code-review pass over all nodes
+
+A minor release rather than a patch: several nodes now produce different (the
+corrected) results — see "Changed behaviour".
+
+### ✨ Added (this release)
+
+- **Group By for `anomaly-detector` and `trend-predictor`** (`groupBy`,
+  `maxGroups`): one independent state per device on an interleaved stream, as
+  `signal-analyzer` already had. In `anomaly-detector` it combines with regimes
+  (one baseline per device and operating point). `health-index`, `pca-anomaly`,
+  `isolation-forest-anomaly` and `multi-value-processor` gained the same
+  setting. All seven nodes share `nodes/utils/group-state.js`.
+- **`anomaly-detector`: CUSUM in standard deviations** (`cusumMode: "sigma"`,
+  the default for new nodes). Drift and thresholds are multiples of the
+  window's σ, so one setting fits any signal scale. Existing flows keep the
+  signal-unit behaviour (`"raw"`).
+- **`trend-predictor`: trend fitted over time**, not over the sample index, so
+  gaps and irregular sampling no longer bend the RUL (`timeBased` in the
+  result; falls back to the index when timestamps do not increase).
+- **`multi-value-processor`: state persistence** (`persistState`).
+- `msg.config` overrides apply to multi-sensor object payloads in
+  `anomaly-detector` and `trend-predictor`.
+- `nodes/utils/signal-processing.js`: the signal-analyzer's FFT, filters,
+  cepstrum and diagnosis rules as pure, directly tested functions.
+- The dev `docker-compose.yml` maps `host.docker.internal` on Linux, so the
+  end-to-end suite's llm-analyzer tab reaches the demo mock.
+- `tools/build-test-suite.js` fills every node with its editor defaults (the
+  imported suite no longer shows blank select fields) and has a σ-CUSUM test:
+  49 tests.
+
+### 🧹 Changed (this release)
+
+- **Quartiles use the interpolated percentile** (`utils/statistics`):
+  `calculateQuartiles` now agrees with `calculatePercentile` and
+  `calculateMedian` (for `[1, 2, 3, 4]`: q1 1.75, median 2.5, q3 3.25 instead of
+  2 / 3 / 4). The IQR bounds of `anomaly-detector` shift slightly.
+- **`signal-analyzer`: a cepstral line is reported as the gear-mesh frequency
+  or as one sideband**, whichever is closest — not as all candidates within
+  tolerance at once.
+- **`multi-value-processor`:** a constant sensor in correlate mode reports
+  `correlation: null` with a `reason` and is not anomalous; the analyze
+  z-score uses a running accumulator (≈60× faster at large windows).
+- **`condition-monitoring-source`:** fault descriptions and the RUL label are
+  English (`"stabil"` → `"stable"`).
+- **`llm-analyzer`, `training-data-collector`:** ISO-date-shaped strings are no
+  longer read as the number of their year.
+- **WebSocket `getStats`** no longer returns client addresses; the
+  anomaly-detector warns when WebSocket output is enabled without a token.
+- Removed options that never did anything: `removeOutliers` /
+  `outlierThreshold` (training-data-collector), `batchSize` (ml-inference),
+  `vibOutputMode` (signal-analyzer). Flows that still carry them load unchanged.
+- `ml-inference.js` split: MLflow helper/tracker and download/registry helpers
+  live in `ml-inference-mlflow.js` / `ml-inference-download.js`; the two HTTP
+  bridges share `utils/json-http-client.js`; `mulberry32` lives once in
+  `utils/seeded-random.js`.
+- Tests: older specs assert computed values instead of property presence;
+  random test data is seeded.
+
+### ⚠️ Changed behaviour (code-review pass over all nodes)
+
+Fixes below change results or output for existing flows. Each is the corrected
+behaviour; config keys and output field names are unchanged unless noted.
+
+- **`anomaly-detector`:** a sample is scored against the window *before* it,
+  once that window holds 10 values (or is full). Scored within its own window
+  the z-score was capped at `sqrt(n − 1)`, so a window of 10 could never reach
+  a threshold of 3. Outliers now score far higher; a step off a perfectly flat
+  baseline is an anomaly. EMA compares against the average before the sample.
+- **`signal-analyzer`:** the Overlap setting now takes effect — a
+  sample-by-sample stream is analysed when the buffer fills and then every
+  `fftSize × (1 − overlap)` samples instead of on every sample (array payloads:
+  once per message, as before). FFT mode removes the window mean (reported as
+  `dcOffset`). Peaks mode uses **Min Peak Height** (empty = mean ± 2σ) rather
+  than the FFT's relative peak threshold. Cepstrum no longer assumes 1800 rpm
+  when no shaft speed is known (no gear diagnosis instead). Bearing-fault
+  `severity` is relative to the noise floor, not an absolute magnitude.
+- **`trend-predictor`:** "no trend" is decided statistically (slope within two
+  standard errors of zero) instead of by an absolute slope of 0.0001 per
+  sample. The exponential model is a real exponential fit; Weibull uses the
+  configured β and η. Non-numeric payloads such as `"12abc"` are rejected.
+- **`pca-anomaly`:** SPE and contributions are computed correctly, limits are
+  F / chi-squared based (the `threshold` setting now moves them), features are
+  matched by name, and the model retrains on normal data (`retrainMode: "off"`
+  freezes it).
+- **`isolation-forest-anomaly`:** `numEstimators` / `maxSamples` take effect,
+  the threshold is calibrated at training time, batch mode retrains per window.
+- **`health-index`:** `dynamic` mode no longer down-weights a persistently
+  anomalous sensor; weight 0 excludes a sensor; a payload with no usable
+  reading emits nothing instead of 100 / healthy.
+- **`multi-value-processor`:** Mahalanobis scores against the history before
+  the sample with an F-based limit; cross-correlation reports the largest
+  `|r|` and the lead/lag text the right way round.
+- **`llm-analyzer`:** `msg.apiUrl` is ignored unless **Allow msg.apiUrl
+  override** is enabled (then same-origin only). The Gemini key travels in the
+  `x-goog-api-key` header, the `openai` provider sends
+  `max_completion_tokens`. A batch that failed transiently is retried.
+- **`training-data-collector`:** export file names carry milliseconds and a
+  sequence suffix; time-series CSV has `t<i>_<feature>` columns; the editor's
+  split percentages now reach the runtime; S3 keys live in node credentials.
+- **`ml-inference`:** registry cache files keep their real extension, multipart
+  posts to `/ml-inference/upload` return 415, a failed auto-update keeps the
+  loaded model, the Python sidecar survives deploys.
+
+### 🐛 Fixed (code-review pass over all nodes)
+
+- **The "debug" option broke five nodes and silently disabled their state
+  persistence.** `anomaly-detector`, `trend-predictor`, `pca-anomaly`,
+  `isolation-forest-anomaly` and `multi-value-processor` stored the flag in
+  `node.debug`, overwriting Node-RED's logger method. With debug on every
+  message failed with "node.debug is not a function"; with it off, restoring
+  persisted state threw inside the persistence layer and the state was
+  discarded. The flag now lives in `node.debugEnabled`.
+- **Crashes of the whole runtime:** the ml-inference status routes answered
+  twice when no Python was installed; a non-JSON stdout line or an `EPIPE` from
+  the Python sidecar, and a busy WebSocket port or two WebSocket-enabled nodes,
+  raised unhandled `error` events. A vision-annotator box with a non-finite
+  coordinate looped forever.
+- **`signal-analyzer`:** cepstrum quefrencies were half their true value (a
+  50 Hz harmonic family read as 100 Hz); FFT and vibration windows above
+  ~10^5 samples overflowed the stack; an envelope band above Nyquist was
+  replaced silently (now clamped or reported once, with the band and filter
+  used in the output); the cepstrum panel's shaft-speed field was a duplicate
+  element that was never saved. FFT peaks carry a physical `amplitude`. The
+  cepstrum transform and the envelope low-pass are O(n log n) / O(n).
+- **`anomaly-detector`:** multi-sensor hysteresis counted non-consecutive
+  anomalies; the threshold warning band was unreachable for negative limits;
+  `iqrWarningMultiplier` was ignored; only the active regime was persisted;
+  `msg.reset` left per-sensor EMA/CUSUM state; malformed `msg.config` values
+  disabled checks; WebSocket listeners leaked on every redeploy; batch mode
+  failed on large or malformed arrays.
+- **`trend-predictor`:** RUL supports falling indicators (**Failure
+  Direction**); the `cycles` unit returned milliseconds; a lower bound of 0 was
+  reported as `null`; the median filter pulled both ends of a trend inward
+  (RUL read late); rate-of-change acceleration used the wrong time base; the
+  RUL panel's window-size field was a duplicate element that was never saved.
+- **`llm-analyzer`:** the request timeout did not cover the response body;
+  `persistState` never wrote anything; an in-flight request outlived a redeploy.
+- **`training-data-collector`:** auto-saves within one second overwrote each
+  other; samples arriving during an export were lost; a failing export was
+  retried on every message; a small window with high overlap never slid;
+  streaming files grew without bound (`maxStreamFileMB`, `maxFiles`).
+- **`ml-inference`:** editor uploads stored the multipart body as the model;
+  TF.js uploads above 5 MB were rejected; downloads could hang forever;
+  registry sources only worked for ONNX; a crashed sidecar was never restarted;
+  concurrent loads raced; MAX / SavedModel / ONNX sessions were not released;
+  the `python-status` package probe never ran.
+- **`health-index`, `multi-value-processor`, `pca-anomaly`,
+  `isolation-forest-anomaly`:** optional per-device state (`groupBy`,
+  `maxGroups`), non-finite inputs no longer poison a window, unchecked
+  `msg.config` overrides and weights are validated, `send` / `done` are used
+  throughout.
+- **Shared:** `path-validator` rejects a new file behind a symlinked parent;
+  state arriving before the persisted state has loaded is no longer
+  overwritten; close handlers always call `done()`.
+
+### ✨ Added
+
+- **`signal-analyzer`: ISO 20816-3 machine groups.** The vibration-severity
+  table now rates by machine *group* (1: 300 kW – 50 MW, 2: 15 – 300 kW) and
+  *foundation* (rigid / flexible), as ISO 10816-3 / 20816-3 prescribe. New nodes
+  default to `group2_rigid`; the four legacy ISO 10816-1 classes remain
+  selectable so existing flows evaluate exactly as before. The result is emitted
+  as `payload.iso20816` with a `standard` field; `payload.iso10816` stays as an
+  alias of the same object.
+- **`signal-analyzer`: bearing fault frequencies from geometry.** Enter rolling
+  elements, element and pitch diameter and contact angle and the node derives
+  BPFO / BPFI / BSF / FTF from the current shaft speed. Typed-in frequencies win
+  over derived ones; `bearingFreqs.source` reports `manual`, `geometry`,
+  `mixed` or `none`.
+- **`signal-analyzer`: shaft speed per message.** `msg.rpm` (also
+  `msg.shaftSpeed`, `msg.config.shaftSpeed`) overrides the configured RPM in
+  vibration, envelope and cepstrum mode, so variable-speed drives get correct
+  fault frequencies. Bearing values can be overridden through `msg.config` too.
+- **`signal-analyzer`: three diagnostic rules in envelope mode.** BPFI harmonics
+  with ±1X / ±2X sidebands (`BPFI-Sideband`, an inner-race defect running through
+  the load zone), four or more harmonics of 1X (`Looseness`), and 0.38–0.48X
+  components (`SubSynchronous`: oil whirl or rub, suppressed when the peak matches
+  the configured cage frequency).
+- **`anomaly-detector`: operating-point regimes.** `regimeProperty` names a
+  message property (e.g. `regime`, `payload.speedClass`); the detector keeps one
+  independent baseline per value — window, EMA, CUSUM, hysteresis counters and
+  per-sensor buffers — so a load change switches baselines instead of alarming.
+  `maxRegimes` (default 20) bounds memory with LRU eviction; `msg.reset = "all"`
+  clears every regime. Outputs are tagged with `msg.regime`.
+- **Real run-to-failure test fixture.** `tools/build-pronostia-fixture.js`
+  reduces the PRONOSTIA / FEMTO-ST Bearing1_1 run (IEEE PHM 2012) to 58
+  per-snapshot indicators (`test/fixtures/pronostia-bearing1_1-trend.json`,
+  17 kB). `test/degradation-fixture_spec.js` drives `anomaly-detector` and
+  `trend-predictor` with that real degradation curve instead of synthetic ramps.
+- **`signal-analyzer`: envelope peaks are judged against the local noise
+  floor.** A line must exceed `envelopePeakFloor` (default 8) × the 30th
+  percentile of the magnitudes in its ±0.4 % neighbourhood; the envelope mean is removed before
+  the FFT. Matching tolerance is 5 % but at most 0.15 × shaft frequency and at
+  least 1.5 bins, harmonics of a bearing line count only with the fundamental,
+  BPFI sidebands only around a found BPFI harmonic, and a line on a shaft
+  harmonic is flagged `coincidesWith1X`. Calibrated on simulated impact trains
+  (`tools/sim/`): healthy signals produce no lines up to σ = 0.1 g, an
+  outer-race defect BPFO only, an inner-race defect BPFI with ±1X sidebands
+  only, looseness 1X harmonics only.
+- `tools/sim/`: physically motivated simulations (bearing impact trains with
+  resonance, slip and load modulation; accelerometer waveforms for the ISO
+  rating; a two-speed pump for regimes; a Monte-Carlo coverage check of the RUL
+  band) that drive the real nodes and print reports. See `tools/sim/README.md`
+  for what they showed.
+- `nodes/utils/vibration.js`: ISO severity tables, bearing formulas, spectral
+  integration and an inverse-normal quantile, unit-tested in
+  `test/utils-vibration_spec.js`.
+- README: an ISO 13374 block map of the nodes, and a note for NIS2 / IEC 62443
+  operators in the Security section. `docs/RESEARCH-cm-pdm-landscape.md`
+  (standards, measurement techniques, market, barriers, trends) joins the
+  existing methods review.
+
+### 🐛 Fixed
+
+- **`signal-analyzer`: the severity table was labelled ISO 10816-3 but held the
+  ISO 10816-1 / ISO 2372 class I–IV limits** (0.71 / 1.8 / 4.5 mm/s for class I
+  and so on). ISO 10816-3 has no classes; it rates by machine group and
+  foundation with different values. The old classes are now correctly labelled
+  as legacy ISO 10816-1 and the 20816-3 groups added (see *Added*).
+- **`signal-analyzer`: acceleration-to-velocity conversion for the ISO rating
+  assumed a single frequency.** RMS acceleration was divided by 2πf at the shaft
+  frequency, which is only right when the signal is dominated by 1X — bearing
+  and gear content at higher frequencies made the rating far too pessimistic
+  (or, with the old 50 Hz fallback, arbitrary). The node now integrates the
+  spectrum bin-wise (v = a / 2πf) over the 10–1000 Hz band the standard
+  prescribes, using the configured sampling rate — for frame (array) payloads,
+  which are the only input that is actually a waveform. Scalar streams and
+  sampling rates that cannot support the band keep the single-frequency
+  relation, and the result says which path was taken (`conversion`).
+- **`trend-predictor`: the configured confidence level had no effect.** The RUL
+  interval was hard-wired to 1.96 σ (95 %), so selecting 99 % still produced the
+  95 % band. The level is now turned into a two-sided z-score (0.90 → 1.645,
+  0.99 → 2.576) for both the linear and the Weibull path, and reported as
+  `rul.confidenceLevel`.
+- **`trend-predictor`: the RUL point estimate was biased late.** The "current
+  value" fed into the extrapolation was the moving-average-smoothed last sample;
+  the centred window is truncated at the end of the buffer, so that value lags
+  the trend by about half a window and the RUL came out optimistic. The level
+  is now the Theil-Sen intercept at the last index (median of
+  `y[i] + slope·(n−1−i)`, no lag, robust), the slope is estimated on the
+  median-filtered rather than the moving-average series for the same reason,
+  and the interval is a delta-method interval for the *crossing time* (level
+  and slope uncertainty, growing with the distance to the threshold) instead
+  of a prediction interval for the next observation. Monte-Carlo on a noisy
+  linear wear model: bias dropped from ≈ +3 % to ≈ +2 %, 90 % band coverage
+  rose from 63–80 % to roughly 75–80 %, 99 % band from 87–90 % to ≈ 90 %.
+  `currentLevel` is added to the RUL result.
+
 ### 🔒 Security
 
 - **All `RED.httpAdmin` routes are now permission-guarded.** Node-RED does not

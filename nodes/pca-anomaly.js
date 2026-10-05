@@ -11,23 +11,29 @@ module.exports = function (RED) {
     const persistenceHelper = require("./utils/persistence-helper");
 
     const { clampInt, clampFloat } = require("./utils/config-validator");
+    const groupState = require("./utils/group-state");
 
-    // Import ml-pca and ml-matrix for robust PCA implementation
+    const { chiSquaredQuantileFromZ, hotellingLimitFromZ } = require("./utils/statistics");
+
+    // Import ml-pca for the decomposition itself (SVD-based, numerically stable)
     let PCA = null;
-    let Matrix = null;
     try {
         PCA = require("ml-pca").PCA;
-        Matrix = require("ml-matrix").Matrix;
     } catch (err) {
-        // Libraries not available - will show error on node creation
+        // Library not available - will show error on node creation
     }
+
+    // SPE of a sample the model reproduces exactly is zero up to rounding
+    // (~1e-30). A limit of exactly zero would turn that rounding noise into
+    // alarms, so the limit never drops below this (standardised units squared).
+    const SPE_LIMIT_FLOOR = 1e-8;
 
     function PcaAnomalyNode(config) {
         RED.nodes.createNode(this, config);
         const node = this;
 
         // Check if required libraries are available
-        if (!PCA || !Matrix) {
+        if (!PCA) {
             node.error("Required libraries not found. Please install: npm install ml-pca ml-matrix");
             node.status({ fill: "red", shape: "ring", text: "Missing ml-pca/ml-matrix" });
             return;
@@ -42,65 +48,263 @@ module.exports = function (RED) {
         this.varianceThreshold = clampFloat(config.varianceThreshold, 0.01, 1, 0.95); // 95% variance explained
         this.contributionThreshold = clampFloat(config.contributionThreshold, 0, 1, 0.1); // Min contribution to show
         this.showTopContributors = clampInt(config.showTopContributors, 1, 100, 3); // Max contributors to show
+        // "window": refit on the anomaly-free window every windowSize normal
+        // samples, so slow, legitimate drift is followed. "off": the model is
+        // frozen once it has been fitted on a full window.
+        this.retrainMode = config.retrainMode === "off" ? "off" : "window";
         this.outputTopic = config.outputTopic || "";
-        this.debug = config.debug === true;
+        // Kept off `this.debug`: that name is Node-RED's own logger method, and
+        // overwriting it with a boolean breaks every node.debug(...) call — state
+        // persistence logs through it too.
+        this.debugEnabled = config.debug === true;
         this.persistState = config.persistState === true;
 
-        // State
-        this.dataBuffer = [];
-        this.pcaModel = null; // ml-pca model instance
-        this.mean = null; // For standardization
-        this.stdDev = null; // For standardization
-        this.isTrained = false;
-        this.t2Threshold = null;
-        this.speThreshold = null;
+        // Per-device grouping: one independent model per value of a message
+        // property (e.g. "topic"). Empty = one shared model (default, legacy).
+        this.groupBy = typeof config.groupBy === "string" ? config.groupBy.trim() : "";
+        this.maxGroups = clampInt(config.maxGroups, 1, 10000, 50);
+
+        // Samples needed before the first fit. Never more than the window can hold.
+        const minTrainSamples = Math.min(node.windowSize, Math.max(10, Math.ceil(node.windowSize * 0.5)));
+
+        // State: one entry per group, in least-recently-used order.
+        const DEFAULT_GROUP = groupState.DEFAULT_GROUP;
+        this.groups = new Map();
 
         // Debug logging helper
         const debugLog = function (message) {
-            if (node.debug) {
+            if (node.debugEnabled && typeof node.debug === "function") {
                 node.debug(message);
             }
         };
 
-        // Initialize state persistence using helper
-        // Note: ml-pca model can be serialized via toJSON()
-        const persistence = persistenceHelper.initializeStatePersistence(node, {
+        // Group key of a message; DEFAULT_GROUP when grouping is off or the
+        // message carries no usable value.
+        function resolveGroupKey(msg) {
+            return groupState.resolveGroupKey(RED, msg, node.groupBy);
+        }
+
+        function createGroupState(key) {
+            return {
+                key: key,
+                dataBuffer: [],
+                featureNames: null, // frozen on the first accepted sample
+                pcaModel: null, // ml-pca model instance
+                mean: null, // For standardization
+                stdDev: null, // For standardization
+                isTrained: false,
+                nComponents: node.nComponents,
+                eigenvalues: null,
+                eigenvectors: null, // [feature][component]
+                cumulativeVariance: null,
+                t2Threshold: null,
+                speThreshold: null,
+                trainedOn: 0, // samples the current model was fitted on
+                sinceTrain: 0, // normal samples accepted since that fit
+                fullWindowFit: false
+            };
+        }
+
+        // Fetch (or create) the state for a key. The map is kept in LRU order, so
+        // an unbounded key space evicts the least recently used model.
+        function getGroupState(key) {
+            return groupState.getOrCreateGroup(node.groups, key, {
+                create: createGroupState,
+                max: node.maxGroups,
+                lru: Boolean(node.groupBy),
+                onEvict: function (evictedKey) {
+                    debugLog(
+                        "Evicted least recently used group '" + evictedKey + "' (maxGroups=" + node.maxGroups + ")"
+                    );
+                }
+            });
+        }
+
+        // Backwards-compatible read-only view of the default (ungrouped) model.
+        // With grouping enabled it only describes traffic without a group value.
+        ["dataBuffer", "pcaModel", "mean", "stdDev", "isTrained", "t2Threshold", "speThreshold"].forEach(
+            function (prop) {
+                Object.defineProperty(node, prop, {
+                    configurable: true,
+                    get: function () {
+                        const state = node.groups.get(DEFAULT_GROUP);
+                        if (state) return state[prop];
+                        return prop === "dataBuffer" ? [] : prop === "isTrained" ? false : null;
+                    }
+                });
+            }
+        );
+
+        // Prefix status text with the group key so a shared node stays readable
+        function groupText(state, text) {
+            return node.groupBy && state.key !== DEFAULT_GROUP ? state.key + ": " + text : text;
+        }
+
+        // Derive everything scoring needs from a fitted (or restored) model:
+        // cached eigen-decomposition, component count and control limits. The
+        // limits are a pure function of the model and the configured threshold,
+        // so they are recomputed on restore instead of being trusted from disk.
+        function finalizeModel(state, trainedOn) {
+            const model = state.pcaModel;
+            state.eigenvalues = model.getEigenvalues();
+            // U has one row per feature and one column per component. (ml-pca's
+            // getLoadings() returns the transpose — rows are components.)
+            state.eigenvectors = model.getEigenvectors().to2DArray();
+            state.cumulativeVariance = model.getCumulativeVariance();
+
+            const nFeatures = state.eigenvectors.length;
+            let k = node.nComponents;
+            if (node.autoComponents) {
+                k = state.cumulativeVariance.length;
+                for (let i = 0; i < state.cumulativeVariance.length; i++) {
+                    if (state.cumulativeVariance[i] >= node.varianceThreshold) {
+                        k = i + 1;
+                        break;
+                    }
+                }
+            }
+            k = Math.max(1, Math.min(k, nFeatures, state.eigenvalues.length));
+            state.nComponents = k;
+            state.trainedOn = trainedOn;
+
+            // `threshold` is sigma-like: it is the one-sided normal quantile of
+            // the confidence level (3 ≈ 99.87%).
+            //
+            // T² of a new sample against a model estimated from n samples
+            // follows a scaled F distribution; it only approaches chi-squared
+            // with k degrees of freedom for large n. The chi-squared limit is
+            // the fallback when n is too small for the F limit to exist.
+            state.t2Threshold = hotellingLimitFromZ(k, trainedOn, node.threshold);
+            if (!Number.isFinite(state.t2Threshold)) {
+                state.t2Threshold = chiSquaredQuantileFromZ(k, node.threshold);
+                debugLog("Only " + trainedOn + " samples for " + k + " components: T² limit falls back to chi-squared");
+            }
+
+            // SPE: weighted chi-squared approximation (Box) from the discarded
+            // eigenvalues, SPE ~ g·χ²(h) with g = θ2/θ1 and h = θ1²/θ2.
+            let theta1 = 0;
+            let theta2 = 0;
+            for (let i = k; i < state.eigenvalues.length; i++) {
+                const ev = state.eigenvalues[i];
+                if (ev > 0) {
+                    theta1 += ev;
+                    theta2 += ev * ev;
+                }
+            }
+            let speLimit = 0;
+            if (theta2 > 0) {
+                speLimit = (theta2 / theta1) * chiSquaredQuantileFromZ((theta1 * theta1) / theta2, node.threshold);
+            }
+            state.speThreshold = Math.max(speLimit, SPE_LIMIT_FLOOR);
+        }
+
+        // Initialize state persistence using helper.
+        // Declared with `let` so onStateLoaded — which only runs once the async
+        // load resolves — can reach the manager.
+        let persistence = null;
+        persistence = persistenceHelper.initializeStatePersistence(node, {
             stateKey: "pcaAnomalyState",
             saveInterval: 60000,
-            debug: node.debug,
+            debug: node.debugEnabled,
             onStateLoaded: function (state) {
-                if (state.isTrained && state.pcaModelJSON) {
-                    try {
-                        node.dataBuffer = state.dataBuffer || [];
-                        node.mean = state.mean;
-                        node.stdDev = state.stdDev;
-                        node.pcaModel = PCA.load(state.pcaModelJSON);
-                        node.isTrained = true;
-                        node.t2Threshold = state.t2Threshold;
-                        node.speThreshold = state.speThreshold;
-                        node.nComponents = state.nComponents || node.nComponents;
+                // v2 stores one entry per group; v1 stored a single flat model,
+                // which restores into the default (ungrouped) bucket.
+                const saved = state.groups || (state.pcaModelJSON || state.dataBuffer ? { "": state } : null);
+                if (!saved) {
+                    return;
+                }
 
-                        node.status({ fill: "green", shape: "dot", text: "PCA - restored (trained)" });
-                        debugLog("Restored trained PCA model from persistence");
-                    } catch (err) {
-                        debugLog("Failed to restore PCA model: " + err.message);
+                let restoredModels = 0;
+                Object.keys(saved).forEach(function (key) {
+                    const entry = saved[key];
+                    if (!entry || typeof entry !== "object") {
+                        return;
                     }
+                    const rawBuffer = Array.isArray(entry.dataBuffer) ? entry.dataBuffer : [];
+                    const target = getGroupState(key);
+                    target.dataBuffer = rawBuffer
+                        .filter(function (d) {
+                            return d && Array.isArray(d.values);
+                        })
+                        .map(function (d) {
+                            return { timestamp: d.timestamp, values: d.values };
+                        });
+
+                    if (Array.isArray(entry.featureNames)) {
+                        target.featureNames = entry.featureNames;
+                    } else if (rawBuffer.length > 0 && Array.isArray(rawBuffer[0].names)) {
+                        target.featureNames = rawBuffer[0].names; // v1 kept names per sample
+                    } else if (Array.isArray(entry.mean)) {
+                        target.featureNames = entry.mean.map(function (m, i) {
+                            return "sensor" + i;
+                        });
+                    }
+
+                    target.sinceTrain = entry.sinceTrain || 0;
+                    target.fullWindowFit = entry.fullWindowFit === true;
+
+                    if (entry.pcaModelJSON && Array.isArray(entry.mean) && Array.isArray(entry.stdDev)) {
+                        try {
+                            target.pcaModel = PCA.load(entry.pcaModelJSON);
+                            target.mean = entry.mean;
+                            target.stdDev = entry.stdDev;
+                            finalizeModel(target, entry.trainedOn || target.dataBuffer.length || node.windowSize);
+                            target.isTrained = true;
+                            restoredModels++;
+                        } catch (err) {
+                            // Leave the group untrained: it refits from the
+                            // restored buffer on the next sample.
+                            target.pcaModel = null;
+                            target.isTrained = false;
+                            debugLog("Failed to restore PCA model for group '" + key + "': " + err.message);
+                        }
+                    }
+                });
+
+                if (!state.groups && persistence) {
+                    // Migrated a v1 payload: drop the flat keys so the stored blob
+                    // does not carry a stale copy of the model forever.
+                    [
+                        "dataBuffer",
+                        "mean",
+                        "stdDev",
+                        "pcaModelJSON",
+                        "isTrained",
+                        "t2Threshold",
+                        "speThreshold",
+                        "nComponents"
+                    ].forEach(function (key) {
+                        persistence.manager.delete(key);
+                    });
+                }
+
+                if (restoredModels > 0) {
+                    const scope = node.groupBy ? " (" + restoredModels + " groups)" : "";
+                    node.status({ fill: "green", shape: "dot", text: "PCA - restored (trained)" + scope });
+                    debugLog("Restored trained PCA model from persistence" + scope);
                 }
             },
             getStateToSave: function () {
-                if (node.isTrained && node.pcaModel) {
-                    return {
-                        dataBuffer: node.dataBuffer,
-                        mean: node.mean,
-                        stdDev: node.stdDev,
-                        pcaModelJSON: node.pcaModel.toJSON(),
-                        isTrained: node.isTrained,
-                        t2Threshold: node.t2Threshold,
-                        speThreshold: node.speThreshold,
-                        nComponents: node.nComponents
+                // Always returns the full group map — including an empty one —
+                // so a reset is persisted instead of leaving the old model on disk.
+                const groups = {};
+                node.groups.forEach(function (state, key) {
+                    if (!state.featureNames) {
+                        return;
+                    }
+                    groups[key] = {
+                        dataBuffer: state.dataBuffer,
+                        featureNames: state.featureNames,
+                        mean: state.mean,
+                        stdDev: state.stdDev,
+                        pcaModelJSON: state.isTrained && state.pcaModel ? state.pcaModel.toJSON() : null,
+                        isTrained: state.isTrained,
+                        trainedOn: state.trainedOn,
+                        sinceTrain: state.sinceTrain,
+                        fullWindowFit: state.fullWindowFit
                     };
-                }
-                return null;
+                });
+                return { version: 2, groups: groups };
             }
         });
 
@@ -150,15 +354,6 @@ module.exports = function (RED) {
             return stdDevs;
         }
 
-        // Helper: Standardize data (z-score normalization)
-        function standardize(data, means, stdDevs) {
-            return data.map(function (row) {
-                return row.map(function (val, j) {
-                    return (val - means[j]) / stdDevs[j];
-                });
-            });
-        }
-
         // Helper: Standardize single sample
         function standardizeSample(sample, means, stdDevs) {
             return sample.map(function (val, j) {
@@ -166,27 +361,26 @@ module.exports = function (RED) {
             });
         }
 
-        // Train PCA model using ml-pca (SVD-based, numerically stable)
-        function trainPCA() {
-            if (node.dataBuffer.length < node.windowSize * 0.5) {
+        // Fit the PCA model of a group on its buffer (ml-pca, SVD-based).
+        // On failure the previous model, if any, stays in place.
+        function trainPCA(state) {
+            if (state.dataBuffer.length < minTrainSamples) {
                 return false;
             }
 
-            const data = node.dataBuffer.map(function (d) {
+            const data = state.dataBuffer.map(function (d) {
                 return d.values;
             });
-            const nFeatures = data[0].length;
 
-            // Calculate means and std devs for standardization
-            node.mean = calculateColumnMeans(data);
-            node.stdDev = calculateColumnStdDevs(data, node.mean);
+            const mean = calculateColumnMeans(data);
+            const stdDev = calculateColumnStdDevs(data, mean);
+            const standardizedData = data.map(function (row) {
+                return standardizeSample(row, mean, stdDev);
+            });
 
-            // Standardize data
-            const standardizedData = standardize(data, node.mean, node.stdDev);
-
-            // Train PCA using ml-pca (uses SVD internally - much more stable than power iteration)
+            let model;
             try {
-                node.pcaModel = new PCA(standardizedData, {
+                model = new PCA(standardizedData, {
                     center: false, // Already centered via standardization
                     scale: false // Already scaled via standardization
                 });
@@ -195,93 +389,27 @@ module.exports = function (RED) {
                 return false;
             }
 
-            // Get explained variance ratios
-            const explainedVariance = node.pcaModel.getExplainedVariance();
-            const cumulativeVariance = node.pcaModel.getCumulativeVariance();
-
-            debugLog(
-                "Explained variance per component: " +
-                    explainedVariance
-                        .map(function (v) {
-                            return (v * 100).toFixed(1) + "%";
-                        })
-                        .join(", ")
-            );
-
-            // Determine number of components based on variance threshold
-            if (node.autoComponents) {
-                node.nComponents = 1;
-                for (let i = 0; i < cumulativeVariance.length; i++) {
-                    if (cumulativeVariance[i] >= node.varianceThreshold) {
-                        node.nComponents = i + 1;
-                        break;
-                    }
-                    node.nComponents = i + 1;
-                }
+            state.pcaModel = model;
+            state.mean = mean;
+            state.stdDev = stdDev;
+            finalizeModel(state, data.length);
+            state.isTrained = true;
+            state.sinceTrain = 0;
+            if (data.length >= node.windowSize) {
+                state.fullWindowFit = true;
             }
 
-            node.nComponents = Math.min(node.nComponents, nFeatures);
-
-            // Mark as trained
-            node.isTrained = true;
-
-            // Calculate T² and SPE thresholds from training data
-            const t2Values = [];
-            const speValues = [];
-
-            standardizedData.forEach(function (sample) {
-                const stats = calculateStatistics(sample);
-                if (stats) {
-                    t2Values.push(stats.t2);
-                    speValues.push(stats.spe);
-                }
-            });
-
-            // Set thresholds at specified percentile
-            if (t2Values.length > 0) {
-                t2Values.sort(function (a, b) {
-                    return a - b;
-                });
-                speValues.sort(function (a, b) {
-                    return a - b;
-                });
-
-                // Map the sigma-like `threshold` to a one-sided normal percentile
-                // (e.g. 3σ -> ~99.86th percentile). Replaces an ad-hoc formula
-                // (1 - 1/threshold/10) that degenerated to the 0th percentile —
-                // flagging nearly everything — at low threshold values.
-                const erf = function (x) {
-                    // Abramowitz & Stegun 7.1.26
-                    const t = 1 / (1 + 0.3275911 * Math.abs(x));
-                    const y =
-                        1 -
-                        ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) *
-                            t *
-                            Math.exp(-x * x);
-                    return x >= 0 ? y : -y;
-                };
-                let pct = 0.5 * (1 + erf(node.threshold / Math.SQRT2));
-                pct = Math.min(0.9999, Math.max(0.5, pct));
-                let percentileIndex = Math.floor(t2Values.length * pct);
-                percentileIndex = Math.min(percentileIndex, t2Values.length - 1);
-
-                node.t2Threshold = t2Values[percentileIndex];
-                node.speThreshold = speValues[percentileIndex];
-            } else {
-                node.t2Threshold = node.threshold * node.threshold;
-                node.speThreshold = node.threshold;
-            }
-
-            const totalExplained = (cumulativeVariance[node.nComponents - 1] * 100).toFixed(1);
             debugLog(
-                "PCA trained: " +
-                    node.nComponents +
+                "PCA trained on " +
+                    data.length +
+                    " samples: " +
+                    state.nComponents +
                     " components (" +
-                    totalExplained +
-                    "% variance), T² threshold: " +
-                    node.t2Threshold.toFixed(4) +
-                    ", SPE threshold: " +
-                    node.speThreshold.toFixed(4)
+                    (state.cumulativeVariance[state.nComponents - 1] * 100).toFixed(1) +
+                    "% variance), T² limit: " +
+                    state.t2Threshold.toFixed(4) +
+                    ", SPE limit: " +
+                    state.speThreshold.toFixed(4)
             );
 
             // Persist trained model
@@ -290,149 +418,193 @@ module.exports = function (RED) {
             return true;
         }
 
-        // Calculate T² and SPE statistics for a sample
-        function calculateStatistics(standardizedSample) {
-            if (!node.isTrained || !node.pcaModel) return null;
+        // Calculate T² and SPE statistics for a standardized sample
+        function calculateStatistics(state, standardizedSample) {
+            if (!state.isTrained || !state.eigenvectors) return null;
 
-            // Project onto principal components using ml-pca
-            const allScores = node.pcaModel.predict([standardizedSample]).to2DArray()[0];
-            const scores = allScores.slice(0, node.nComponents);
+            const U = state.eigenvectors;
+            const k = state.nComponents;
+            const p = standardizedSample.length;
 
-            // Get eigenvalues from ml-pca
-            const eigenvalues = node.pcaModel.getEigenvalues();
-
-            // Calculate T² (Hotelling's T-squared)
+            // Project onto the retained principal components
+            const scores = new Array(k);
             let t2 = 0;
-            for (let i = 0; i < node.nComponents; i++) {
-                if (eigenvalues[i] > 1e-10) {
-                    t2 += (scores[i] * scores[i]) / eigenvalues[i];
+            for (let i = 0; i < k; i++) {
+                let s = 0;
+                for (let j = 0; j < p; j++) {
+                    s += standardizedSample[j] * U[j][i];
+                }
+                scores[i] = s;
+                if (state.eigenvalues[i] > 1e-10) {
+                    t2 += (s * s) / state.eigenvalues[i];
                 }
             }
 
-            // Get loading matrix for reconstruction
-            const loadings = node.pcaModel.getLoadings().to2DArray();
-
-            // Reconstruct sample from principal components
-            const reconstructed = new Array(standardizedSample.length).fill(0);
-            for (let i = 0; i < node.nComponents; i++) {
-                for (let j = 0; j < standardizedSample.length; j++) {
-                    reconstructed[j] += scores[i] * loadings[j][i];
-                }
-            }
-
-            // Calculate SPE (Squared Prediction Error)
+            // Reconstruct from the retained components; SPE is what is left over
+            const reconstructed = new Array(p);
             let spe = 0;
-            for (let j = 0; j < standardizedSample.length; j++) {
-                spe += Math.pow(standardizedSample[j] - reconstructed[j], 2);
+            for (let j = 0; j < p; j++) {
+                let r = 0;
+                for (let i = 0; i < k; i++) {
+                    r += scores[i] * U[j][i];
+                }
+                reconstructed[j] = r;
+                const residual = standardizedSample[j] - r;
+                spe += residual * residual;
             }
 
-            return {
-                scores: scores,
-                allScores: allScores,
-                t2: t2,
-                spe: spe,
-                reconstructed: reconstructed
-            };
+            return { scores: scores, t2: t2, spe: spe, reconstructed: reconstructed };
+        }
+
+        // Pull named, finite numeric features out of a payload. Array entries
+        // keep the name of their ORIGINAL position, so a dropped (non-finite)
+        // entry cannot shift its neighbours onto the wrong sensor.
+        function extractFeatures(payload) {
+            const names = [];
+            const values = [];
+
+            if (Array.isArray(payload)) {
+                payload.forEach(function (v, i) {
+                    if (typeof v === "number" && Number.isFinite(v)) {
+                        names.push("sensor" + i);
+                        values.push(v);
+                    }
+                });
+            } else if (typeof payload === "object" && payload !== null) {
+                Object.keys(payload).forEach(function (key) {
+                    const val = payload[key];
+                    if (typeof val === "number" && Number.isFinite(val)) {
+                        names.push(key);
+                        values.push(val);
+                    } else if (typeof val === "string") {
+                        const parsed = parseFloat(val);
+                        if (Number.isFinite(parsed)) {
+                            names.push(key);
+                            values.push(parsed);
+                        }
+                    }
+                });
+            } else {
+                return null;
+            }
+
+            return { names: names, values: values };
         }
 
         node.on("input", function (msg, send, done) {
             // Node-RED >=1.0 passes send/done; shim for older runtimes.
+            send =
+                send ||
+                function () {
+                    node.send.apply(node, arguments);
+                };
             done =
                 done ||
                 function (err) {
                     if (err) node.error(err, msg);
                 };
             try {
-                // Reset command
+                // Reset command: the message's own group when grouping is on and
+                // the message names one, everything otherwise.
                 if (msg.reset === true) {
-                    node.dataBuffer = [];
-                    node.isTrained = false;
-                    node.pcaModel = null;
-                    node.mean = null;
-                    node.stdDev = null;
+                    const resetKey = resolveGroupKey(msg);
+                    if (node.groupBy && resetKey !== DEFAULT_GROUP) {
+                        node.groups.delete(resetKey);
+                    } else {
+                        node.groups.clear();
+                    }
+                    persistCurrentState();
                     node.status({ fill: "blue", shape: "ring", text: "PCA - reset" });
                     done();
                     return;
                 }
 
                 // Extract multi-dimensional input
-                let values = [];
-                let valueNames = [];
-
-                if (Array.isArray(msg.payload)) {
-                    values = msg.payload.filter(function (v) {
-                        return typeof v === "number" && Number.isFinite(v);
-                    });
-                    valueNames = values.map(function (v, i) {
-                        return "sensor" + i;
-                    });
-                } else if (typeof msg.payload === "object" && msg.payload !== null) {
-                    Object.keys(msg.payload).forEach(function (key) {
-                        const val = msg.payload[key];
-                        if (typeof val === "number" && Number.isFinite(val)) {
-                            valueNames.push(key);
-                            values.push(val);
-                        } else if (typeof val === "string") {
-                            const parsed = parseFloat(val);
-                            if (Number.isFinite(parsed)) {
-                                valueNames.push(key);
-                                values.push(parsed);
-                            }
-                        }
-                    });
-                } else {
+                const features = extractFeatures(msg.payload);
+                if (!features) {
                     done("Payload must be an array or object with multiple sensor values");
                     return;
                 }
 
-                if (values.length < 2) {
-                    done("At least 2 sensor values are required for PCA");
-                    return;
-                }
+                const state = getGroupState(resolveGroupKey(msg));
 
-                // Add to buffer
-                node.dataBuffer.push({
-                    timestamp: Date.now(),
-                    values: values,
-                    names: valueNames
-                });
-
-                // Limit buffer size
-                if (node.dataBuffer.length > node.windowSize) {
-                    node.dataBuffer.shift();
-                }
-
-                // Train model when enough data
-                if (!node.isTrained) {
-                    if (node.dataBuffer.length >= Math.max(10, node.windowSize * 0.5)) {
-                        trainPCA();
-                    } else {
+                // The feature set is frozen on the first accepted sample. From
+                // then on values are matched BY NAME, so key order, extra keys
+                // and dropped entries cannot land a value in the wrong column.
+                let values;
+                if (!state.featureNames) {
+                    if (features.values.length < 2) {
+                        done("At least 2 sensor values are required for PCA");
+                        return;
+                    }
+                    state.featureNames = features.names.slice();
+                    values = features.values;
+                } else {
+                    const lookup = new Map();
+                    features.names.forEach(function (name, i) {
+                        lookup.set(name, features.values[i]);
+                    });
+                    const missing = state.featureNames.filter(function (name) {
+                        return !lookup.has(name);
+                    });
+                    if (missing.length > 0) {
                         node.status({
                             fill: "yellow",
                             shape: "ring",
-                            text: "Training: " + node.dataBuffer.length + "/" + Math.floor(node.windowSize * 0.5)
+                            text: groupText(state, "skipped: no value for " + missing[0])
                         });
-                        node.send([msg, null]);
+                        done(
+                            "Sample skipped: no finite value for feature(s) " +
+                                missing.join(", ") +
+                                " (send msg.reset to relearn the feature set)"
+                        );
+                        return;
+                    }
+                    values = state.featureNames.map(function (name) {
+                        return lookup.get(name);
+                    });
+                }
+                const valueNames = state.featureNames;
+                const sample = { timestamp: Date.now(), values: values };
+                let alreadyBuffered = false;
+
+                // Warm-up: collect, then fit once enough samples are in
+                if (!state.isTrained) {
+                    state.dataBuffer.push(sample);
+                    if (state.dataBuffer.length > node.windowSize) {
+                        state.dataBuffer.shift();
+                    }
+
+                    if (state.dataBuffer.length < minTrainSamples || !trainPCA(state)) {
+                        if (state.dataBuffer.length < minTrainSamples) {
+                            node.status({
+                                fill: "yellow",
+                                shape: "ring",
+                                text: groupText(state, "Training: " + state.dataBuffer.length + "/" + minTrainSamples)
+                            });
+                        }
+                        send([msg, null]);
                         done();
                         return;
                     }
+                    alreadyBuffered = true;
                 }
 
                 // Standardize current sample
-                const standardizedSample = standardizeSample(values, node.mean, node.stdDev);
+                const standardizedSample = standardizeSample(values, state.mean, state.stdDev);
 
                 // Calculate statistics
-                const stats = calculateStatistics(standardizedSample);
+                const stats = calculateStatistics(state, standardizedSample);
 
                 if (!stats) {
-                    node.send([msg, null]);
+                    send([msg, null]);
                     done();
                     return;
                 }
 
                 // Determine anomaly
-                const isT2Anomaly = stats.t2 > node.t2Threshold;
-                const isSPEAnomaly = stats.spe > node.speThreshold;
+                const isT2Anomaly = stats.t2 > state.t2Threshold;
+                const isSPEAnomaly = stats.spe > state.speThreshold;
                 let isAnomaly = false;
 
                 switch (node.method) {
@@ -458,7 +630,7 @@ module.exports = function (RED) {
                         sensor: valueNames[i],
                         contribution: contrib,
                         originalValue: values[i],
-                        reconstructedValue: stats.reconstructed[i] * node.stdDev[i] + node.mean[i]
+                        reconstructedValue: stats.reconstructed[i] * state.stdDev[i] + state.mean[i]
                     });
                 }
 
@@ -479,9 +651,8 @@ module.exports = function (RED) {
                     })
                     .slice(0, node.showTopContributors);
 
-                // Get explained variance info from ml-pca
-                const cumulativeVariance = node.pcaModel.getCumulativeVariance();
-                const explainedVarianceRatio = cumulativeVariance[node.nComponents - 1];
+                // Explained variance of the retained components
+                const explainedVarianceRatio = state.cumulativeVariance[state.nComponents - 1];
 
                 // Build output message
                 const outputMsg = {
@@ -491,25 +662,28 @@ module.exports = function (RED) {
                     pca: {
                         scores: stats.scores,
                         t2: stats.t2,
-                        t2Threshold: node.t2Threshold,
+                        t2Threshold: state.t2Threshold,
                         t2Anomaly: isT2Anomaly,
                         spe: stats.spe,
-                        speThreshold: node.speThreshold,
+                        speThreshold: state.speThreshold,
                         speAnomaly: isSPEAnomaly,
-                        nComponents: node.nComponents,
+                        nComponents: state.nComponents,
                         explainedVariance: explainedVarianceRatio,
-                        eigenvalues: node.pcaModel.getEigenvalues().slice(0, node.nComponents)
+                        eigenvalues: state.eigenvalues.slice(0, state.nComponents)
                     },
                     contributions: filteredContributions.length > 0 ? filteredContributions : undefined,
                     allContributions: isAnomaly ? contributions : undefined,
                     topContributor: contributions.length > 0 ? contributions[0].sensor : null,
                     sensorNames: valueNames,
-                    bufferSize: node.dataBuffer.length,
+                    bufferSize: state.dataBuffer.length,
                     timestamp: Date.now()
                 };
 
                 if (node.outputTopic) {
                     outputMsg.topic = node.outputTopic;
+                }
+                if (node.groupBy) {
+                    outputMsg.group = state.key;
                 }
 
                 // Preserve original message properties
@@ -521,13 +695,42 @@ module.exports = function (RED) {
                 if (isAnomaly && contributions.length > 0) {
                     statusText = "ANOMALY: " + contributions[0].sensor;
                 }
-                node.status({ fill: statusColor, shape: isAnomaly ? "ring" : "dot", text: statusText });
+                node.status({
+                    fill: statusColor,
+                    shape: isAnomaly ? "ring" : "dot",
+                    text: groupText(state, statusText)
+                });
 
                 // Send to appropriate output
                 if (isAnomaly) {
-                    node.send([null, outputMsg]);
+                    send([null, outputMsg]);
                 } else {
-                    node.send([outputMsg, null]);
+                    send([outputMsg, null]);
+                }
+
+                // Only samples judged normal join the reference window, so a
+                // fault cannot teach the model that faulty is the new normal.
+                if (!isAnomaly && !alreadyBuffered) {
+                    state.dataBuffer.push(sample);
+                    if (state.dataBuffer.length > node.windowSize) {
+                        state.dataBuffer.shift();
+                    }
+                    state.sinceTrain++;
+                }
+
+                // The first fit runs on half a window to get going early; refit
+                // once the window is full, then (retrainMode "window") every time
+                // it has turned over with normal samples.
+                const windowFull = state.dataBuffer.length >= node.windowSize;
+                if (
+                    windowFull &&
+                    (!state.fullWindowFit || (node.retrainMode === "window" && state.sinceTrain >= node.windowSize))
+                ) {
+                    if (!trainPCA(state)) {
+                        // Do not retry a failing fit on every message
+                        state.fullWindowFit = true;
+                        state.sinceTrain = 0;
+                    }
                 }
                 done();
             } catch (err) {
@@ -542,11 +745,7 @@ module.exports = function (RED) {
                 await persistence.close();
             }
 
-            node.dataBuffer = [];
-            node.isTrained = false;
-            node.pcaModel = null;
-            node.mean = null;
-            node.stdDev = null;
+            node.groups.clear();
             node.status({});
 
             if (done) done();

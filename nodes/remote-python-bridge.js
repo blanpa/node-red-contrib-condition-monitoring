@@ -38,6 +38,7 @@
 const http = require("http");
 const https = require("https");
 const EventEmitter = require("events");
+const { requestJson, withRetry } = require("./utils/json-http-client");
 
 /**
  * Deterministic string hash (djb2). Used to map a model_id to a replica index;
@@ -108,60 +109,17 @@ class RemotePythonBridge extends EventEmitter {
      */
     _request(method, path, data, endpoint, timeoutMs = this.requestTimeout) {
         const ep = endpoint || this.endpoints[0];
-        return new Promise((resolve, reject) => {
-            const startTime = Date.now();
-            // Serialize up front and send an explicit Content-Length. Without it
-            // Node uses chunked transfer-encoding, which the stdlib http.server in
-            // inference_server.py does not decode (it reads Content-Length only).
-            const payload = data ? Buffer.from(JSON.stringify(data)) : null;
-            const headers = { Accept: "application/json" };
-            if (payload) {
-                headers["Content-Type"] = "application/json";
-                headers["Content-Length"] = payload.length;
-            }
-            const options = {
-                hostname: ep.hostname,
-                port: ep.port,
-                path,
-                method,
-                headers,
-                timeout: timeoutMs
-            };
-
-            const req = ep.protocol.request(options, (res) => {
-                let body = "";
-                res.on("data", (chunk) => (body += chunk));
-                res.on("end", () => {
-                    this._updateStats(Date.now() - startTime, res.statusCode < 400);
-                    let parsed;
-                    try {
-                        parsed = body ? JSON.parse(body) : {};
-                    } catch (e) {
-                        reject(new Error(`Invalid JSON response: ${body.substring(0, 100)}`));
-                        return;
-                    }
-                    if (res.statusCode >= 400) {
-                        const err = new Error(parsed.error || `HTTP ${res.statusCode}`);
-                        err.statusCode = res.statusCode;
-                        reject(err);
-                    } else {
-                        resolve(parsed);
-                    }
-                });
-            });
-
-            req.on("error", (err) => {
-                this._updateStats(Date.now() - startTime, false);
-                reject(err);
-            });
-            req.on("timeout", () => {
-                req.destroy();
-                this._updateStats(Date.now() - startTime, false);
-                reject(new Error(`Request timeout: ${method} ${path}`));
-            });
-
-            if (payload) req.write(payload);
-            req.end();
+        return requestJson({
+            protocol: ep.protocol,
+            hostname: ep.hostname,
+            port: ep.port,
+            method: method,
+            path: path,
+            data: data,
+            timeoutMs: timeoutMs,
+            timeoutMessage: `Request timeout: ${method} ${path}`,
+            emptyBodyIsObject: true,
+            onSettled: (responseTime, success) => this._updateStats(responseTime, success)
         });
     }
 
@@ -178,23 +136,11 @@ class RemotePythonBridge extends EventEmitter {
     }
 
     /** Retry transport/5xx failures; never retry 4xx (a bad request stays bad). */
-    async _requestWithRetry(method, path, data, endpoint) {
-        let lastError;
-        for (let attempt = 0; attempt < this.retryAttempts; attempt++) {
-            try {
-                return await this._request(method, path, data, endpoint);
-            } catch (err) {
-                lastError = err;
-                const status = err.statusCode;
-                if (typeof status === "number" && status >= 400 && status < 500) {
-                    throw err;
-                }
-                if (attempt < this.retryAttempts - 1) {
-                    await new Promise((resolve) => setTimeout(resolve, this.retryDelay * (attempt + 1)));
-                }
-            }
-        }
-        throw lastError;
+    _requestWithRetry(method, path, data, endpoint) {
+        return withRetry(() => this._request(method, path, data, endpoint), {
+            retryAttempts: this.retryAttempts,
+            retryDelay: this.retryDelay
+        });
     }
 
     /**

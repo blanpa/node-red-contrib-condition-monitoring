@@ -43,4 +43,17 @@ function stringOr(raw, fallback) {
     return fallback;
 }
 
-module.exports = { clampInt, clampFloat, stringOr };
+// YYYY-MM-DD, alone or followed by a time part ("T…" / " …").
+const ISO_DATE_RE = /^\s*\d{4}-\d{2}-\d{2}(?:\s*$|[T\s])/;
+
+/**
+ * True for strings shaped like an ISO date or timestamp ("2024-05-01",
+ * "2024-05-01T12:00:00Z"). `parseFloat` happily reads those as the number
+ * 2024, so lenient numeric parsers ("65 °C" → 65) check this first to keep a
+ * timestamp column from being ingested as a sensor value.
+ */
+function isIsoDateLike(raw) {
+    return typeof raw === "string" && ISO_DATE_RE.test(raw);
+}
+
+module.exports = { clampInt, clampFloat, stringOr, isIsoDateLike };

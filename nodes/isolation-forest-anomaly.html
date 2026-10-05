@@ -13,6 +13,8 @@
             retrainInterval: { value: 50, validate: RED.validators.number() },
             adaptRate: { value: 0.1, validate: RED.validators.number() },
             persistState: { value: false },
+            groupBy: { value: "" },
+            maxGroups: { value: 50 },
             outputTopic: { value: "" },
             debug: { value: false }
         },
@@ -227,9 +229,9 @@
                         <i class="fa fa-brain"></i> Learning Mode
                     </label>
                     <select id="node-input-learningMode">
-                        <option value="batch">Batch (retrain when buffer full)</option>
-                        <option value="incremental">Incremental (retrain periodically)</option>
-                        <option value="adaptive">Adaptive (auto-adjust threshold)</option>
+                        <option value="batch">Batch (retrain each full window)</option>
+                        <option value="incremental">Incremental (retrain every N samples)</option>
+                        <option value="adaptive">Adaptive (incremental + threshold follows recent scores)</option>
                     </select>
                     <div class="cm-help-text">How the model adapts to new data</div>
                 </div>
@@ -239,7 +241,7 @@
                         <i class="fa fa-clock"></i> Retrain Interval
                     </label>
                     <input type="number" id="node-input-retrainInterval" min="10" value="50">
-                    <div class="cm-help-text">Retrain every N samples (incremental mode)</div>
+                    <div class="cm-help-text">Retrain every N samples (incremental / adaptive mode)</div>
                 </div>
                 
                 <div class="cm-config-item" id="adapt-rate-config">
@@ -261,6 +263,22 @@
                     <div class="cm-help-text">Set msg.topic on output (empty = keep original)</div>
                 </div>
                 
+                <div class="cm-config-item">
+                    <label for="node-input-groupBy">
+                        <i class="fa fa-sitemap"></i> Group By (msg property)
+                    </label>
+                    <input type="text" id="node-input-groupBy" placeholder="e.g. topic (empty = single state)">
+                    <div class="cm-help-text">One separate forest per value, so one node can serve many devices</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-maxGroups">
+                        <i class="fa fa-list-ol"></i> Max Groups
+                    </label>
+                    <input type="number" id="node-input-maxGroups" min="1" step="1" placeholder="50">
+                    <div class="cm-help-text">Limit when grouping; least recently used is dropped</div>
+                </div>
+
                 <div class="cm-config-item">
                     <label for="node-input-debug">
                         <i class="fa fa-bug"></i> Debug Mode
@@ -331,17 +349,21 @@
     
     <h3>Configuration</h3>
     <ul>
-        <li><b>Contamination:</b> Expected proportion of anomalies (0.01-0.5, default: 0.1 = 10%)</li>
+        <li><b>Contamination:</b> Expected proportion of anomalies (0.001-0.5, default: 0.1 = 10%). The threshold is
+        set so that this share of the <i>training</i> window scores above it, and is then kept until the next
+        retrain. A score of 0.5 or less is never an anomaly, so a clean or flat signal is not forced to produce
+        this share of alarms.</li>
         <li><b>Window Size:</b> Training buffer size (minimum 10, default: 100)</li>
         <li><b>Num Estimators:</b> Number of isolation trees (default: 100, more = better but slower)</li>
-        <li><b>Max Samples:</b> Samples per tree (default: 256, "auto" uses min(256, windowSize))</li>
+        <li><b>Max Samples:</b> Random subsample each tree is grown on (default: 256, capped at the window size)</li>
     </ul>
     
     <h3>Online Learning Modes</h3>
     <ul>
-        <li><b>Batch:</b> (Default) Retrain only when buffer wraps around. Best for stable data patterns.</li>
+        <li><b>Batch:</b> (Default) Retrain each time the window has been completely replaced. Best for stable data patterns.</li>
         <li><b>Incremental:</b> Retrain every N samples (configurable). Better for evolving patterns.</li>
-        <li><b>Adaptive:</b> Automatically adjust anomaly threshold based on detection patterns. Best for unknown data distributions.</li>
+        <li><b>Adaptive:</b> As incremental; in addition the threshold follows the contamination quantile of the
+        recent scores, smoothed by the adaptation rate. Best for unknown data distributions.</li>
     </ul>
     <p><b>Retrain Interval:</b> For incremental mode, specifies how often to retrain (default: every 50 samples).</p>
     <p><b>Adaptation Rate:</b> For adaptive mode, how quickly threshold adjusts (0.01-1.0, default: 0.1).</p>
@@ -349,12 +371,24 @@
     <h3>How It Works</h3>
     <p>Isolation Forest isolates anomalies by randomly partitioning data. Anomalies are isolated quickly (few partitions), normal points require many partitions.</p>
     <ol>
-        <li>Collects values until window size is reached</li>
-        <li>Trains forest of random isolation trees</li>
+        <li>Builds a first forest after 10 values and replaces it once the window is full</li>
+        <li>Features per sample: the value and its step from the previous value</li>
         <li>Scores each new value based on average path length</li>
         <li>Retrains based on learning mode (batch, incremental, or adaptive)</li>
     </ol>
     
+    <h3>Per-device grouping</h3>
+    <p>Set <b>Group By</b> to a message property (e.g. <code>topic</code>, or a nested path such as
+    <code>payload.deviceId</code>) to keep a separate buffer and forest per value of that property, so one node can serve an
+    interleaved stream from several machines without mixing their baselines.</p>
+    <ul>
+        <li>Each result carries <code>msg.group</code> with the key it was computed from.</li>
+        <li>Messages whose group property is missing or empty share one "ungrouped" state.</li>
+        <li><b>Max Groups</b> caps memory: when exceeded, the least recently used group is dropped.</li>
+        <li><code>msg.reset</code> clears the group named by the message, or everything if it names none.</li>
+        <li>Leaving <b>Group By</b> empty keeps the single shared state of earlier releases.</li>
+    </ul>
+
     <h3>Use Cases</h3>
     <ul>
         <li><b>Sensor Outliers:</b> Detect faulty readings without knowing normal range</li>

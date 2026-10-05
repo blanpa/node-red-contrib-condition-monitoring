@@ -52,10 +52,27 @@ class PythonBridgeManager extends EventEmitter {
             // prints its ready line within the spawn settle window would
             // otherwise never be seen and start() would always time out.
             let readyTimeout = null;
+            // A child that dies before it signals ready (import error, bad
+            // interpreter) must fail start() right away, not after the full
+            // startup timeout.
+            const onEarlyExit = (info) => {
+                if (readyTimeout) clearTimeout(readyTimeout);
+                this.removeListener("response", checkReady);
+                this.removeListener("processExit", onEarlyExit);
+                reject(
+                    new Error(
+                        "Python bridge exited during startup (code " +
+                            info.code +
+                            (info.signal ? ", signal " + info.signal : "") +
+                            ")"
+                    )
+                );
+            };
             const checkReady = (response) => {
                 if (response.id === "ready" && response.success) {
                     if (readyTimeout) clearTimeout(readyTimeout);
                     this.removeListener("response", checkReady);
+                    this.removeListener("processExit", onEarlyExit);
                     this.isReady = true;
                     this.emit("ready", response.result);
                     resolve(response.result);
@@ -77,8 +94,10 @@ class PythonBridgeManager extends EventEmitter {
                 // The ready line may already have arrived during the settle
                 // window — only arm the timeout if we are still waiting.
                 if (!this.isReady) {
+                    this.on("processExit", onEarlyExit);
                     readyTimeout = setTimeout(() => {
                         this.removeListener("response", checkReady);
+                        this.removeListener("processExit", onEarlyExit);
                         // The bridge never signalled ready, so a graceful shutdown
                         // (which writes a "shutdown" command to stdin and waits) is
                         // pointless and could leave the process running. Kill the
@@ -116,14 +135,26 @@ class PythonBridgeManager extends EventEmitter {
         const pythonPath = pythonCandidates[index];
 
         try {
-            this.process = spawn(pythonPath, [this.bridgeScript], {
+            // Every handler below closes over `proc`, never `this.process`:
+            // a late event from an old child must not touch the state of a
+            // bridge that has since been restarted.
+            const proc = spawn(pythonPath, [this.bridgeScript], {
                 stdio: ["pipe", "pipe", "pipe"],
                 env: { ...process.env, PYTHONUNBUFFERED: "1" }
+            });
+            this.process = proc;
+
+            // Writes to a dying child fail asynchronously with EPIPE on the
+            // stdin stream. Without a listener that is an unhandled 'error'
+            // event, i.e. a crash of the whole Node-RED process.
+            proc.stdin.on("error", (err) => {
+                if (this.process !== proc) return;
+                this._rejectAllPending(new Error("Python bridge stdin error: " + err.message));
             });
 
             // Set up readline for stdout
             this.readline = readline.createInterface({
-                input: this.process.stdout,
+                input: proc.stdout,
                 crlfDelay: Infinity
             });
 
@@ -132,7 +163,7 @@ class PythonBridgeManager extends EventEmitter {
             });
 
             // Handle stderr (for debugging)
-            this.process.stderr.on("data", (data) => {
+            proc.stderr.on("data", (data) => {
                 const msg = data.toString().trim();
                 if (msg) {
                     this.emit("stderr", msg);
@@ -140,16 +171,18 @@ class PythonBridgeManager extends EventEmitter {
             });
 
             // Handle process exit
-            this.process.on("exit", (code, signal) => {
+            proc.on("exit", (code, signal) => {
+                // stop() already detached this child (or a newer one took
+                // its place): nothing of the current state belongs to it.
+                if (this.process !== proc) return;
+
                 this.isReady = false;
                 this.process = null;
 
-                // Reject all pending requests
-                for (const pending of this.pendingRequests.values()) {
-                    clearTimeout(pending.timeout);
-                    pending.reject(new Error(`Python bridge exited with code ${code}`));
-                }
-                this.pendingRequests.clear();
+                this._rejectAllPending(new Error(`Python bridge exited with code ${code}`));
+
+                // Internal: lets start() fail fast on an early death.
+                this.emit("processExit", { code, signal });
 
                 if (!this.isShuttingDown) {
                     this.emit("exit", { code, signal });
@@ -162,9 +195,9 @@ class PythonBridgeManager extends EventEmitter {
             // invoke the callback a second time with a stale pythonPath.
             let settled = false;
 
-            this.process.on("error", () => {
+            proc.on("error", () => {
                 // Process failed to start, try next python candidate
-                this.process = null;
+                if (this.process === proc) this.process = null;
                 if (settled) return;
                 settled = true;
                 clearTimeout(settleTimer);
@@ -176,7 +209,7 @@ class PythonBridgeManager extends EventEmitter {
             const settleTimer = setTimeout(() => {
                 if (settled) return;
                 settled = true;
-                if (this.process && !this.process.killed) {
+                if (this.process === proc && !proc.killed) {
                     callback(null, pythonPath);
                 } else {
                     this._tryStart(pythonCandidates, index + 1, callback);
@@ -191,36 +224,60 @@ class PythonBridgeManager extends EventEmitter {
      * Handle a response line from Python
      */
     _handleResponse(line) {
+        let response;
         try {
-            const response = JSON.parse(line);
-            const id = response.id;
-
-            // Emit for general listeners
-            this.emit("response", response);
-
-            // Resolve pending request
-            if (this.pendingRequests.has(id)) {
-                const pending = this.pendingRequests.get(id);
-                clearTimeout(pending.timeout);
-                this.pendingRequests.delete(id);
-
-                // Update stats
-                this.stats.requestsProcessed++;
-                this.stats.lastResponseTime = Date.now() - pending.startTime;
-                this.stats.avgResponseTime =
-                    (this.stats.avgResponseTime * (this.stats.requestsProcessed - 1) + this.stats.lastResponseTime) /
-                    this.stats.requestsProcessed;
-
-                if (response.success) {
-                    pending.resolve(response.result);
-                } else {
-                    this.stats.errors++;
-                    pending.reject(new Error(response.error || "Unknown error"));
-                }
-            }
+            response = JSON.parse(line);
         } catch (err) {
-            this.emit("error", new Error(`Failed to parse response: ${line}`));
+            response = null;
         }
+        if (!response || typeof response !== "object") {
+            // Not a protocol line — a library printed to stdout. That is noise,
+            // not a failure: report it, but never as a bare 'error' event,
+            // which throws (and takes Node-RED down) when nobody listens.
+            const protocolError = new Error(`Failed to parse response: ${line}`);
+            this.emit("protocolError", protocolError);
+            if (this.listenerCount("error") > 0) {
+                this.emit("error", protocolError);
+            }
+            return;
+        }
+
+        const id = response.id;
+
+        // Emit for general listeners
+        this.emit("response", response);
+
+        // Resolve pending request
+        if (this.pendingRequests.has(id)) {
+            const pending = this.pendingRequests.get(id);
+            clearTimeout(pending.timeout);
+            this.pendingRequests.delete(id);
+
+            // Update stats
+            this.stats.requestsProcessed++;
+            this.stats.lastResponseTime = Date.now() - pending.startTime;
+            this.stats.avgResponseTime =
+                (this.stats.avgResponseTime * (this.stats.requestsProcessed - 1) + this.stats.lastResponseTime) /
+                this.stats.requestsProcessed;
+
+            if (response.success) {
+                pending.resolve(response.result);
+            } else {
+                this.stats.errors++;
+                pending.reject(new Error(response.error || "Unknown error"));
+            }
+        }
+    }
+
+    /**
+     * Reject every in-flight request (process died, pipe broke, bridge stopped).
+     */
+    _rejectAllPending(err) {
+        for (const pending of this.pendingRequests.values()) {
+            clearTimeout(pending.timeout);
+            pending.reject(err);
+        }
+        this.pendingRequests.clear();
     }
 
     /**
@@ -324,7 +381,11 @@ class PythonBridgeManager extends EventEmitter {
             // Capture the reference: this.process is nulled below, so the
             // force-kill fallback must not depend on it.
             const proc = this.process;
-            proc.kill("SIGTERM");
+            try {
+                proc.kill("SIGTERM");
+            } catch (e) {
+                // Process may already be gone
+            }
 
             // Force kill after 2 seconds if SIGTERM didn't end it
             const killTimer = setTimeout(() => {
@@ -340,8 +401,11 @@ class PythonBridgeManager extends EventEmitter {
             this.readline = null;
         }
 
+        // Detaching the child here makes its (possibly late) exit event a
+        // no-op, so anything still pending has to be settled now.
         this.process = null;
         this.isReady = false;
+        this._rejectAllPending(new Error("Python bridge stopped"));
         this.isShuttingDown = false;
     }
 
@@ -389,9 +453,13 @@ function getGlobalBridge() {
  * Shutdown the global bridge (call on Node-RED shutdown)
  */
 async function shutdownGlobalBridge() {
-    if (globalBridge) {
-        await globalBridge.stop();
-        globalBridge = null;
+    // Drop the singleton BEFORE awaiting: stop() takes half a second or more,
+    // and a caller arriving in that window must get a fresh bridge instead of
+    // the one that is on its way out.
+    const bridge = globalBridge;
+    globalBridge = null;
+    if (bridge) {
+        await bridge.stop();
     }
 }
 

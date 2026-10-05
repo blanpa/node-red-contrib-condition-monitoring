@@ -137,6 +137,30 @@ describe("RemotePythonBridge", () => {
             expect(fake.calls.length).toBe(1);
         });
 
+        it("does not retry a 4xx whose body is not JSON", async () => {
+            let hits = 0;
+            const server = http.createServer((req, res) => {
+                req.resume();
+                req.on("end", () => {
+                    hits++;
+                    res.writeHead(404, { "Content-Type": "text/html" });
+                    res.end("<html>Not Found</html>");
+                });
+            });
+            await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+            try {
+                const bridge = new RemotePythonBridge({
+                    serverUrl: `http://127.0.0.1:${server.address().port}`,
+                    retryAttempts: 3,
+                    retryDelay: 1
+                });
+                await expect(bridge.unloadModel("ghost")).rejects.toThrow("Invalid JSON response");
+                expect(hits).toBe(1);
+            } finally {
+                await close(server);
+            }
+        });
+
         it("retries a 5xx and succeeds on a later attempt", async () => {
             fake = await startFakeServer({
                 "POST /load": (_body, callNo) =>

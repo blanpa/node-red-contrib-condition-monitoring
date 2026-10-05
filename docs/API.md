@@ -353,6 +353,88 @@ msg = {
 }
 ```
 
+**How a sample is scored.** A new value is compared with the window as it stood
+*before* the value arrived, and only then added to it. (Scoring it against a
+window that already contains it caps the z-score at `sqrt(n − 1)` — with a
+window of 10 an outlier of any size reached exactly 3.0 and could never exceed a
+threshold of 3.) While a baseline holds fewer than 10 values — or fewer than
+`windowSize`, if that is smaller — its spread is too unstable to judge a
+newcomer, so those first samples are scored within the window they are part of.
+A departure from a perfectly flat baseline (σ = 0) is an anomaly with a very
+large but finite score. The EMA method compares the value with the average
+before the value moves it.
+
+`msg.config` overrides that are not valid numbers are ignored (the configured
+value stays in force) rather than silently disabling the check, and
+`msg.method` reports the method actually used for the message.
+
+With **Persist State** and a regime property, every regime's baseline is saved
+and restored, not only the one that was active.
+
+### Anomaly Detector: operating-point regimes
+
+A machine that runs at several speeds or loads has several "normals". Set
+**Regime Property** (`regimeProperty`) to a message property and the detector
+keeps one independent baseline — window, EMA, CUSUM, hysteresis counters,
+per-sensor buffers — per value of that property:
+
+```javascript
+// Node config
+{ method: "zscore", windowSize: 100, regimeProperty: "regime", maxRegimes: 20 }
+
+// Input
+msg = { payload: 41.7, regime: "full-load" };
+
+// Output — tagged with the baseline that judged it
+msg = { payload: 41.7, isAnomaly: false, regime: "full-load", bufferSize: 57, ... };
+```
+
+- Nested paths work (`payload.speedClass`); a missing or empty value uses the
+  default regime `""`.
+- Every regime warms up on its own (the first samples pass through unjudged).
+- `maxRegimes` (default 20) bounds memory; the least recently used regime is
+  evicted beyond it.
+- `msg.reset = true` clears the regime the message belongs to,
+  `msg.reset = "all"` clears every regime.
+- State persistence saves every regime.
+
+### Anomaly Detector: per-device state
+
+Set **Group By** (`groupBy`) to a message property such as `topic` to keep one
+independent state per device — sliding window, EMA / CUSUM, hysteresis
+counters and the per-sensor buffers of multi-sensor input:
+
+```javascript
+// Node config
+{ method: "zscore", windowSize: 100, groupBy: "topic", maxGroups: 50 }
+
+// Output — tagged with the device it was scored for
+msg = { topic: "pump-02", group: "pump-02", isAnomaly: false, ... };
+```
+
+- Combines with the regime property: each device then has one baseline per
+  operating point (`msg.group` and `msg.regime` are both set).
+- Messages without a usable group value share one ungrouped state.
+- `maxGroups` (default 50) bounds memory; with regimes the bound is
+  `maxGroups × maxRegimes` states, least recently used evicted first.
+- `msg.reset = true` clears the state the message belongs to,
+  `msg.reset = "all"` clears everything.
+
+### Anomaly Detector: CUSUM scale
+
+`cusumMode` selects the unit of the CUSUM drift and thresholds:
+
+- `"sigma"` (default for new nodes): each deviation from the target is divided
+  by the standard deviation of the window first, so `cusumDrift: 0.5`,
+  `cusumThreshold: 5` mean 0.5σ and 5σ on any signal.
+- `"raw"` (flows saved before this setting existed): deviation, drift and
+  thresholds are in the unit of the input, as in earlier releases.
+
+The active mode is reported as `msg.mode`.
+
+`msg.config` overrides (method, thresholds, hysteresis) apply to multi-sensor
+object payloads as well as to single values.
+
 ### Multi-Sensor Input Format
 
 ```javascript
@@ -415,10 +497,12 @@ attached as sibling properties.
 msg = {
   payload: 0.45,                 // the sample that triggered this result
   peaks: [
-    { frequency: 46.875, magnitude: 0.24, normalized: 1 },
-    { frequency: 140.6, magnitude: 0.08, normalized: 0.33 }
+    { frequency: 46.875, magnitude: 0.24, amplitude: 0.96, normalized: 1 },
+    { frequency: 140.6, magnitude: 0.08, amplitude: 0.32, normalized: 0.33 }
   ],
   dominantFrequency: 46.875,     // null when no peak passes the threshold
+  dcOffset: 9.81,                // mean of the window, removed before the transform
+  amplitudeScale: 4,             // amplitude = magnitude × this (2 / window coherent gain)
   features: {
     spectralCentroid: 85.2,      // Hz
     spectralSpread: 41.7,        // Hz
@@ -441,6 +525,17 @@ msg.frequencies = [0, 3.9, 7.8, ...];   // Hz, fftSize/2 bins
 msg.magnitudes  = [0.01, 0.24, 0.03, ...];
 ```
 
+- `magnitude` is `|X_k| / N` of the windowed signal, as in earlier releases.
+  `amplitude` is the physical single-sided amplitude: a sine of amplitude 1
+  reads 1 (multiply `msg.magnitudes` by `msg.amplitudeScale` for the same).
+- The window mean is removed before the transform and reported as `dcOffset`,
+  so a constant offset (gravity on an accelerometer, a 4–20 mA live zero) no
+  longer hides the real lines behind the relative peak threshold.
+- **Overlap** controls how often a sample-by-sample stream is analysed: once
+  when the buffer first fills, then every `fftSize × (1 − overlap)` samples
+  (50 % = every half window). An array payload is analysed once per message.
+  The same applies to envelope and cepstrum mode.
+
 ### Signal Analyzer Output (Vibration Mode)
 
 ```javascript
@@ -461,18 +556,22 @@ msg = {
     periodicity: 0.98,
     healthScore: 62,             // 0-100
 
-    // ISO 10816-3 assessment
-    iso10816: {
-      zone: "C",                 // A | B | C | D
-      severity: "warning",       // ok | warning | alarm
+    // ISO 20816-3 assessment (`iso10816` is an alias of the same object)
+    iso20816: {
+      zone: "C",                 // A | B | C | D | N/A
+      severity: "warning",       // good | acceptable | warning | critical | unknown
       recommendation: "Acceptable only for limited periods - schedule maintenance",
       rmsVelocity: 3.0,          // mm/s, converted from inputUnit
-      machineClass: "class2",    // class1 | class2 | class3 | class4
-      limits: { ab: 1.12, bc: 2.8, cd: 7.1 },   // mm/s zone boundaries
-      zoneProgress: 4.65,        // % through the current zone
+      machineClass: "group2_rigid", // group1_rigid | group1_flexible | group2_rigid | group2_flexible
+                                    // | class1..class4 (legacy ISO 10816-1)
+      standard: "ISO 20816-3",   // or "ISO 10816-1 (legacy)"
+      limits: { ab: 1.4, bc: 2.8, cd: 4.5 },    // mm/s zone boundaries
+      zoneProgress: 11.8,        // % through the current zone
+      conversion: "spectral-integration", // none | scale | spectral-integration | single-frequency
+      band: [10, 500],           // Hz band integrated (acceleration input only)
       isAlarm: false,
       isWarning: true,
-      inputUnit: "mm_s",         // mm_s | m_s | g | in_s
+      inputUnit: "g",            // mm_s | m_s | g | m_s2 | raw
       isValid: true              // false if the unit conversion is not applicable
     }
   },
@@ -484,6 +583,44 @@ msg = {
 
 Anomalies (crest factor above the configured threshold, or `|kurtosis| > 4`) are
 routed to **output 2** with the same shape.
+
+### Signal Analyzer Output (Envelope Mode)
+
+```javascript
+// Input: raw acceleration frame (array) or single samples; msg.rpm optional
+msg = { payload: [...], rpm: 1450 };
+
+// Output (output 1 = no fault, output 2 = fault)
+msg = {
+  payload: 0.12,
+  envelope: { peaks: [{ frequency: 162.5, magnitude: 0.31, normalized: 0.8, noiseRatio: 42.1 }, ...], bandLow: 500, bandHigh: 5000 },
+  shaftSpeed: 1450,              // RPM used for this analysis
+  shaftFrequency: 24.17,         // Hz
+  bearingFreqs: {                // typed-in values win, the rest is derived from geometry
+    BPFO: 86.6, BPFI: 130.9, BSF: 56.9, FTF: 9.6,
+    source: "geometry"           // manual | geometry | mixed | none
+  },
+  bearingFaults: [
+    { type: "BPFI", harmonic: 1, description: "Inner Race Fault", expectedFreq: 130.9,
+      detectedFreq: 131.2, magnitude: 0.31, severity: "medium" },
+    { type: "BPFI-Sideband", harmonic: 1, sideband: -1, description: "Inner race fault modulated by shaft speed (BPFI×1 −1×1X)",
+      expectedFreq: 106.7, detectedFreq: 107.0, magnitude: 0.14, severity: "low" },
+    // also: BPFO | BSF | FTF | 1X | 2X | Looseness (harmonics: [1,2,3,4,...]) | SubSynchronous (order: 0.43)
+  ],
+  hasFault: true,
+  faultCount: 2,
+  timestamp: 1750000000000
+}
+```
+
+Peaks are accepted only above `envelopePeakFloor` (default 8) × the local
+spectral noise floor; matching tolerance is 5 % capped at 0.15 × shaft frequency
+and floored at 1.5 bins; harmonics of a bearing line count only with the
+fundamental; a line that also sits on a shaft harmonic carries
+`coincidesWith1X: k`. Bearing geometry config keys: `bearingBalls`,
+`bearingBallDiameter`, `bearingPitchDiameter`, `bearingContactAngle` (all
+overridable through `msg.config`, as is `envelopePeakFloor`). Shaft speed resolution order: `msg.rpm`, `msg.shaftSpeed`,
+`msg.config.shaftSpeed`, node setting.
 
 ### Signal Analyzer Output (Peaks Mode)
 
@@ -505,6 +642,27 @@ msg = {
   timestamp: 1750000000000
 }
 ```
+
+**Min Peak Height** (`minPeakHeight`, or per message `msg.config.minPeakHeight`)
+is the absolute height a positive peak must reach (a negative one must fall to
+`−height`). Left empty, the threshold is automatic: mean ± 2σ of the window.
+
+### Signal Analyzer: cepstrum and envelope notes
+
+- A cepstral line is reported as the gear-mesh frequency *or* as one of its
+  sidebands — whichever candidate is closest — never as several at once.
+- **Cepstrum** quefrencies are those of the real cepstrum of the full spectrum:
+  a harmonic family spaced 50 Hz apart peaks at 0.020 s. Gear-mesh matching
+  needs the real shaft speed (node setting or `msg.rpm`); without one
+  `gearFaults` stays empty and `shaftSpeed` is `0`.
+- **Envelope** reports the band it actually used in `envelope.bandLow` /
+  `bandHigh` and the filter in `envelope.filter` (`"butterworth"` or
+  `"moving-average"`). An upper band edge at or above the Nyquist frequency is
+  lowered to 90 % of it; a band that still does not fit falls back to a crude
+  moving-average filter whose result is unreliable. Both cases log one warning.
+- Bearing-fault `severity` is derived from how far the line stands above the
+  local noise floor relative to the Peak Floor factor (more than 5× = `high`,
+  more than 2× = `medium`), so it no longer depends on the sensor unit.
 
 ### Signal Analyzer: per-device buffers
 
@@ -536,37 +694,76 @@ msg = { topic: "pump-01/vibration", group: "pump-01/vibration", peaks: [...], ..
 
 ### Trend Predictor Output (RUL Mode)
 
+`msg.payload` stays the current value; the estimate is attached as sibling
+properties.
+
 ```javascript
 msg = {
-  payload: {
-    rul: 45.5,                // Remaining useful life
-    rulUnit: "hours",
-    confidence: {
-      lower: 38.2,
-      upper: 52.8
-    },
-    status: "warning",        // "healthy", "warning", "critical", "failed"
-    degradationRate: 0.23,
-    model: "linear",          // "linear", "exponential", "weibull"
-
-    // Weibull parameters (if applicable)
-    weibull: {
-      beta: 2.5,              // Shape parameter
-      eta: 100,               // Scale parameter
-      mttf: 88.6,             // Mean time to failure
-      bLife: {
-        B1: 23.5,
-        B5: 38.2,
-        B10: 48.9,
-        B50: 83.3
-      }
-    }
+  payload: 71.2,              // the current value
+  rul: {
+    value: 45.5,              // remaining useful life in `unit`; Infinity when no trend
+    unit: "hours",            // hours | minutes | days | cycles (cycles = samples)
+    lower: 38.2,              // two-sided interval at the configured level;
+    upper: 52.8,              //   lower can be 0 ("could fail now")
+    confidence: 0.93,         // R² of the fitted trend, 0 … 1
+    confidenceLevel: 0.95,    // the level the interval was computed for (0.5 … 0.9999)
+                              // interval = delta method on the trend-line crossing time (slope and
+                              // level uncertainty); calibration on a noisy linear model gives roughly
+                              // 75–80 % coverage for a 90 % band — indicative, not a guarantee
+    status: "warning",        // "healthy", "warning", "critical", "failed", "stable"
+    model: "linear",          // the model actually used: "linear", "exponential", "weibull"
+    direction: "rising"       // "rising" | "falling"
   },
+  degradation: {
+    percent: 71.2,            // share of the way to the failure threshold
+    rate: 0.23,               // change per sample, in the signal's own direction
+    trend: "increasing"
+  },
+  thresholds: { failure: 100, warning: 80 },
+  currentValue: 71.2,
+  timestamp: 1750000000000,
 
-  warningThreshold: 72,
-  failureThreshold: 24
+  // Only with the Weibull model
+  weibull: {
+    beta: 2.5,                // configured shape parameter
+    eta: 3600000000,          // configured characteristic life, in ms
+    etaHours: 1000,
+    equivalentAge: 2.1e9,     // ms, see below
+    currentReliability: 0.29,
+    hazardRate: 1.6e-9,
+    mttf: 3.2e9,              // ms
+    failureMode: "wear_out",
+    bLife: { B1: 5.7e8, B5: 1.1e9, B10: 1.5e9, B50: 3.1e9 }   // ms
+  }
 }
 ```
+
+- **Failure Direction** (`failureDirection`, per message
+  `msg.config.failureDirection`): `"rising"` (default) for indicators that grow
+  towards the threshold, `"falling"` for those that drop towards it (pressure,
+  efficiency, a 100 → 0 health index). The warning threshold follows the same
+  direction.
+- **No trend** is a statistical decision: the result is `stable` (RUL
+  `Infinity`) when the slope is within two standard errors of zero. A slow but
+  clean drift on a fast-sampled signal is therefore detected, whatever the unit.
+- **Exponential** fits `y = a·e^(bt)` (a straight line in `ln y`). It needs
+  positive values rising to a positive threshold; otherwise the node uses the
+  linear model and says so in `rul.model`.
+- **Weibull** uses the configured β and η. The node does not know the asset's
+  age, so it reads the degradation fraction `level / threshold` as the failed
+  fraction and derives an *equivalent age* `η·(−ln(1−D))^(1/β)`; the RUL is the
+  time from there to the age at which reliability drops to 10 %.
+- The trend is fitted over **time**, not over the sample index: a gap in the
+  data counts for as long as it lasted (`rul` results carry `timeBased: true`).
+  When timestamps do not increase strictly the fit falls back to the index.
+- **Group By** (`groupBy`, `maxGroups`) keeps one independent buffer per value
+  of a message property, in every mode; outputs are tagged with `msg.group`.
+  `msg.reset = true` clears the group of the message, `"all"` every group.
+- `msg.config` overrides also apply to multi-sensor object payloads.
+- **Cycles** counts samples. Timestamps come from `msg.timestamp` (ms, a `Date`
+  or a date string) and default to the arrival time.
+- Payloads must be finite numbers (or strings that are one); `"12abc"` and
+  `"Infinity"` are rejected with a warning.
 
 ### Health Index Output
 
@@ -624,7 +821,7 @@ The `llm-analyzer` node buffers sensor samples, builds a prompt from them, calls
 |----------|------------------|----------------|-------|
 | `anthropic` | `https://api.anthropic.com/v1/messages` | `x-api-key` header | Native Messages API (`anthropic-version: 2023-06-01`) |
 | `openai` | `https://api.openai.com/v1/chat/completions` | `Authorization: Bearer` | Chat Completions API |
-| `google` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` | `?key=` query param | `{model}` substituted from config; system prompt sent as `systemInstruction` |
+| `google` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` | `x-goog-api-key` header | `{model}` substituted from config; system prompt sent as `systemInstruction` |
 | `ollama` | `http://localhost:11434/api/chat` | none (optional Bearer) | Local model runner; API key not required |
 | `openai-compatible` | **none — `apiUrl` is required** | `Authorization: Bearer` | Generic Chat Completions adapter (Groq, Together, OpenRouter, DeepSeek, Mistral API, vLLM, LMStudio, …) |
 
@@ -721,7 +918,9 @@ msg = {
                                //   ({word} substitution is still applied)
   systemPrompt: "…",           // optional — replaces the system prompt for this call
   model: "gpt-4o-mini",        // optional — per-message model override
-  apiUrl: "http://mock:8080"   // optional — per-message endpoint override (tests/gateways)
+  apiUrl: "http://mock:8080"   // optional — per-message endpoint override (tests/gateways);
+                               // ignored unless "Allow msg.apiUrl override" is enabled, and then
+                               // only accepted within the origin of the configured endpoint
 }
 ```
 
@@ -822,7 +1021,8 @@ const median = stats.calculateMedian([1, 2, 3, 4, 5]);
 
 // Quartiles
 const q = stats.calculateQuartiles([1, 2, 3, 4, 5, 6, 7, 8]);
-// Returns: { q1: 2, q2: 4, q3: 6, iqr: 4, median: 4 }
+// Returns: { q1: 2.75, q2: 4.5, q3: 6.25, iqr: 3.5, median: 4.5 }
+// (linear interpolation, the same definition as calculatePercentile / calculateMedian)
 
 // Percentile
 const p95 = stats.calculatePercentile([1, 2, 3, 4, 5], 95);
@@ -838,7 +1038,7 @@ const result = stats.calculateZScore(10, [5, 6, 7, 8, 9]);
 
 // IQR Bounds
 const bounds = stats.calculateIQRBounds([1, 2, 3, 4, 5, 6, 7, 8], 1.5);
-// Returns: { q1, q3, iqr, lowerBound, upperBound }
+// Returns: { q1: 2.75, q3: 6.25, iqr: 3.5, lowerBound: -2.5, upperBound: 11.5, ... }
 ```
 
 #### Correlation

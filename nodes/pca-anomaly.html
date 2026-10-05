@@ -12,7 +12,10 @@
             varianceThreshold: { value: 0.95, validate: RED.validators.number() },
             contributionThreshold: { value: 0.1, validate: RED.validators.number() },
             showTopContributors: { value: 3, validate: RED.validators.number() },
+            retrainMode: { value: "window" },
             outputTopic: { value: "" },
+            groupBy: { value: "" },
+            maxGroups: { value: 50 },
             debug: { value: false },
             persistState: { value: false }
         },
@@ -28,6 +31,11 @@
         outputLabels: ["normal", "anomaly"],
         paletteLabel: "PCA Anomaly",
         oneditprepare: function() {
+            // Nodes saved before this setting existed have no value for it; show
+            // the behaviour they actually get instead of an empty select.
+            if (!$("#node-input-retrainMode").val()) {
+                $("#node-input-retrainMode").val("window");
+            }
             var node = this;
             
             $("#node-input-autoComponents").on("change", function() {
@@ -192,6 +200,25 @@
             </div>
             
             <div class="form-row">
+                <label for="node-input-retrainMode"><i class="fa fa-refresh"></i> Retraining</label>
+                <select id="node-input-retrainMode">
+                    <option value="window">Refit every window of normal samples</option>
+                    <option value="off">Off (model frozen after the first full window)</option>
+                </select>
+            </div>
+
+            <div class="form-row">
+                <label for="node-input-groupBy"><i class="fa fa-sitemap"></i> Group By</label>
+                <input type="text" id="node-input-groupBy" placeholder="msg property, e.g. topic (empty = single model)">
+            </div>
+
+            <div class="form-row">
+                <label for="node-input-maxGroups"><i class="fa fa-list-ol"></i> Max Groups</label>
+                <input type="number" id="node-input-maxGroups" min="1" step="1" placeholder="50">
+                <span class="cm-hint">least recently used model is dropped</span>
+            </div>
+
+            <div class="form-row">
                 <label for="node-input-debug" style="width: auto;">
                     <input type="checkbox" id="node-input-debug" style="width: auto; margin-right: 5px;">
                     Enable debug logging
@@ -252,7 +279,38 @@
         <li><b>T² only</b>: Detects unusual sensor combinations within normal operating space</li>
         <li><b>SPE only</b>: Detects new fault patterns not seen during training</li>
     </ul>
+    <p><b>Default when the property is absent:</b> a node dropped from the palette is saved with
+    <code>method: "combined"</code>. A flow created outside the editor (Admin API, generated JSON) that
+    omits <code>method</code> runs as <code>"t2"</code>, the runtime default, and will not raise SPE alarms.
+    Set <code>method</code> explicitly in generated flows.</p>
     
+    <h3>Training and limits</h3>
+    <ul>
+        <li>The <b>feature set is fixed by the first sample</b> and values are matched <i>by name</i> afterwards
+        (array entries are named <code>sensor0</code>, <code>sensor1</code>, &hellip; by position). Key order and
+        extra keys do not matter; a sample missing one of the features is skipped with an error. Send
+        <code>msg.reset</code> to learn a new feature set.</li>
+        <li>The first model is fitted after half a window (at least 10 samples) and refitted once the window is
+        full. With <b>Retraining</b> on, it is then refitted every time the window has turned over.</li>
+        <li>Only samples judged <b>normal</b> join the training window, so a persisting fault is not learned as
+        the new normal.</li>
+        <li><b>Threshold</b> is sigma-like (3 &asymp; 99.87% confidence). The T&sup2; limit is the matching
+        F-distribution limit for the number of retained components and training samples; the SPE limit is the
+        chi-squared approximation from the discarded eigenvalues.</li>
+    </ul>
+
+    <h3>Per-device grouping</h3>
+    <p>Set <b>Group By</b> to a message property (e.g. <code>topic</code>, or a nested path such as
+    <code>payload.deviceId</code>) to keep a separate PCA model per value of that property, so one node can serve an
+    interleaved stream from several machines without mixing their baselines.</p>
+    <ul>
+        <li>Each result carries <code>msg.group</code> with the key it was computed from.</li>
+        <li>Messages whose group property is missing or empty share one "ungrouped" state.</li>
+        <li><b>Max Groups</b> caps memory: when exceeded, the least recently used group is dropped.</li>
+        <li><code>msg.reset</code> clears the group named by the message, or everything if it names none.</li>
+        <li>Leaving <b>Group By</b> empty keeps the single shared state of earlier releases.</li>
+    </ul>
+
     <h3>Contribution Analysis</h3>
     <p>When an anomaly is detected, PCA identifies which sensors contribute most:</p>
     <ul>

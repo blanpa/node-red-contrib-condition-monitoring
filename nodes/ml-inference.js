@@ -4,9 +4,6 @@ module.exports = function (RED) {
     const fs = require("fs");
     const path = require("path");
     const os = require("os");
-    const https = require("https");
-    const http = require("http");
-    const crypto = require("crypto");
 
     // Import persistent Python bridge
     const { getGlobalBridge, shutdownGlobalBridge } = require("./python-bridge-manager");
@@ -14,6 +11,8 @@ module.exports = function (RED) {
     // Import MAX Engine bridge
     const { getMaxBridge, shutdownMaxBridge } = require("./max-bridge-manager");
     const registerAdminRoutes = require("./ml-inference-admin");
+    const createMlflowClient = require("./ml-inference-mlflow");
+    const createModelDownloader = require("./ml-inference-download");
 
     // Path validator for sandboxed model loading
     const { assertPath } = require("./utils/path-validator");
@@ -67,144 +66,210 @@ module.exports = function (RED) {
     let pythonBridge = null;
     let pythonBridgeReady = false;
     let pythonBridgeError = null;
+    let pythonBridgeErrorAt = 0;
     let pythonBridgeStartPromise = null; // Track pending startup
 
     // Global MAX Engine bridge instance
     let maxBridge = null;
-    let maxBridgeReady = false;
     let maxBridgeError = null;
+    let maxBridgeErrorAt = 0;
 
-    // Initialize Python bridge on first node creation
-    async function ensurePythonBridge() {
+    // A bridge that failed to start is not retried on every single message
+    // (a local start can take up to 30 s), but it IS retried: after this
+    // back-off, and on every deploy. Caching the error for the lifetime of the
+    // runtime meant "Python was not installed yet at first deploy" could only
+    // be cured by restarting Node-RED.
+    const BRIDGE_RETRY_BACKOFF_MS = 30000;
+
+    // Model handles currently loaded into each bridge. A deploy only shuts a
+    // bridge down when nothing uses it any more — a partial deploy must not
+    // pull the sidecar out from under the nodes it did not touch.
+    const pythonBridgeUsers = new Set();
+    const maxBridgeUsers = new Set();
+
+    /** Forget a bridge that died or failed to start, so the next request starts a fresh one. */
+    function forgetPythonBridge(bridge) {
+        if (pythonBridge !== bridge) return;
+        pythonBridge = null;
+        pythonBridgeReady = false;
+        pythonBridgeStartPromise = null;
+        // Drops the singleton in python-bridge-manager synchronously.
+        shutdownGlobalBridge().catch(function () {});
+    }
+
+    /** The running Python bridge, or null — never starts one (used for unload/cleanup). */
+    function currentPythonBridge() {
+        return pythonBridge && pythonBridgeReady ? pythonBridge : null;
+    }
+
+    // Initialize Python bridge on first use; restart it after a crash.
+    function ensurePythonBridge() {
         // Already ready - return immediately
         if (pythonBridge && pythonBridgeReady) {
-            return pythonBridge;
+            return Promise.resolve(pythonBridge);
         }
 
-        // Previous startup failed - throw cached error
-        if (pythonBridgeError) {
-            throw pythonBridgeError;
-        }
-
-        // Startup in progress - wait for it
+        // Startup in progress - every caller waits for the same attempt
         if (pythonBridgeStartPromise) {
-            await pythonBridgeStartPromise;
-            if (pythonBridgeReady) return pythonBridge;
-            if (pythonBridgeError) throw pythonBridgeError;
+            return pythonBridgeStartPromise;
         }
 
-        // Start the bridge
-        if (!pythonBridge) {
-            pythonBridge = getGlobalBridge();
+        // A recent startup failed - don't hammer it
+        if (pythonBridgeError && Date.now() - pythonBridgeErrorAt < BRIDGE_RETRY_BACKOFF_MS) {
+            return Promise.reject(pythonBridgeError);
+        }
+        pythonBridgeError = null;
 
-            pythonBridge.on("stderr", (msg) => {
-                // Log Python stderr for debugging
-                if (msg && !msg.includes("FutureWarning") && !msg.includes("DeprecationWarning")) {
-                    RED.log.debug("[PythonBridge] " + msg);
-                }
-            });
+        let bridge;
+        try {
+            bridge = getGlobalBridge();
+        } catch (err) {
+            pythonBridgeError = err;
+            pythonBridgeErrorAt = Date.now();
+            return Promise.reject(err);
+        }
+        pythonBridge = bridge;
+        pythonBridgeReady = false;
 
-            pythonBridge.on("exit", (info) => {
-                RED.log.warn("[PythonBridge] Exited: " + JSON.stringify(info));
-                pythonBridgeReady = false;
-                pythonBridgeStartPromise = null;
-                // Will auto-restart on next request
-            });
+        bridge.on("stderr", (msg) => {
+            // Log Python stderr for debugging
+            if (msg && !msg.includes("FutureWarning") && !msg.includes("DeprecationWarning")) {
+                RED.log.debug("[PythonBridge] " + msg);
+            }
+        });
 
-            // Create a promise that all callers can await
-            pythonBridgeStartPromise = pythonBridge
-                .start()
-                .then(() => {
+        // Stray stdout output of a library is noise, not a failure.
+        bridge.on("protocolError", (err) => {
+            RED.log.debug("[PythonBridge] " + err.message);
+        });
+
+        bridge.on("exit", (info) => {
+            RED.log.warn("[PythonBridge] Exited: " + JSON.stringify(info));
+            // Drop the dead instance: the next request starts a new sidecar,
+            // and each model handle reloads itself into it on first use.
+            forgetPythonBridge(bridge);
+        });
+
+        // One promise that all callers await
+        const startPromise = bridge.start().then(
+            () => {
+                if (pythonBridge === bridge) {
                     pythonBridgeReady = true;
                     RED.log.info("[PythonBridge] Started successfully");
-                })
-                .catch((err) => {
+                }
+                return bridge;
+            },
+            (err) => {
+                if (pythonBridge === bridge) {
                     pythonBridgeError = err;
-                    pythonBridge = null;
-                    throw err;
-                });
-
-            await pythonBridgeStartPromise;
-        }
-
-        return pythonBridge;
+                    pythonBridgeErrorAt = Date.now();
+                    forgetPythonBridge(bridge);
+                }
+                throw err;
+            }
+        );
+        pythonBridgeStartPromise = startPromise;
+        return startPromise;
     }
 
     // Initialize MAX Engine bridge
     async function ensureMaxBridge() {
-        if (maxBridge && maxBridgeReady) {
+        // Connected (possibly flagged unhealthy by the periodic probe, or with
+        // its first health check still under way): let the request decide.
+        if (maxBridge) {
             return maxBridge;
         }
 
-        if (maxBridgeError) {
+        if (maxBridgeError && Date.now() - maxBridgeErrorAt < BRIDGE_RETRY_BACKOFF_MS) {
             throw maxBridgeError;
         }
+        maxBridgeError = null;
 
-        if (!maxBridge) {
-            maxBridge = getMaxBridge({
-                serverUrl: process.env.MAX_ENGINE_URL || "http://localhost:8765"
-            });
+        const bridge = getMaxBridge({
+            serverUrl: process.env.MAX_ENGINE_URL || "http://localhost:8765"
+        });
+        maxBridge = bridge;
 
-            maxBridge.on("health", (info) => {
-                RED.log.debug("[MaxBridge] Health: " + JSON.stringify(info));
-            });
+        bridge.on("health", (info) => {
+            RED.log.debug("[MaxBridge] Health: " + JSON.stringify(info));
+        });
 
-            maxBridge.on("unhealthy", (err) => {
-                RED.log.warn("[MaxBridge] Unhealthy: " + err.message);
-                maxBridgeReady = false;
-            });
+        bridge.on("unhealthy", (err) => {
+            RED.log.warn("[MaxBridge] Unhealthy: " + err.message);
+        });
 
-            maxBridge.on("modelLoaded", (info) => {
-                RED.log.info("[MaxBridge] Model loaded: " + info.modelId + " (" + info.backend + ")");
-            });
+        bridge.on("modelLoaded", (info) => {
+            RED.log.info("[MaxBridge] Model loaded: " + info.modelId + " (" + info.backend + ")");
+        });
 
-            try {
-                await maxBridge.checkHealth();
-                maxBridgeReady = true;
-                maxBridge.startHealthCheck();
-                RED.log.info("[MaxBridge] Connected to MAX Engine server");
-            } catch (err) {
-                maxBridgeError = err;
+        try {
+            await bridge.checkHealth();
+            bridge.startHealthCheck();
+            RED.log.info("[MaxBridge] Connected to MAX Engine server");
+        } catch (err) {
+            maxBridgeError = err;
+            maxBridgeErrorAt = Date.now();
+            if (maxBridge === bridge) {
                 maxBridge = null;
-                RED.log.warn("[MaxBridge] Not available: " + err.message);
-                throw err;
+                // Also detaches the listeners registered above.
+                shutdownMaxBridge();
             }
+            RED.log.warn("[MaxBridge] Not available: " + err.message);
+            throw err;
         }
 
-        return maxBridge;
+        return bridge;
     }
 
-    // Shutdown bridge on Node-RED close
-    // Use once() to prevent multiple registrations across test runs
-    // Store handler reference for proper cleanup
-    if (!RED._pythonBridgeShutdownHandler) {
-        RED._pythonBridgeShutdownHandler = async function () {
-            if (pythonBridge) {
-                try {
-                    await shutdownGlobalBridge();
+    // Bridge housekeeping on every flow stop (deploy or runtime shutdown).
+    //
+    // Node-RED emits "flows:stopped" for full AND partial deploys, after the
+    // affected nodes have closed (and unloaded their models). So:
+    //   - a bridge nobody uses any more is shut down — synchronously forgotten
+    //     first, so nodes created right after this event start a fresh one
+    //     instead of loading into the instance that is on its way out;
+    //   - a bridge that still serves nodes untouched by a partial deploy is
+    //     left alone;
+    //   - cached start errors expire, so a deploy retries a bridge that was
+    //     unavailable earlier.
+    // The handler stays registered for the lifetime of the runtime. The
+    // previous registration is tracked on the event bus itself (each load of
+    // this module gets its own RED object, the bus is shared), so re-loading
+    // the module — as the test helper does — replaces it instead of stacking.
+    const SHUTDOWN_HANDLER_KEY = Symbol.for("node-red-contrib-condition-monitoring.bridgeShutdownHandler");
+    if (RED.events[SHUTDOWN_HANDLER_KEY]) {
+        RED.events.removeListener("flows:stopped", RED.events[SHUTDOWN_HANDLER_KEY]);
+    }
+    RED._pythonBridgeShutdownHandler = function () {
+        pythonBridgeError = null;
+        maxBridgeError = null;
+
+        if (pythonBridge && pythonBridgeUsers.size === 0) {
+            pythonBridge = null;
+            pythonBridgeReady = false;
+            pythonBridgeStartPromise = null;
+            shutdownGlobalBridge().then(
+                function () {
                     RED.log.info("[PythonBridge] Shutdown complete");
-                } catch (err) {
+                },
+                function (err) {
                     RED.log.warn("[PythonBridge] Shutdown error: " + err.message);
                 }
-                pythonBridge = null;
-                pythonBridgeReady = false;
+            );
+        }
+
+        if (maxBridge && maxBridgeUsers.size === 0) {
+            try {
+                shutdownMaxBridge();
+                RED.log.info("[MaxBridge] Shutdown complete");
+            } catch (err) {
+                RED.log.warn("[MaxBridge] Shutdown error: " + err.message);
             }
-            // Shutdown MAX bridge
-            if (maxBridge) {
-                try {
-                    shutdownMaxBridge();
-                    RED.log.info("[MaxBridge] Shutdown complete");
-                } catch (err) {
-                    RED.log.warn("[MaxBridge] Shutdown error: " + err.message);
-                }
-                maxBridge = null;
-                maxBridgeReady = false;
-            }
-            // Reset handler reference after execution
-            RED._pythonBridgeShutdownHandler = null;
-        };
-        RED.events.once("flows:stopped", RED._pythonBridgeShutdownHandler);
-    }
+            maxBridge = null;
+        }
+    };
+    RED.events[SHUTDOWN_HANDLER_KEY] = RED._pythonBridgeShutdownHandler;
+    RED.events.on("flows:stopped", RED._pythonBridgeShutdownHandler);
 
     // Model Metadata Management
     function getModelMetadataPath(modelPath) {
@@ -226,9 +291,16 @@ module.exports = function (RED) {
         return null;
     }
 
+    // Models shipped inside this package. They are read-only assets: writing a
+    // metadata sidecar next to them dirties the install (and the git checkout).
+    const BUNDLED_MODELS_DIR = path.join(__dirname, "models");
+
     function saveModelMetadata(modelPath, metadata) {
         try {
             const metadataPath = getModelMetadataPath(modelPath);
+            if (path.resolve(path.dirname(metadataPath)) === BUNDLED_MODELS_DIR) {
+                return false;
+            }
             const metadataContent = JSON.stringify(metadata, null, 2);
             fs.writeFileSync(metadataPath, metadataContent, "utf8");
             return true;
@@ -237,592 +309,17 @@ module.exports = function (RED) {
         }
     }
 
-    // ----- Registry downloaders ---------------------------------------------------
-    //
-    // All four registry helpers accept an optional `expectedSha256` (lower-case
-    // hex). When set, the downloaded artifact is verified against the digest
-    // before any caller touches it; mismatches surface as ESHAMISMATCH errors.
-
-    // Hugging Face Hub API
-    async function downloadFromHuggingFace(modelId, revision, token, targetPath, expectedSha256) {
-        const hfFilesUrl = `https://huggingface.co/${modelId}/resolve/${revision}/`;
-
-        try {
-            // Try to find model.json (TensorFlow.js) or .onnx file
-            const possibleFiles = ["model.json", "model.onnx", "pytorch_model.bin"];
-
-            for (const file of possibleFiles) {
-                try {
-                    const fileUrl = hfFilesUrl + file;
-                    await downloadFile(fileUrl, token ? "bearer" : "none", token || "", targetPath, expectedSha256);
-                    return targetPath;
-                } catch (e) {
-                    // ESHAMISMATCH means we *did* download a candidate but it's the wrong file:
-                    // surface it instead of silently trying the next one (otherwise the user
-                    // would see a generic "no model file found" message).
-                    if (e && e.code === "ESHAMISMATCH") throw e;
-                    // Try next file
-                    continue;
-                }
-            }
-
-            throw new Error(`Could not find model file for ${modelId}. Supported: model.json, model.onnx`);
-        } catch (err) {
-            throw new Error(`Failed to download from Hugging Face: ${err.message}`);
-        }
-    }
-
-    // MLflow Registry API
-    // Minimal MLflow REST request helper: picks http/https from the URL scheme
-    // (registry URIs are commonly plain http, e.g. http://mlflow-server:5000)
-    // and supports both GET (with query params) and POST (with a JSON body).
-    // MLflow's registry API returns small JSON control-plane payloads; these
-    // bounds keep a hostile or wedged endpoint from stalling/exhausting the runtime.
-    const MAX_MLFLOW_RESPONSE_BYTES = 8 * 1024 * 1024;
-    const MLFLOW_TIMEOUT_MS = 15000;
-
-    function mlflowApiRequest(url, method, token, body) {
-        return new Promise((resolve, reject) => {
-            const isHttps = url.startsWith("https");
-            const protocol = isHttps ? https : http;
-            const urlObj = new URL(url);
-            const options = {
-                hostname: urlObj.hostname,
-                port: urlObj.port || (isHttps ? 443 : 80),
-                path: urlObj.pathname + urlObj.search,
-                method: method,
-                headers: { "Content-Type": "application/json" }
-            };
-            if (token) options.headers["Authorization"] = "Bearer " + token;
-
-            const req = protocol.request(options, (res) => {
-                let data = "";
-                let overflow = false;
-                res.on("data", (chunk) => {
-                    if (overflow) return;
-                    data += chunk;
-                    // JSON control-plane responses are small; refuse to buffer a
-                    // hostile or misconfigured endpoint's unbounded stream.
-                    if (data.length > MAX_MLFLOW_RESPONSE_BYTES) {
-                        overflow = true;
-                        res.destroy();
-                        reject(new Error("MLflow response exceeds " + MAX_MLFLOW_RESPONSE_BYTES + " bytes"));
-                    }
-                });
-                res.on("end", () => {
-                    if (overflow) return;
-                    if (res.statusCode >= 200 && res.statusCode < 300) {
-                        try {
-                            resolve(data ? JSON.parse(data) : {});
-                        } catch (e) {
-                            reject(new Error("Invalid JSON response from MLflow"));
-                        }
-                    } else {
-                        reject(new Error(`MLflow API error: ${res.statusCode} ${res.statusMessage}`));
-                    }
-                });
-            });
-            req.on("error", reject);
-            req.setTimeout(MLFLOW_TIMEOUT_MS, () => {
-                req.destroy(new Error("MLflow request timed out after " + MLFLOW_TIMEOUT_MS + "ms"));
-            });
-            if (body) req.write(JSON.stringify(body));
-            req.end();
-        });
-    }
-
-    async function downloadFromMLflow(registryUri, modelName, version, stage, token, targetPath, expectedSha256) {
-        try {
-            const baseUrl = registryUri.replace(/\/$/, "");
-
-            // Resolve the model version's artifact source.
-            let modelInfo;
-            if (version && version !== "latest") {
-                // Specific version: GET model-versions/get
-                const apiUrl = `${baseUrl}/api/2.0/mlflow/model-versions/get?name=${encodeURIComponent(
-                    modelName
-                )}&version=${encodeURIComponent(version)}`;
-                modelInfo = await mlflowApiRequest(apiUrl, "GET", token);
-            } else {
-                // "latest" (optionally filtered by stage): POST get-latest-versions
-                // (there is no `latest-versions/get` endpoint; the registry API is
-                // registered-models/get-latest-versions and it is a POST).
-                const apiUrl = `${baseUrl}/api/2.0/mlflow/registered-models/get-latest-versions`;
-                const reqBody = { name: modelName };
-                if (stage) reqBody.stages = [stage];
-                modelInfo = await mlflowApiRequest(apiUrl, "POST", token, reqBody);
-            }
-
-            const modelUri = modelInfo.model_version?.source || modelInfo.model_versions?.[0]?.source;
-
-            if (!modelUri) {
-                throw new Error("Could not get model URI from MLflow");
-            }
-
-            // MLflow `source` is an artifact URI. Only http(s) sources are directly
-            // downloadable here; object-store / proxy schemes (s3://, dbfs:/,
-            // mlflow-artifacts:/, models:/, file:/) need their own client.
-            if (!/^https?:\/\//i.test(modelUri)) {
-                const scheme = String(modelUri).split(":")[0];
-                throw new Error(
-                    `MLflow model source uses '${scheme}:' which is not directly downloadable over HTTP. ` +
-                        "Serve artifacts over http(s) (e.g. the mlflow-artifacts proxy) or use modelSource=url with a direct link."
-                );
-            }
-
-            // Download model from MLflow storage
-            await downloadFile(modelUri, token ? "bearer" : "none", token || "", targetPath, expectedSha256);
-            return targetPath;
-        } catch (err) {
-            if (err && err.code === "ESHAMISMATCH") throw err;
-            throw new Error(`Failed to download from MLflow: ${err.message}`);
-        }
-    }
-
-    // Custom Registry API
-    async function downloadFromCustomRegistry(registryUrl, modelId, apiKey, targetPath, expectedSha256) {
-        try {
-            const apiUrl = `${registryUrl.replace(/\/$/, "")}/models/${encodeURIComponent(modelId)}/download`;
-            await downloadFile(apiUrl, apiKey ? "bearer" : "none", apiKey || "", targetPath, expectedSha256);
-            return targetPath;
-        } catch (err) {
-            if (err && err.code === "ESHAMISMATCH") throw err;
-            throw new Error(`Failed to download from custom registry: ${err.message}`);
-        }
-    }
-
-    // ========================================
-    // MLflow Tracking API - Performance Logging
-    // ========================================
-
-    /**
-     * MLflow Tracking Manager - handles experiment/run lifecycle and metric logging
-     */
-    class MLflowTracker {
-        constructor(trackingUri, experimentName, token) {
-            this.trackingUri = trackingUri ? trackingUri.replace(/\/$/, "") : "";
-            this.experimentName = experimentName || "node-red-ml-inference";
-            this.token = token || "";
-            this.experimentId = null;
-            this.runId = null;
-            this.metricsBuffer = [];
-            this.bufferSize = 100; // Batch size for metric logging
-            this.flushInterval = null;
-            this.enabled = !!this.trackingUri;
-            this.stepCounter = 0;
-        }
-
-        /**
-         * Make HTTP request to MLflow API
-         */
-        async _request(method, endpoint, data = null) {
-            if (!this.enabled) return null;
-
-            return new Promise((resolve, reject) => {
-                const url = `${this.trackingUri}${endpoint}`;
-                const isHttps = url.startsWith("https");
-                const protocol = isHttps ? https : http;
-
-                const urlObj = new URL(url);
-                const options = {
-                    hostname: urlObj.hostname,
-                    port: urlObj.port || (isHttps ? 443 : 80),
-                    path: urlObj.pathname + urlObj.search,
-                    method: method,
-                    headers: {
-                        "Content-Type": "application/json"
-                    }
-                };
-
-                if (this.token) {
-                    options.headers["Authorization"] = "Bearer " + this.token;
-                }
-
-                const req = protocol.request(options, (res) => {
-                    let responseData = "";
-                    res.on("data", (chunk) => (responseData += chunk));
-                    res.on("end", () => {
-                        if (res.statusCode >= 200 && res.statusCode < 300) {
-                            try {
-                                resolve(responseData ? JSON.parse(responseData) : {});
-                            } catch (e) {
-                                resolve({});
-                            }
-                        } else {
-                            reject(new Error(`MLflow API error: ${res.statusCode} - ${responseData}`));
-                        }
-                    });
-                });
-
-                req.on("error", reject);
-
-                if (data) {
-                    req.write(JSON.stringify(data));
-                }
-                req.end();
-            });
-        }
-
-        /**
-         * Get or create experiment by name
-         */
-        async getOrCreateExperiment() {
-            if (!this.enabled) return null;
-
-            try {
-                // Try to get existing experiment
-                const searchResult = await this._request(
-                    "GET",
-                    `/api/2.0/mlflow/experiments/get-by-name?experiment_name=${encodeURIComponent(this.experimentName)}`
-                );
-
-                if (searchResult && searchResult.experiment) {
-                    this.experimentId = searchResult.experiment.experiment_id;
-                    return this.experimentId;
-                }
-            } catch (e) {
-                // Experiment doesn't exist, create it
-            }
-
-            try {
-                const createResult = await this._request("POST", "/api/2.0/mlflow/experiments/create", {
-                    name: this.experimentName,
-                    tags: [
-                        { key: "source", value: "node-red-ml-inference" },
-                        { key: "created_at", value: new Date().toISOString() }
-                    ]
-                });
-
-                if (createResult && createResult.experiment_id) {
-                    this.experimentId = createResult.experiment_id;
-                    return this.experimentId;
-                }
-            } catch (e) {
-                RED.log.warn("[MLflowTracker] Failed to create experiment: " + e.message);
-            }
-
-            return null;
-        }
-
-        /**
-         * Start a new MLflow run for this node instance
-         */
-        async startRun(runName, tags = {}) {
-            if (!this.enabled) return null;
-
-            if (!this.experimentId) {
-                await this.getOrCreateExperiment();
-            }
-
-            if (!this.experimentId) return null;
-
-            try {
-                const runTags = [
-                    { key: "mlflow.runName", value: runName },
-                    { key: "node_red.node_type", value: "ml-inference" },
-                    { key: "node_red.start_time", value: new Date().toISOString() }
-                ];
-
-                // Add custom tags
-                for (const [key, value] of Object.entries(tags)) {
-                    runTags.push({ key: `node_red.${key}`, value: String(value) });
-                }
-
-                const result = await this._request("POST", "/api/2.0/mlflow/runs/create", {
-                    experiment_id: this.experimentId,
-                    start_time: Date.now(),
-                    tags: runTags
-                });
-
-                if (result && result.run) {
-                    this.runId = result.run.info.run_id;
-                    this.stepCounter = 0;
-
-                    // Start periodic flush
-                    this._startFlushInterval();
-
-                    return this.runId;
-                }
-            } catch (e) {
-                RED.log.warn("[MLflowTracker] Failed to start run: " + e.message);
-            }
-
-            return null;
-        }
-
-        /**
-         * Log a single metric (buffered)
-         */
-        logMetric(key, value, step = null) {
-            if (!this.enabled || !this.runId) return;
-
-            const metric = {
-                key: key,
-                value: typeof value === "number" ? value : parseFloat(value) || 0,
-                timestamp: Date.now(),
-                step: step !== null ? step : this.stepCounter++
-            };
-
-            this.metricsBuffer.push(metric);
-
-            // Flush if buffer is full
-            if (this.metricsBuffer.length >= this.bufferSize) {
-                this.flush();
-            }
-        }
-
-        /**
-         * Log multiple metrics at once (buffered)
-         */
-        logMetrics(metrics, step = null) {
-            if (!this.enabled || !this.runId) return;
-
-            const currentStep = step !== null ? step : this.stepCounter++;
-
-            for (const [key, value] of Object.entries(metrics)) {
-                this.metricsBuffer.push({
-                    key: key,
-                    value: typeof value === "number" ? value : parseFloat(value) || 0,
-                    timestamp: Date.now(),
-                    step: currentStep
-                });
-            }
-
-            if (this.metricsBuffer.length >= this.bufferSize) {
-                this.flush();
-            }
-        }
-
-        /**
-         * Log parameters (not buffered - immediate)
-         */
-        async logParams(params) {
-            if (!this.enabled || !this.runId) return;
-
-            const paramList = [];
-            for (const [key, value] of Object.entries(params)) {
-                paramList.push({ key: key, value: String(value).substring(0, 500) }); // MLflow limit
-            }
-
-            try {
-                await this._request("POST", "/api/2.0/mlflow/runs/log-batch", {
-                    run_id: this.runId,
-                    params: paramList
-                });
-            } catch (e) {
-                RED.log.debug("[MLflowTracker] Failed to log params: " + e.message);
-            }
-        }
-
-        /**
-         * Flush metrics buffer to MLflow
-         */
-        async flush() {
-            if (!this.enabled || !this.runId || this.metricsBuffer.length === 0) return;
-
-            const metricsToSend = [...this.metricsBuffer];
-            this.metricsBuffer = [];
-
-            try {
-                await this._request("POST", "/api/2.0/mlflow/runs/log-batch", {
-                    run_id: this.runId,
-                    metrics: metricsToSend
-                });
-            } catch (e) {
-                RED.log.debug("[MLflowTracker] Failed to flush metrics: " + e.message);
-                // Re-add metrics to buffer on failure (up to limit)
-                this.metricsBuffer = [...metricsToSend.slice(-50), ...this.metricsBuffer].slice(0, this.bufferSize * 2);
-            }
-        }
-
-        /**
-         * Start periodic flush interval
-         */
-        _startFlushInterval() {
-            if (this.flushInterval) return;
-
-            // Flush every 10 seconds
-            this.flushInterval = setInterval(() => {
-                this.flush();
-            }, 10000);
-            if (this.flushInterval.unref) {
-                this.flushInterval.unref();
-            }
-        }
-
-        /**
-         * End the current run
-         */
-        async endRun(status = "FINISHED") {
-            if (!this.enabled || !this.runId) return;
-
-            // Final flush
-            await this.flush();
-
-            // Stop flush interval
-            if (this.flushInterval) {
-                clearInterval(this.flushInterval);
-                this.flushInterval = null;
-            }
-
-            try {
-                await this._request("POST", "/api/2.0/mlflow/runs/update", {
-                    run_id: this.runId,
-                    status: status,
-                    end_time: Date.now()
-                });
-            } catch (e) {
-                RED.log.debug("[MLflowTracker] Failed to end run: " + e.message);
-            }
-
-            this.runId = null;
-        }
-
-        /**
-         * Clean up resources
-         */
-        destroy() {
-            if (this.flushInterval) {
-                clearInterval(this.flushInterval);
-                this.flushInterval = null;
-            }
-            this.endRun("KILLED");
-        }
-    }
-
-    // Store active trackers by node ID
-    const activeTrackers = new Map();
-
-    /**
-     * Compute the SHA-256 hash of a file, returning a lower-case hex digest.
-     */
-    function sha256OfFile(filePath) {
-        return new Promise((resolve, reject) => {
-            const hash = crypto.createHash("sha256");
-            const stream = fs.createReadStream(filePath);
-            stream.on("data", (chunk) => hash.update(chunk));
-            stream.on("end", () => resolve(hash.digest("hex")));
-            stream.on("error", reject);
-        });
-    }
-
-    // Download file with authentication.
-    //
-    // When `expectedSha256` is provided, the downloaded artifact is hashed and
-    // compared against it after the stream completes. On mismatch the file is
-    // unlinked and the promise rejects — no caller will ever see a poisoned
-    // model. Hashes must be the lower-case hex SHA-256 digest.
-    async function downloadFile(url, authType, authToken, targetPath, expectedSha256, redirectsLeft) {
-        if (redirectsLeft === undefined) redirectsLeft = 5;
-        await new Promise((resolve, reject) => {
-            const protocol = url.startsWith("https") ? https : http;
-
-            const options = {
-                headers: {}
-            };
-
-            // Add authentication headers
-            if (authType === "bearer" && authToken) {
-                options.headers["Authorization"] = "Bearer " + authToken;
-            } else if (authType === "basic" && authToken) {
-                options.headers["Authorization"] = "Basic " + Buffer.from(authToken).toString("base64");
-            }
-
-            const file = fs.createWriteStream(targetPath);
-
-            // A WriteStream error (disk full, EACCES, etc.) would otherwise be an
-            // unhandled 'error' event and crash the process. Route it to reject.
-            file.on("error", (err) => {
-                try {
-                    file.destroy();
-                    if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-                } catch (_) {
-                    /* ignore cleanup errors */
-                }
-                reject(err);
-            });
-
-            protocol
-                .get(url, options, (response) => {
-                    if (
-                        response.statusCode === 301 ||
-                        response.statusCode === 302 ||
-                        response.statusCode === 303 ||
-                        response.statusCode === 307 ||
-                        response.statusCode === 308
-                    ) {
-                        // Handle redirect — recurse but keep the same expectedSha256
-                        file.destroy();
-                        if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-                        if (redirectsLeft <= 0 || !response.headers.location) {
-                            reject(new Error("Too many redirects (or missing Location) while downloading " + url));
-                            return;
-                        }
-                        const nextUrl = new URL(response.headers.location, url).toString();
-                        // Drop credentials when the redirect crosses to another origin —
-                        // presigned-CDN redirects (HF/S3) must not receive our auth token.
-                        let nextAuthType = authType;
-                        let nextAuthToken = authToken;
-                        try {
-                            if (new URL(nextUrl).origin !== new URL(url).origin) {
-                                nextAuthType = null;
-                                nextAuthToken = null;
-                            }
-                        } catch (e) {
-                            // malformed URL — let the recursive call fail cleanly
-                        }
-                        return downloadFile(
-                            nextUrl,
-                            nextAuthType,
-                            nextAuthToken,
-                            targetPath,
-                            expectedSha256,
-                            redirectsLeft - 1
-                        )
-                            .then(resolve)
-                            .catch(reject);
-                    }
-
-                    if (response.statusCode !== 200) {
-                        file.close();
-                        if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-                        reject(new Error(`Failed to download: ${response.statusCode} ${response.statusMessage}`));
-                        return;
-                    }
-
-                    response.pipe(file);
-
-                    file.on("finish", () => {
-                        file.close();
-                        resolve();
-                    });
-                })
-                .on("error", (err) => {
-                    file.close();
-                    if (fs.existsSync(targetPath)) {
-                        fs.unlinkSync(targetPath);
-                    }
-                    reject(err);
-                });
-        });
-
-        if (expectedSha256) {
-            const want = String(expectedSha256).trim().toLowerCase();
-            if (!/^[0-9a-f]{64}$/.test(want)) {
-                if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-                throw new Error("expectedSha256 must be a 64-char hex SHA-256 digest");
-            }
-            const got = await sha256OfFile(targetPath);
-            if (got !== want) {
-                if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-                const err = new Error(`SHA-256 mismatch for ${url}: expected ${want}, got ${got}`);
-                err.code = "ESHAMISMATCH";
-                throw err;
-            }
-        }
-
-        return targetPath;
-    }
+    // MLflow REST helper + metric tracker, and the model download helpers,
+    // live in their own modules (ml-inference-mlflow.js, ml-inference-download.js).
+    const { mlflowApiRequest, MLflowTracker } = createMlflowClient(RED);
+    const {
+        downloadFile,
+        downloadTfjsModel,
+        downloadFromHuggingFace,
+        downloadFromMLflow,
+        downloadFromCustomRegistry,
+        finalizeDownloadedModel
+    } = createModelDownloader({ MODELS_DIR: MODELS_DIR, mlflowApiRequest: mlflowApiRequest });
 
     // Lazy-load ML runtimes
     let tf = null;
@@ -867,7 +364,6 @@ module.exports = function (RED) {
         this.outputProperty = config.outputProperty || "prediction";
         this.inputProperty = config.inputProperty || "payload";
         this.preprocessMode = config.preprocessMode || "array"; // array, object, flatten
-        this.batchSize = clampInt(config.batchSize, 1, 100000, 1);
         this.warmup = config.warmup !== false;
 
         // URL Authentication (for Phase 1)
@@ -929,22 +425,40 @@ module.exports = function (RED) {
         // Status indicator
         node.status({ fill: "yellow", shape: "ring", text: "initializing..." });
 
+        // Lifecycle bookkeeping.
+        //  - closed:        set by the close handler; a load that finishes after
+        //                   it must release what it loaded instead of installing it.
+        //  - loadChain:     model loads run strictly one after another (startup,
+        //                   auto-update timer and msg.loadModel can overlap).
+        //  - loadsPending:  loads queued or running.
+        //  - inflight:      inferences currently running against node.model.
+        let closed = false;
+        let loadChain = Promise.resolve();
+        let loadsPending = 0;
+        let inflight = 0;
+        let idleWaiters = [];
+        let statusResetTimer = null;
+        let lastInvalidInputWarning = 0;
+
         // Auto-update timer (Phase 5)
         let updateTimer = null;
         if (node.autoUpdate && node.updateCheckInterval > 0) {
-            updateTimer = setInterval(async () => {
+            updateTimer = setInterval(() => {
                 if (
                     node.modelSource === "huggingface" ||
                     node.modelSource === "mlflow" ||
                     node.modelSource === "custom"
                 ) {
-                    try {
+                    // The previous load/check is still running (slow download,
+                    // short interval): don't pile another one on top of it.
+                    if (loadsPending > 0) return;
+                    if (!node.modelLoaded) {
                         node.status({ fill: "yellow", shape: "dot", text: "checking for updates..." });
-                        // Re-initialize model to check for updates
-                        await initializeModel();
-                    } catch (err) {
-                        node.warn("Auto-update check failed: " + err.message);
                     }
+                    // Re-fetch and swap. The model that is serving right now
+                    // stays in place until the new one has loaded, and stays
+                    // for good if the registry is unreachable.
+                    initializeModel({ keepOnFailure: true });
                 }
             }, node.updateCheckInterval * 1000);
             if (updateTimer.unref) {
@@ -1032,35 +546,19 @@ module.exports = function (RED) {
 
             // Determine how to load based on path
             if (modelPath.startsWith("http://") || modelPath.startsWith("https://")) {
-                // URL-based loading - download first if authentication is needed
-                if (authType && authToken) {
-                    // Download to cache first
-                    const urlObj = new URL(modelPath);
-                    const filename = path.basename(urlObj.pathname) || "model_" + Date.now() + ".json";
-                    const cachePath = path.join(MODELS_DIR, "cache", filename);
-
-                    // Ensure cache directory exists
-                    const cacheDir = path.dirname(cachePath);
-                    if (!fs.existsSync(cacheDir)) {
-                        fs.mkdirSync(cacheDir, { recursive: true });
-                    }
-
-                    // Download file (with optional SHA-256 integrity check)
-                    await downloadFile(modelPath, authType, authToken, cachePath, expectedSha256);
-                    actualPath = cachePath;
-                } else if (expectedSha256) {
-                    // We were asked to verify integrity but we'd otherwise hand the URL
-                    // straight to TensorFlow.js — fetch+verify here so the contract is honoured.
-                    const urlObj = new URL(modelPath);
-                    const filename = path.basename(urlObj.pathname) || "model_" + Date.now() + ".json";
-                    const cachePath = path.join(MODELS_DIR, "cache", filename);
-                    const cacheDir = path.dirname(cachePath);
-                    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-                    await downloadFile(modelPath, "none", "", cachePath, expectedSha256);
-                    actualPath = cachePath;
+                // TF.js can load a public URL natively. With credentials or an
+                // integrity pin we have to fetch it ourselves — model.json AND
+                // the weight shards it references — and load the local mirror.
+                if ((authType && authType !== "none" && authToken) || expectedSha256) {
+                    const localModelJson = await downloadTfjsModel(
+                        modelPath,
+                        authType || "none",
+                        authToken || "",
+                        expectedSha256
+                    );
+                    actualPath = "file://" + localModelJson;
                 }
 
-                // Load from URL (TF.js handles URLs natively, but we use cached file if auth was needed)
                 try {
                     model = await tensorflow.loadGraphModel(actualPath);
                 } catch (e) {
@@ -1146,78 +644,80 @@ module.exports = function (RED) {
             return session;
         }
 
-        // Load TFLite/Coral model using persistent Python bridge
-        async function loadCoralModel(modelPath) {
+        /**
+         * Load a model into the persistent Python bridge (TFLite/Coral, Keras,
+         * scikit-learn — the bridge picks the loader from the file extension).
+         *
+         * The returned handle heals itself: when the sidecar was restarted (crash,
+         * OOM kill, deploy) or lost the model, the next predict() loads it again
+         * instead of failing forever with "not loaded".
+         */
+        async function loadBridgeModel(kind, label, modelPath) {
             const fullPath = resolveLocalModelPath(modelPath);
 
             if (!fs.existsSync(fullPath)) {
-                throw new Error("TFLite model file not found: " + fullPath);
+                throw new Error(label + " model file not found: " + fullPath);
             }
 
             // Get or start the persistent Python bridge
             const bridge = await ensurePythonBridge();
 
             // Generate a unique model ID for this node
-            const modelId = "tflite_" + path.basename(fullPath) + "_" + node.id;
+            const modelId = kind + "_" + path.basename(fullPath) + "_" + node.id;
 
-            // Load model into the persistent bridge
-            await bridge.loadModel(fullPath, modelId);
-
-            return {
-                type: "tflite",
-                modelPath: fullPath,
-                modelId: modelId,
-                usePersistentBridge: true,
-                predict: async function (inputData) {
-                    const bridge = await ensurePythonBridge();
-                    return bridge.predict(modelId, inputData);
-                },
-                unload: async function () {
-                    try {
-                        const bridge = await ensurePythonBridge();
-                        await bridge.unloadModel(modelId);
-                    } catch (err) {
-                        // Ignore unload errors
-                    }
+            // The bridge caches by model id. When this node already holds that
+            // id (reload / auto-update of the same file name), unload first so
+            // the file is actually read again.
+            const current = node.model;
+            if (current && current.usePersistentBridge && current.modelId === modelId) {
+                try {
+                    await bridge.unloadModel(modelId);
+                } catch (err) {
+                    // Not loaded there (any more) — nothing to replace
                 }
-            };
-        }
-
-        // Load Keras model (.keras, .h5) using persistent Python bridge
-        async function loadKerasModel(modelPath) {
-            const fullPath = resolveLocalModelPath(modelPath);
-
-            if (!fs.existsSync(fullPath)) {
-                throw new Error("Keras model file not found: " + fullPath);
             }
 
-            // Get or start the persistent Python bridge
-            const bridge = await ensurePythonBridge();
-
-            // Generate a unique model ID for this node
-            const modelId = "keras_" + path.basename(fullPath) + "_" + node.id;
-
             // Load model into the persistent bridge
             await bridge.loadModel(fullPath, modelId);
+            let loadedInto = bridge;
 
-            return {
-                type: "keras",
+            const handle = {
+                type: kind,
                 modelPath: fullPath,
                 modelId: modelId,
                 usePersistentBridge: true,
                 predict: async function (inputData) {
-                    const bridge = await ensurePythonBridge();
-                    return bridge.predict(modelId, inputData);
+                    const active = await ensurePythonBridge();
+                    if (active !== loadedInto) {
+                        // New sidecar process: it has never seen this model.
+                        await active.loadModel(fullPath, modelId);
+                        loadedInto = active;
+                    }
+                    try {
+                        return await active.predict(modelId, inputData);
+                    } catch (err) {
+                        if (!/not loaded/i.test(String(err && err.message))) throw err;
+                        // The bridge dropped the model (cache eviction, remote
+                        // replica restart): load once more and retry.
+                        await active.loadModel(fullPath, modelId);
+                        return active.predict(modelId, inputData);
+                    }
                 },
                 unload: async function () {
+                    pythonBridgeUsers.delete(handle);
                     try {
-                        const bridge = await ensurePythonBridge();
-                        await bridge.unloadModel(modelId);
+                        // Never start a sidecar just to unload from it.
+                        const active = currentPythonBridge();
+                        if (active && active === loadedInto) {
+                            await active.unloadModel(modelId);
+                        }
                     } catch (err) {
                         // Ignore unload errors
                     }
                 }
             };
+            pythonBridgeUsers.add(handle);
+            return handle;
         }
 
         // Load ONNX model using MAX Engine bridge (high-performance)
@@ -1244,9 +744,19 @@ module.exports = function (RED) {
                 containerPath = fullPath;
             }
 
+            // Same id already held by this node: unload so the server re-reads the file.
+            const current = node.model;
+            if (current && current.type === "max" && current.modelId === modelId) {
+                try {
+                    await bridge.unloadModel(modelId);
+                } catch (err) {
+                    // Not loaded there (any more)
+                }
+            }
+
             await bridge.loadModel(containerPath, modelId, "auto");
 
-            return {
+            const handle = {
                 type: "max",
                 modelPath: fullPath,
                 containerPath: containerPath,
@@ -1262,99 +772,196 @@ module.exports = function (RED) {
                     return result.predictions;
                 },
                 unload: async function () {
+                    maxBridgeUsers.delete(handle);
                     try {
-                        const bridge = await ensureMaxBridge();
-                        await bridge.unloadModel(modelId);
+                        // Only talk to a bridge that exists; don't connect just to unload.
+                        if (maxBridge) {
+                            await maxBridge.unloadModel(modelId);
+                        }
                     } catch (err) {
                         // Ignore unload errors
                     }
                 }
             };
+            maxBridgeUsers.add(handle);
+            return handle;
         }
 
-        // Load scikit-learn model (.pkl, .joblib) using persistent Python bridge
-        async function loadSklearnModel(modelPath) {
-            const fullPath = resolveLocalModelPath(modelPath);
-
-            if (!fs.existsSync(fullPath)) {
-                throw new Error("scikit-learn model file not found: " + fullPath);
-            }
-
-            // Get or start the persistent Python bridge
-            const bridge = await ensurePythonBridge();
-
-            // Generate a unique model ID for this node
-            const modelId = "sklearn_" + path.basename(fullPath) + "_" + node.id;
-
-            // Load model into the persistent bridge
-            await bridge.loadModel(fullPath, modelId);
-
-            return {
-                type: "sklearn",
-                modelPath: fullPath,
-                modelId: modelId,
-                usePersistentBridge: true,
-                predict: async function (inputData) {
-                    const bridge = await ensurePythonBridge();
-                    return bridge.predict(modelId, inputData);
-                },
-                unload: async function () {
-                    try {
-                        const bridge = await ensurePythonBridge();
-                        await bridge.unloadModel(modelId);
-                    } catch (err) {
-                        // Ignore unload errors
-                    }
-                }
-            };
+        /** Resolves once no inference is running against the current model (or after `timeoutMs`). */
+        function waitForIdle(timeoutMs) {
+            if (inflight === 0) return Promise.resolve();
+            return new Promise((resolve) => {
+                let timer = null;
+                const finish = function () {
+                    if (timer) clearTimeout(timer);
+                    idleWaiters = idleWaiters.filter((w) => w !== finish);
+                    resolve();
+                };
+                timer = setTimeout(finish, timeoutMs);
+                idleWaiters.push(finish);
+            });
         }
 
-        // Initialize model
-        // Dispose/unload the currently loaded model before loading a new one.
-        // Prevents tensor / native-session / bridge-model leaks on auto-update
-        // reloads and runtime msg.loadModel swaps.
-        async function disposeCurrentModel() {
-            if (!node.model) return;
-            const old = node.model;
-            node.model = null;
-            node.modelLoaded = false;
+        /**
+         * Free everything a loaded model holds, whatever its format:
+         *   - bridge-backed handles (Python bridge AND MAX Engine) are unloaded
+         *     from their server, unless `replacedBy` took over the same model id;
+         *   - TF.js graph/layers models and SavedModels are disposed;
+         *   - ONNX Runtime sessions are released (native memory, not GC-managed).
+         * Native handles are only freed once in-flight inferences have drained.
+         */
+        async function releaseModel(model, format, replacedBy) {
+            if (!model) return;
             try {
-                if (old.usePersistentBridge && old.unload) {
-                    await old.unload();
+                if (typeof model.unload === "function") {
+                    const sameSlot =
+                        replacedBy && replacedBy.modelId === model.modelId && replacedBy.type === model.type;
+                    if (sameSlot) {
+                        // The new handle already replaced it on the server.
+                        pythonBridgeUsers.delete(model);
+                        maxBridgeUsers.delete(model);
+                    } else {
+                        await model.unload();
+                    }
+                } else if (format === "tfjs" || format === "savedmodel") {
+                    await waitForIdle(5000);
+                    if (typeof model.dispose === "function") model.dispose();
+                } else if (format === "onnx") {
+                    await waitForIdle(5000);
+                    if (typeof model.release === "function") await model.release();
                 }
-                if (node.modelFormat === "tfjs" && old.dispose) {
-                    old.dispose();
-                }
-                // ONNX sessions don't need explicit disposal
             } catch (err) {
                 node.warn("Error disposing previous model: " + err.message);
             }
         }
 
-        async function initializeModel() {
-            // Dispose any previously loaded model first (reload / auto-update / swap)
-            await disposeCurrentModel();
+        // Dispose/unload the currently loaded model.
+        async function disposeCurrentModel() {
+            if (!node.model) return;
+            const old = node.model;
+            const oldFormat = node.modelFormat;
+            node.model = null;
+            node.modelLoaded = false;
+            await releaseModel(old, oldFormat);
+        }
+
+        /** Load `actualModelPath` as `modelType`. Touches no node state. */
+        async function loadByType(modelType, actualModelPath, authType, authToken) {
+            if (modelType === "tfjs" || modelType === "savedmodel") {
+                // (SavedModels go through the TF.js loader as well.)
+                const model = await loadTFJSModel(actualModelPath, authType, authToken, node.modelSha256);
+
+                // Warmup run
+                if (modelType === "tfjs" && node.warmup && model.predict) {
+                    const shape = parseShape(node.inputShape) || [1, 1];
+                    const tensorflow = loadTensorFlowJS();
+                    const dummyInput = tensorflow.zeros(shape);
+                    try {
+                        const result = model.predict(dummyInput);
+                        // Multi-output models return an array of tensors
+                        if (Array.isArray(result)) {
+                            result.forEach((t) => t && t.dispose && t.dispose());
+                        } else if (result && result.dispose) {
+                            result.dispose();
+                        }
+                    } catch (e) {
+                        // Ignore warmup errors
+                    }
+                    dummyInput.dispose();
+                }
+                return { model: model, inputNames: [], outputNames: [] };
+            }
+            if (modelType === "onnx") {
+                const session = await loadONNXModel(actualModelPath, authType, authToken, node.modelSha256);
+                return {
+                    model: session,
+                    inputNames: session.inputNames || [],
+                    outputNames: session.outputNames || []
+                };
+            }
+            if (modelType === "coral" || modelType === "tflite") {
+                // TFLite models use Coral/Python bridge for inference
+                return { model: await loadBridgeModel("tflite", "TFLite", actualModelPath) };
+            }
+            if (modelType === "keras") {
+                // Keras models (.keras, .h5) use Python bridge
+                return { model: await loadBridgeModel("keras", "Keras", actualModelPath) };
+            }
+            if (modelType === "sklearn") {
+                // scikit-learn models (.pkl, .joblib) use Python bridge
+                return { model: await loadBridgeModel("sklearn", "scikit-learn", actualModelPath) };
+            }
+            if (modelType === "max") {
+                // ONNX models via MAX Engine (high-performance)
+                return { model: await loadMaxModel(actualModelPath) };
+            }
+            throw new Error("Unknown model type: " + modelType);
+        }
+
+        /** Characters that are safe in a cache file name. */
+        function cacheSafe(value) {
+            return String(value).replace(/[^a-zA-Z0-9._-]/g, "_");
+        }
+
+        /**
+         * (Re)load the configured model.
+         *
+         * Loads are serialised per node, and the new model is loaded BEFORE the
+         * current one is released, then swapped in atomically — inference keeps
+         * running on the old model in the meantime.
+         *
+         * @param {Object}  [options]
+         * @param {boolean} [options.keepOnFailure=false]  When the load fails, keep
+         *        serving the model that is loaded now (auto-update). Otherwise a
+         *        failed load leaves the node without a model and in error state
+         *        (startup, explicit msg.loadModel).
+         * @returns {Promise<void>} never rejects
+         */
+        function initializeModel(options) {
+            loadsPending++;
+            const run = function () {
+                return doInitializeModel(options || {})
+                    .catch(function (err) {
+                        // doInitializeModel reports its own failures; this is a last resort.
+                        node.error("Failed to load model: " + (err && err.message));
+                    })
+                    .then(function () {
+                        loadsPending--;
+                    });
+            };
+            loadChain = loadChain.then(run, run);
+            return loadChain;
+        }
+
+        async function doInitializeModel(options) {
+            if (closed) return;
 
             // Check if model source is configured
+            let notConfigured = null;
             if (node.modelSource === "huggingface" && !node.hfModelId) {
-                node.status({ fill: "grey", shape: "ring", text: "no Hugging Face model ID" });
-                return;
+                notConfigured = "no Hugging Face model ID";
+            } else if (node.modelSource === "mlflow" && !node.mlflowModelName) {
+                notConfigured = "no MLflow model name";
+            } else if (node.modelSource === "custom" && !node.customModelId) {
+                notConfigured = "no custom model ID";
+            } else if ((node.modelSource === "local" || node.modelSource === "url") && !node.modelPath) {
+                notConfigured = "no model configured";
             }
-            if (node.modelSource === "mlflow" && !node.mlflowModelName) {
-                node.status({ fill: "grey", shape: "ring", text: "no MLflow model name" });
-                return;
-            }
-            if (node.modelSource === "custom" && !node.customModelId) {
-                node.status({ fill: "grey", shape: "ring", text: "no custom model ID" });
-                return;
-            }
-            if ((node.modelSource === "local" || node.modelSource === "url") && !node.modelPath) {
-                node.status({ fill: "grey", shape: "ring", text: "no model configured" });
+            if (notConfigured) {
+                await disposeCurrentModel();
+                node.status({ fill: "grey", shape: "ring", text: notConfigured });
                 return;
             }
 
+            const keepOnFailure = options.keepOnFailure === true && node.modelLoaded && !!node.model;
+            let loaded = null;
+            let loadedType = null;
+            let installed = false;
+
             try {
-                node.status({ fill: "yellow", shape: "dot", text: "loading model..." });
+                if (!keepOnFailure) {
+                    node.status({ fill: "yellow", shape: "dot", text: "loading model..." });
+                }
 
                 let actualModelPath = node.modelPath;
                 let authType = null;
@@ -1368,19 +975,15 @@ module.exports = function (RED) {
                     if (!fs.existsSync(cacheDir)) {
                         fs.mkdirSync(cacheDir, { recursive: true });
                     }
-                    const safeModelId = node.hfModelId.replace(/[^a-zA-Z0-9._-]/g, "_");
-                    const cachePath = path.join(cacheDir, safeModelId + "_" + node.hfRevision + ".model");
+                    const cacheBase = path.join(cacheDir, cacheSafe(node.hfModelId) + "_" + cacheSafe(node.hfRevision));
 
-                    await downloadFromHuggingFace(
+                    actualModelPath = await downloadFromHuggingFace(
                         node.hfModelId,
                         node.hfRevision,
                         node.hfToken,
-                        cachePath,
+                        cacheBase,
                         node.modelSha256
                     );
-                    actualModelPath = cachePath;
-                    authType = node.hfToken ? "bearer" : null;
-                    authToken = node.hfToken || null;
 
                     // Create metadata from HF model
                     metadata = {
@@ -1396,9 +999,10 @@ module.exports = function (RED) {
                     if (!fs.existsSync(cacheDir)) {
                         fs.mkdirSync(cacheDir, { recursive: true });
                     }
-                    const safeModelName = node.mlflowModelName.replace(/[^a-zA-Z0-9._-]/g, "_");
-                    const versionStr = node.mlflowVersion === "latest" ? "latest" : node.mlflowVersion;
-                    const cachePath = path.join(cacheDir, safeModelName + "_" + versionStr + ".model");
+                    const cachePath = path.join(
+                        cacheDir,
+                        cacheSafe(node.mlflowModelName) + "_" + cacheSafe(node.mlflowVersion) + ".model"
+                    );
 
                     await downloadFromMLflow(
                         node.mlflowRegistryUri,
@@ -1409,9 +1013,7 @@ module.exports = function (RED) {
                         cachePath,
                         node.modelSha256
                     );
-                    actualModelPath = cachePath;
-                    authType = node.mlflowAuthToken ? "bearer" : null;
-                    authToken = node.mlflowAuthToken || null;
+                    actualModelPath = finalizeDownloadedModel(cachePath, node.modelType);
 
                     // Create metadata from MLflow
                     metadata = {
@@ -1428,8 +1030,7 @@ module.exports = function (RED) {
                     if (!fs.existsSync(cacheDir)) {
                         fs.mkdirSync(cacheDir, { recursive: true });
                     }
-                    const safeModelId = node.customModelId.replace(/[^a-zA-Z0-9._-]/g, "_");
-                    const cachePath = path.join(cacheDir, safeModelId + ".model");
+                    const cachePath = path.join(cacheDir, cacheSafe(node.customModelId) + ".model");
 
                     await downloadFromCustomRegistry(
                         node.customRegistryUrl,
@@ -1438,9 +1039,7 @@ module.exports = function (RED) {
                         cachePath,
                         node.modelSha256
                     );
-                    actualModelPath = cachePath;
-                    authType = node.customApiKey ? "bearer" : null;
-                    authToken = node.customApiKey || null;
+                    actualModelPath = finalizeDownloadedModel(cachePath, node.modelType);
 
                     // Create metadata from custom registry
                     metadata = {
@@ -1470,72 +1069,31 @@ module.exports = function (RED) {
                     }
                 }
 
+                // Registry artifacts were fetched (and verified) above; from here
+                // on they are local files and are loaded from the cache path.
+                loadedType = modelType;
+                loaded = await loadByType(modelType, actualModelPath, authType, authToken);
+
+                if (closed) {
+                    // The node was closed (redeploy) while the model was loading.
+                    await releaseModel(loaded.model, modelType);
+                    return;
+                }
+
+                // Swap: from this statement on, new messages use the new model.
+                const previous = node.model;
+                const previousFormat = node.modelFormat;
+                node.model = loaded.model;
                 node.modelFormat = modelType;
+                node.inputNames = loaded.inputNames || [];
+                node.outputNames = loaded.outputNames || [];
+                node.modelLoaded = true;
+                node.loadError = null;
+                installed = true;
+                node.status({ fill: "green", shape: "dot", text: modelType + " ready" });
 
-                if (modelType === "tfjs") {
-                    node.model = await loadTFJSModel(node.modelPath, authType, authToken, node.modelSha256);
-                    node.modelLoaded = true;
-
-                    // Warmup run
-                    if (node.warmup && node.model.predict) {
-                        const shape = parseShape(node.inputShape) || [1, 1];
-                        const tensorflow = loadTensorFlowJS();
-                        const dummyInput = tensorflow.zeros(shape);
-                        try {
-                            const result = node.model.predict(dummyInput);
-                            // Multi-output models return an array of tensors
-                            if (Array.isArray(result)) {
-                                result.forEach((t) => t && t.dispose && t.dispose());
-                            } else if (result && result.dispose) {
-                                result.dispose();
-                            }
-                        } catch (e) {
-                            // Ignore warmup errors
-                        }
-                        dummyInput.dispose();
-                    }
-
-                    node.status({ fill: "green", shape: "dot", text: "tfjs ready" });
-                } else if (modelType === "onnx") {
-                    node.model = await loadONNXModel(actualModelPath, authType, authToken, node.modelSha256);
-                    node.modelLoaded = true;
-
-                    // Get input/output names
-                    node.inputNames = node.model.inputNames || [];
-                    node.outputNames = node.model.outputNames || [];
-
-                    node.status({ fill: "green", shape: "dot", text: "onnx ready" });
-                } else if (modelType === "coral") {
-                    node.model = await loadCoralModel(actualModelPath);
-                    node.modelLoaded = true;
-                    node.status({ fill: "green", shape: "dot", text: "coral ready" });
-                } else if (modelType === "tflite") {
-                    // TFLite models use Coral/Python bridge for inference
-                    node.model = await loadCoralModel(actualModelPath);
-                    node.modelLoaded = true;
-                    node.status({ fill: "green", shape: "dot", text: "tflite ready" });
-                } else if (modelType === "savedmodel") {
-                    // TensorFlow SavedModel uses TF.js loader
-                    node.model = await loadTFJSModel(node.modelPath, authType, authToken, node.modelSha256);
-                    node.modelLoaded = true;
-                    node.status({ fill: "green", shape: "dot", text: "savedmodel ready" });
-                } else if (modelType === "keras") {
-                    // Keras models (.keras, .h5) use Python bridge
-                    node.model = await loadKerasModel(actualModelPath);
-                    node.modelLoaded = true;
-                    node.status({ fill: "green", shape: "dot", text: "keras ready" });
-                } else if (modelType === "sklearn") {
-                    // scikit-learn models (.pkl, .joblib) use Python bridge
-                    node.model = await loadSklearnModel(actualModelPath);
-                    node.modelLoaded = true;
-                    node.status({ fill: "green", shape: "dot", text: "sklearn ready" });
-                } else if (modelType === "max") {
-                    // ONNX models via MAX Engine (high-performance)
-                    node.model = await loadMaxModel(actualModelPath);
-                    node.modelLoaded = true;
-                    node.status({ fill: "green", shape: "dot", text: "max ready" });
-                } else {
-                    throw new Error("Unknown model type: " + modelType);
+                if (previous && previous !== loaded.model) {
+                    await releaseModel(previous, previousFormat, loaded.model);
                 }
 
                 // Save or update metadata
@@ -1578,7 +1136,7 @@ module.exports = function (RED) {
                 // ========================================
                 // Initialize MLflow Tracking if enabled
                 // ========================================
-                if (node.mlflowTrackingEnabled && node.mlflowTrackingUri) {
+                if (node.mlflowTrackingEnabled && node.mlflowTrackingUri && !closed) {
                     try {
                         // Clean up existing tracker if any
                         if (node.mlflowTracker) {
@@ -1586,12 +1144,13 @@ module.exports = function (RED) {
                         }
 
                         // Create new tracker
-                        node.mlflowTracker = new MLflowTracker(
+                        const tracker = new MLflowTracker(
                             node.mlflowTrackingUri,
                             node.mlflowExperimentName,
                             node.mlflowAuthToken
                         );
-                        node.mlflowTracker.bufferSize = node.mlflowBatchSize;
+                        tracker.bufferSize = node.mlflowBatchSize;
+                        node.mlflowTracker = tracker;
 
                         // Start a new run
                         const runTags = {
@@ -1604,27 +1163,49 @@ module.exports = function (RED) {
                             node_name: node.name || "ml-inference"
                         };
 
-                        await node.mlflowTracker.startRun(node.mlflowRunName || node.name || node.id, runTags);
+                        await tracker.startRun(node.mlflowRunName || node.name || node.id, runTags);
 
                         // Log initial parameters
-                        await node.mlflowTracker.logParams({
+                        await tracker.logParams({
                             model_path: actualModelPath,
                             model_type: modelType,
                             input_shape: node.inputShape || "auto",
-                            preprocess_mode: node.preprocessMode,
-                            batch_size: String(node.batchSize)
+                            preprocess_mode: node.preprocessMode
                         });
 
-                        node.log("[MLflowTracker] Started tracking run: " + node.mlflowTracker.runId);
-
-                        // Store tracker reference
-                        activeTrackers.set(node.id, node.mlflowTracker);
+                        if (closed) {
+                            // Closed while the run was being created: the close
+                            // handler has already run, so end it here.
+                            await tracker.endRun("FINISHED");
+                            if (node.mlflowTracker === tracker) node.mlflowTracker = null;
+                        } else {
+                            node.log("[MLflowTracker] Started tracking run: " + tracker.runId);
+                        }
                     } catch (trackingErr) {
                         node.warn("[MLflowTracker] Failed to initialize tracking: " + trackingErr.message);
                         node.mlflowTracker = null;
                     }
                 }
             } catch (err) {
+                if (installed) {
+                    // The model itself is in place; only bookkeeping failed.
+                    node.warn("Model loaded, but post-load bookkeeping failed: " + err.message);
+                    return;
+                }
+                if (loaded && loaded.model) {
+                    await releaseModel(loaded.model, loadedType);
+                }
+                if (closed) return;
+
+                if (keepOnFailure && node.model) {
+                    // Auto-update: the registry is unreachable or served a bad
+                    // artifact. The current model keeps serving.
+                    node.warn("Model update failed, keeping the loaded model: " + err.message);
+                    node.status({ fill: "green", shape: "dot", text: node.modelFormat + " ready" });
+                    return;
+                }
+
+                await disposeCurrentModel();
                 node.loadError = err;
                 node.modelLoaded = false;
                 node.status({ fill: "red", shape: "ring", text: err.message.substring(0, 30) });
@@ -1632,23 +1213,36 @@ module.exports = function (RED) {
             }
         }
 
-        // Prepare input data
-        function prepareInput(data, preprocessMode) {
+        // Prepare input data.
+        //
+        // Values that are not numbers (null, NaN, "n/a" — a sensor dropout) are
+        // still fed to the model as 0, as they always were, but they are counted
+        // in `stats.invalid` so the caller can flag the prediction instead of
+        // presenting fabricated zeros as a clean measurement.
+        function prepareInput(data, preprocessMode, stats) {
+            const toNumber = function (v) {
+                const n = typeof v === "number" ? v : parseFloat(v);
+                if (Number.isNaN(n)) {
+                    if (stats) stats.invalid++;
+                    return 0;
+                }
+                return n;
+            };
             let inputArray;
 
             if (Array.isArray(data)) {
-                inputArray = data.flat(Infinity).map((v) => parseFloat(v) || 0);
+                inputArray = data.flat(Infinity).map(toNumber);
             } else if (typeof data === "object" && data !== null) {
                 if (preprocessMode === "object") {
                     // Extract values from object
-                    inputArray = Object.values(data).map((v) => parseFloat(v) || 0);
+                    inputArray = Object.values(data).map(toNumber);
                 } else {
                     // Try to get array from common properties
                     inputArray = data.features || data.values || data.input || Object.values(data);
-                    inputArray = inputArray.flat(Infinity).map((v) => parseFloat(v) || 0);
+                    inputArray = inputArray.flat(Infinity).map(toNumber);
                 }
             } else if (typeof data === "number") {
-                inputArray = [data];
+                inputArray = [toNumber(data)];
             } else {
                 throw new Error("Input data must be a number, array, or object");
             }
@@ -1657,7 +1251,7 @@ module.exports = function (RED) {
         }
 
         // Run TFJS inference
-        async function runTFJSInference(inputData) {
+        async function runTFJSInference(inputData, model) {
             const tensorflow = loadTensorFlowJS();
             const shape = parseShape(node.inputShape);
 
@@ -1669,7 +1263,7 @@ module.exports = function (RED) {
             }
 
             try {
-                const result = node.model.predict(inputTensor);
+                const result = model.predict(inputTensor);
                 let output;
 
                 if (Array.isArray(result)) {
@@ -1689,7 +1283,7 @@ module.exports = function (RED) {
         }
 
         // Run ONNX inference
-        async function runONNXInference(inputData) {
+        async function runONNXInference(inputData, model, inputNames, outputNames) {
             const onnxruntime = loadONNXRuntime();
 
             // Ensure inputData is an array
@@ -1727,16 +1321,16 @@ module.exports = function (RED) {
             }
 
             // Create input tensor
-            const inputName = node.inputNames[0] || "input";
+            const inputName = inputNames[0] || "input";
             const inputTensor = new onnxruntime.Tensor("float32", flatData, shape);
 
             const feeds = {};
             feeds[inputName] = inputTensor;
 
-            const results = await node.model.run(feeds);
+            const results = await model.run(feeds);
 
             // Extract output
-            const outputName = node.outputNames[0] || Object.keys(results)[0];
+            const outputName = outputNames[0] || Object.keys(results)[0];
             const outputTensor = results[outputName];
 
             // Remember the tensor shape so downstream nodes (e.g. vision-annotator)
@@ -1760,11 +1354,16 @@ module.exports = function (RED) {
                     if (err) node.error(err, msg);
                 };
 
+            let counted = false;
             try {
                 // Check if this is a model load/reload command
                 if (msg.loadModel) {
+                    if (typeof msg.loadModel !== "string") {
+                        throw new Error("msg.loadModel must be a model path (string)");
+                    }
                     node.modelPath = msg.loadModel;
-                    // initializeModel() disposes the previous model before loading
+                    // Loads are serialised; the previous model is released once
+                    // the new one is in place (or the load has failed).
                     await initializeModel();
                     done();
                     return;
@@ -1790,47 +1389,65 @@ module.exports = function (RED) {
                 }
 
                 // Prepare input
-                const preparedInput = prepareInput(inputData, node.preprocessMode);
+                const inputStats = { invalid: 0 };
+                const preparedInput = prepareInput(inputData, node.preprocessMode, inputStats);
+                if (inputStats.invalid > 0 && Date.now() - lastInvalidInputWarning > 60000) {
+                    // Throttled: a dead sensor would otherwise warn on every sample.
+                    lastInvalidInputWarning = Date.now();
+                    node.warn(
+                        inputStats.invalid +
+                            " non-numeric input value(s) were replaced by 0 — see msg.mlInference.invalidInputs"
+                    );
+                }
+
+                // Pin the model for this inference: a reload may swap node.model
+                // while we await, and format, model and tensor names must match.
+                const model = node.model;
+                const modelFormat = node.modelFormat;
+                const inputNames = node.inputNames;
+                const outputNames = node.outputNames;
+                inflight++;
+                counted = true;
 
                 // Run inference
                 node.status({ fill: "blue", shape: "dot", text: "inferencing..." });
                 let prediction;
                 const startTime = Date.now();
 
-                if (node.modelFormat === "tfjs" || node.modelFormat === "savedmodel") {
-                    prediction = await runTFJSInference(preparedInput);
-                } else if (node.modelFormat === "onnx") {
-                    prediction = await runONNXInference(preparedInput);
-                } else if (node.modelFormat === "tflite" || node.modelFormat === "coral") {
+                if (modelFormat === "tfjs" || modelFormat === "savedmodel") {
+                    prediction = await runTFJSInference(preparedInput, model);
+                } else if (modelFormat === "onnx") {
+                    prediction = await runONNXInference(preparedInput, model, inputNames, outputNames);
+                } else if (modelFormat === "tflite" || modelFormat === "coral") {
                     // TFLite/Coral uses Python bridge
-                    if (node.model && node.model.predict) {
-                        prediction = await node.model.predict(preparedInput);
+                    if (model && model.predict) {
+                        prediction = await model.predict(preparedInput);
                     } else {
                         throw new Error("TFLite model not properly loaded");
                     }
-                } else if (node.modelFormat === "keras") {
+                } else if (modelFormat === "keras") {
                     // Keras uses Python bridge
-                    if (node.model && node.model.predict) {
-                        prediction = await node.model.predict(preparedInput);
+                    if (model && model.predict) {
+                        prediction = await model.predict(preparedInput);
                     } else {
                         throw new Error("Keras model not properly loaded");
                     }
-                } else if (node.modelFormat === "sklearn") {
+                } else if (modelFormat === "sklearn") {
                     // scikit-learn uses Python bridge
-                    if (node.model && node.model.predict) {
-                        prediction = await node.model.predict(preparedInput);
+                    if (model && model.predict) {
+                        prediction = await model.predict(preparedInput);
                     } else {
                         throw new Error("scikit-learn model not properly loaded");
                     }
-                } else if (node.modelFormat === "max") {
+                } else if (modelFormat === "max") {
                     // MAX Engine for high-performance ONNX inference
-                    if (node.model && node.model.predict) {
-                        prediction = await node.model.predict(preparedInput);
+                    if (model && model.predict) {
+                        prediction = await model.predict(preparedInput);
                     } else {
                         throw new Error("MAX model not properly loaded");
                     }
                 } else {
-                    throw new Error("Unknown model format: " + node.modelFormat);
+                    throw new Error("Unknown model format: " + modelFormat);
                 }
 
                 const inferenceTime = Date.now() - startTime;
@@ -1923,8 +1540,10 @@ module.exports = function (RED) {
                 // Add metadata
                 outputMsg.mlInference = {
                     modelPath: node.modelPath,
-                    modelFormat: node.modelFormat,
+                    modelFormat: modelFormat,
                     inferenceTime: inferenceTime,
+                    // Input values that were not numbers and went in as 0.
+                    invalidInputs: inputStats.invalid,
                     inputShape: node.inputShape,
                     outputShape: node._lastOutputShape || null,
                     timestamp: Date.now(),
@@ -1944,57 +1563,82 @@ module.exports = function (RED) {
                 node.inferenceCount = (node.inferenceCount || 0) + 1;
                 node.status({ fill: "green", shape: "dot", text: inferenceTime + "ms | #" + node.inferenceCount });
             } catch (err) {
-                node.status({ fill: "red", shape: "dot", text: err.message.substring(0, 30) });
+                node.status({ fill: "red", shape: "dot", text: String(err.message).substring(0, 30) });
                 done(err);
 
-                // Reset status after delay
-                setTimeout(function () {
-                    if (node.modelLoaded) {
+                // Reset status after delay (one pending reset at a time, and
+                // none that outlives the node)
+                if (statusResetTimer) clearTimeout(statusResetTimer);
+                statusResetTimer = setTimeout(function () {
+                    statusResetTimer = null;
+                    if (!closed && node.modelLoaded) {
                         node.status({ fill: "green", shape: "dot", text: node.modelFormat + " ready" });
                     }
                 }, 3000);
+            } finally {
+                if (counted) {
+                    inflight--;
+                    if (inflight === 0 && idleWaiters.length > 0) {
+                        idleWaiters.slice().forEach((wake) => wake());
+                    }
+                }
             }
         });
 
         // Cleanup
         node.on("close", async function (done) {
-            // Clear auto-update timer
+            // From here on a load that is still in flight releases whatever
+            // it loaded instead of installing it on a closed node.
+            closed = true;
+
+            // Clear timers
             if (updateTimer) {
                 clearInterval(updateTimer);
                 updateTimer = null;
+            }
+            if (statusResetTimer) {
+                clearTimeout(statusResetTimer);
+                statusResetTimer = null;
             }
 
             // ========================================
             // Cleanup MLflow Tracker
             // ========================================
             if (node.mlflowTracker) {
+                const tracker = node.mlflowTracker;
+                node.mlflowTracker = null;
                 try {
-                    await node.mlflowTracker.endRun("FINISHED");
-                    activeTrackers.delete(node.id);
-                    node.log("[MLflowTracker] Run ended successfully");
+                    // Best effort and bounded: an unreachable tracking server
+                    // must not run every deploy into Node-RED's close timeout.
+                    let giveUp = null;
+                    const ended = await Promise.race([
+                        tracker.endRun("FINISHED").then(() => true),
+                        new Promise((resolve) => {
+                            giveUp = setTimeout(() => resolve(false), 5000);
+                        })
+                    ]);
+                    clearTimeout(giveUp);
+                    if (ended) {
+                        node.log("[MLflowTracker] Run ended successfully");
+                    } else {
+                        node.warn("[MLflowTracker] Tracking server did not answer in time; run left open");
+                    }
                 } catch (trackingErr) {
                     node.warn("[MLflowTracker] Error ending run: " + trackingErr.message);
                 }
-                node.mlflowTracker = null;
             }
 
-            if (node.model) {
-                // Unload from persistent Python bridge if applicable
-                if (node.model.usePersistentBridge && node.model.unload) {
-                    try {
-                        await node.model.unload();
-                    } catch (err) {
-                        // Ignore unload errors during shutdown
-                    }
-                }
-
-                if (node.modelFormat === "tfjs" && node.model.dispose) {
-                    node.model.dispose();
-                }
-                // ONNX sessions don't need explicit disposal
-                node.model = null;
-            }
+            // Release the model: bridge handles (Python and MAX) are unloaded,
+            // TF.js models/SavedModels disposed, ONNX sessions released.
+            const model = node.model;
+            const modelFormat = node.modelFormat;
+            node.model = null;
             node.modelLoaded = false;
+            try {
+                await releaseModel(model, modelFormat);
+            } catch (err) {
+                // Ignore release errors during shutdown
+            }
             done();
         });
 

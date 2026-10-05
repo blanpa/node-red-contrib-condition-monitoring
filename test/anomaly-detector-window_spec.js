@@ -115,14 +115,14 @@ describe("anomaly-detector sliding window", () => {
         const expected = [];
         for (let i = 0; i < WINDOW * 6; i++) {
             const value = sample(i);
-            // The window the detector will see once this sample is appended.
-            const windowAfter = n1.dataBuffer
-                .map((d) => d.value)
-                .concat([value])
-                .slice(-WINDOW);
+            // The window the detector scores against: the samples before this
+            // one, or — while that baseline is shorter than 10 — the window
+            // including it.
+            const before = n1.dataBuffer.map((d) => d.value);
+            const reference = before.length >= Math.min(WINDOW, 10) ? before : before.concat([value]).slice(-WINDOW);
 
-            if (windowAfter.length >= 2) {
-                const abs = Math.abs(stats.calculateZScore(value, windowAfter).zScore);
+            if (reference.length >= 2) {
+                const abs = Math.abs(stats.calculateZScore(value, reference).zScore);
                 expected.push({
                     value,
                     isAnomaly: abs > 2, // zscoreWarning; anything above it is flagged

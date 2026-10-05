@@ -46,7 +46,7 @@ describe("WebSocketManager", () => {
             let msg;
             try {
                 msg = JSON.parse(data.toString());
-            } catch (_) {
+            } catch {
                 msg = { type: "_unparseable", raw: data.toString() };
             }
             const waiter = waiters.shift();
@@ -100,7 +100,7 @@ describe("WebSocketManager", () => {
         for (const client of clients.splice(0)) {
             try {
                 client.ws.terminate();
-            } catch (_) {
+            } catch {
                 /* already closed */
             }
         }
@@ -158,6 +158,59 @@ describe("WebSocketManager", () => {
             });
             await expect(second.start()).rejects.toThrow(/EADDRINUSE|address/i);
         });
+
+        it("rejects (instead of throwing an unhandled 'error') when the port is busy and nobody listens", async () => {
+            await startManager();
+            // No 'error' listener on purpose: this is how anomaly-detector uses the manager.
+            const second = new WebSocketManager({ port: manager.port });
+            await expect(second.start()).rejects.toThrow(/EADDRINUSE|address/i);
+            expect(second.isRunning).toBe(false);
+            expect(second.server).toBeNull();
+        });
+
+        it("shares one server between concurrent start() calls", async () => {
+            manager = new WebSocketManager({ port: nextPort() });
+            // Two nodes sharing the singleton both call start() in the same tick.
+            const first = manager.start();
+            const second = manager.start();
+            await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+            expect(manager.isRunning).toBe(true);
+            const { welcome } = await connect(manager);
+            expect(welcome.type).toBe("welcome");
+        });
+
+        it("can start again after a failed start", async () => {
+            await startManager();
+            const second = new WebSocketManager({ port: manager.port });
+            await expect(second.start()).rejects.toThrow(/EADDRINUSE|address/i);
+            second.port = nextPort();
+            await expect(second.start()).resolves.toBeUndefined();
+            await second.stop();
+        });
+    });
+
+    describe("token auth", () => {
+        it("accepts the token from the query even when a subprotocol header is present", async () => {
+            await startManager({ authToken: "s3cret" });
+            const ws = new WebSocket(`ws://127.0.0.1:${manager.port}${WS_PATH}?token=s3cret`, "json");
+            const first = await new Promise((resolve, reject) => {
+                ws.once("message", (data) => resolve(JSON.parse(data.toString())));
+                ws.once("close", (code) => reject(new Error("closed with " + code)));
+                ws.once("error", reject);
+            });
+            ws.terminate();
+            expect(first.type).toBe("welcome");
+        });
+
+        it("still refuses a wrong token", async () => {
+            await startManager({ authToken: "s3cret" });
+            const ws = new WebSocket(`ws://127.0.0.1:${manager.port}${WS_PATH}?token=nope`);
+            const code = await new Promise((resolve, reject) => {
+                ws.once("close", resolve);
+                ws.once("error", reject);
+            });
+            expect(code).toBe(4401);
+        });
     });
 
     describe("connections", () => {
@@ -169,10 +222,15 @@ describe("WebSocketManager", () => {
             expect(welcome.clientId).toBe("client_1");
             expect(typeof welcome.serverTime).toBe("number");
 
-            let stats = manager.getStats();
+            let stats = manager.getStats({ includeClients: true });
             expect(stats.clientsTotal).toBe(1);
             expect(stats.clientsCurrent).toBe(1);
+            expect(stats.clients).toHaveLength(1);
+            expect(stats.clients[0].id).toBe("client_1");
             expect(stats.clients[0].subscriptions).toEqual(["*"]);
+            expect(stats.clients[0].ip).toMatch(/127\.0\.0\.1$/);
+            // Without the opt-in the client list (and with it every peer's IP) stays private.
+            expect(manager.getStats()).not.toHaveProperty("clients");
 
             const disconnected = once(manager, "clientDisconnected");
             client.ws.close();
@@ -210,6 +268,10 @@ describe("WebSocketManager", () => {
             expect(reply.type).toBe("stats");
             expect(reply.stats.isRunning).toBe(true);
             expect(reply.stats.clientsCurrent).toBe(1);
+            expect(reply.stats.clientsTotal).toBe(1);
+            // A connected peer must not be handed the other clients' addresses.
+            expect(reply.stats).not.toHaveProperty("clients");
+            expect(JSON.stringify(reply)).not.toMatch(/127\.0\.0\.1/);
         });
 
         it("replies with an error message on invalid JSON", async () => {

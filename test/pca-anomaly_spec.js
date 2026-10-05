@@ -1,10 +1,74 @@
 const helper = require("node-red-node-test-helper");
 const pcaAnomalyNode = require("../nodes/pca-anomaly.js");
+const stats = require("../nodes/utils/statistics");
+const { seededRandom } = require("./stub-runtime");
+
+// Seeded per test: training data must not differ from run to run.
+let rng;
+
+function expectRelativelyClose(actual, expected) {
+    expect(Math.abs(actual - expected)).toBeLessThanOrEqual(1e-8 * Math.max(1, Math.abs(expected)));
+}
+
+/**
+ * Whatever the training data, a scored message has to be internally
+ * consistent: T² follows from the scores and eigenvalues it reports, the limit
+ * follows from the configuration, and the flags follow from both.
+ *
+ * @param {object} msg
+ * @param {{method: string, threshold: number, trainedOn: number}} expected
+ */
+function expectConsistentPca(msg, expected) {
+    const pca = msg.pca;
+
+    expect(pca.scores.length).toBe(pca.nComponents);
+    expect(pca.eigenvalues.length).toBe(pca.nComponents);
+    let t2 = 0;
+    pca.scores.forEach(function (score, i) {
+        expect(Number.isFinite(score)).toBe(true);
+        if (pca.eigenvalues[i] > 1e-10) t2 += (score * score) / pca.eigenvalues[i];
+        if (i > 0) expect(pca.eigenvalues[i]).toBeLessThanOrEqual(pca.eigenvalues[i - 1] + 1e-12);
+    });
+    expectRelativelyClose(pca.t2, t2);
+    expect(pca.spe).toBeGreaterThanOrEqual(0);
+
+    expectRelativelyClose(
+        pca.t2Threshold,
+        stats.hotellingLimitFromZ(pca.nComponents, expected.trainedOn, expected.threshold)
+    );
+    expect(pca.speThreshold).toBeGreaterThan(0);
+    expect(pca.t2Anomaly).toBe(pca.t2 > pca.t2Threshold);
+    expect(pca.speAnomaly).toBe(pca.spe > pca.speThreshold);
+
+    expect(msg.method).toBe("pca-" + expected.method);
+    expect(msg.isAnomaly).toBe(
+        { t2: pca.t2Anomaly, spe: pca.speAnomaly, combined: pca.t2Anomaly || pca.speAnomaly }[expected.method]
+    );
+
+    expect(pca.explainedVariance).toBeGreaterThan(0);
+    expect(pca.explainedVariance).toBeLessThanOrEqual(1 + 1e-12);
+}
+
+/** Contributions are sorted, capped and expressed as shares of the residual. */
+function expectConsistentContributions(msg, maxShown) {
+    expect(msg.sensorNames).toContain(msg.topContributor);
+    if (!msg.contributions) return;
+    expect(msg.contributions.length).toBeLessThanOrEqual(maxShown);
+    expect(msg.contributions[0].sensor).toBe(msg.topContributor);
+    msg.contributions.forEach(function (c, i) {
+        expect(msg.sensorNames).toContain(c.sensor);
+        expect(c.normalizedContribution).toBeGreaterThanOrEqual(0);
+        expect(c.normalizedContribution).toBeLessThanOrEqual(1 + 1e-12);
+        expect(c.percentContribution).toBe((c.normalizedContribution * 100).toFixed(1) + "%");
+        if (i > 0) expect(c.contribution).toBeLessThanOrEqual(msg.contributions[i - 1].contribution);
+    });
+}
 
 helper.init(require.resolve("node-red"));
 
 describe("pca-anomaly Node", function () {
     beforeEach(function (done) {
+        rng = seededRandom(20260101);
         helper.startServer(done);
     });
 
@@ -59,7 +123,7 @@ describe("pca-anomaly Node", function () {
             // Send training data (less than minimum required)
             for (let i = 0; i < 5; i++) {
                 n1.receive({
-                    payload: { sensor1: 10 + Math.random(), sensor2: 20 + Math.random(), sensor3: 30 + Math.random() }
+                    payload: { sensor1: 10 + rng.next(), sensor2: 20 + rng.next(), sensor3: 30 + rng.next() }
                 });
             }
 
@@ -84,11 +148,10 @@ describe("pca-anomaly Node", function () {
             const handler = function (msg) {
                 if (msg.pca) {
                     // Only check after training
-                    expect(msg).toHaveProperty("isAnomaly");
-                    expect(msg).toHaveProperty("pca");
-                    expect(msg.pca).toHaveProperty("t2");
-                    expect(msg.pca).toHaveProperty("spe");
-                    expect(msg.pca).toHaveProperty("nComponents");
+                    // windowSize 20: first fit, and first scored message, at sample 10
+                    expectConsistentPca(msg, { method: "t2", threshold: 3.0, trainedOn: 10 });
+                    expect(msg.bufferSize).toBe(10);
+                    expect(msg.sensorNames).toEqual(["sensor1", "sensor2", "sensor3"]);
                     done();
                 }
             };
@@ -99,9 +162,9 @@ describe("pca-anomaly Node", function () {
             for (let i = 0; i < 15; i++) {
                 n1.receive({
                     payload: {
-                        sensor1: 10 + Math.random() * 0.5,
-                        sensor2: 20 + Math.random() * 0.5,
-                        sensor3: 30 + Math.random() * 0.5
+                        sensor1: 10 + rng.next() * 0.5,
+                        sensor2: 20 + rng.next() * 0.5,
+                        sensor3: 30 + rng.next() * 0.5
                     }
                 });
             }
@@ -126,9 +189,9 @@ describe("pca-anomaly Node", function () {
             for (let i = 0; i < 15; i++) {
                 n1.receive({
                     payload: {
-                        sensor1: 10 + Math.random() * 0.1,
-                        sensor2: 20 + Math.random() * 0.1,
-                        sensor3: 30 + Math.random() * 0.1
+                        sensor1: 10 + rng.next() * 0.1,
+                        sensor2: 20 + rng.next() * 0.1,
+                        sensor3: 30 + rng.next() * 0.1
                     }
                 });
             }
@@ -137,7 +200,10 @@ describe("pca-anomaly Node", function () {
             const handler = function (msg) {
                 if (msg.pca && msg.isAnomaly) {
                     expect(msg.isAnomaly).toBe(true);
-                    expect(msg).toHaveProperty("topContributor");
+                    expect(msg.payload).toEqual({ sensor1: 100, sensor2: 20, sensor3: 30 });
+                    expect(msg.pca.t2Anomaly).toBe(true);
+                    expect(msg.pca.t2).toBeGreaterThan(msg.pca.t2Threshold * 100);
+                    expectConsistentContributions(msg, 3);
                     done();
                 }
             };
@@ -162,8 +228,9 @@ describe("pca-anomaly Node", function () {
 
             const handler = function (msg) {
                 if (msg.pca) {
-                    expect(msg).toHaveProperty("pca");
+                    expectConsistentPca(msg, { method: "t2", threshold: 3.0, trainedOn: 10 });
                     expect(msg.sensorNames).toEqual(["sensor0", "sensor1", "sensor2"]);
+                    expect(Array.isArray(msg.payload)).toBe(true);
                     done();
                 }
             };
@@ -173,7 +240,7 @@ describe("pca-anomaly Node", function () {
             // Send training data as arrays - need at least 10 samples
             for (let i = 0; i < 15; i++) {
                 n1.receive({
-                    payload: [10 + Math.random() * 0.5, 20 + Math.random() * 0.5, 30 + Math.random() * 0.5]
+                    payload: [10 + rng.next() * 0.5, 20 + rng.next() * 0.5, 30 + rng.next() * 0.5]
                 });
             }
 
@@ -238,13 +305,13 @@ describe("pca-anomaly Node", function () {
             const handler = function (msg) {
                 // Check for any message with contributions (anomaly or not - we'll validate contents)
                 if (msg.pca && msg.isAnomaly) {
-                    expect(msg).toHaveProperty("topContributor");
-                    if (msg.contributions && msg.contributions.length > 0) {
-                        expect(msg.contributions.length).toBeLessThanOrEqual(3);
-                        expect(msg.contributions[0]).toHaveProperty("sensor");
-                        expect(msg.contributions[0]).toHaveProperty("contribution");
-                        expect(msg.contributions[0]).toHaveProperty("percentContribution");
-                    }
+                    expectConsistentContributions(msg, 3);
+                    // Anomalies carry the full, unfiltered breakdown as well
+                    expect(msg.allContributions.length).toBe(4);
+                    const total = msg.allContributions.reduce(function (sum, c) {
+                        return sum + c.normalizedContribution;
+                    }, 0);
+                    expect(total).toBeCloseTo(1, 10);
                     done();
                 }
             };
@@ -281,9 +348,9 @@ describe("pca-anomaly Node", function () {
 
             const handler = function (msg) {
                 if (msg.pca) {
-                    expect(msg.method).toBe("pca-spe");
-                    expect(msg.pca).toHaveProperty("spe");
-                    expect(msg.pca).toHaveProperty("speThreshold");
+                    expectConsistentPca(msg, { method: "spe", threshold: 3.0, trainedOn: 10 });
+                    // In "spe" mode a T² excursion alone must not raise the alarm
+                    expect(msg.isAnomaly).toBe(msg.pca.speAnomaly);
                     done();
                 }
             };
@@ -294,9 +361,9 @@ describe("pca-anomaly Node", function () {
             for (let i = 0; i < 15; i++) {
                 n1.receive({
                     payload: {
-                        sensor1: 10 + Math.random() * 0.1,
-                        sensor2: 20 + Math.random() * 0.1,
-                        sensor3: 30 + Math.random() * 0.1
+                        sensor1: 10 + rng.next() * 0.1,
+                        sensor2: 20 + rng.next() * 0.1,
+                        sensor3: 30 + rng.next() * 0.1
                     }
                 });
             }
@@ -326,9 +393,11 @@ describe("pca-anomaly Node", function () {
 
             const handler = function (msg) {
                 if (msg.pca) {
-                    expect(msg.pca).toHaveProperty("nComponents");
-                    expect(msg.pca).toHaveProperty("explainedVariance");
-                    expect(msg.pca.explainedVariance).toBeGreaterThan(0.5);
+                    expectConsistentPca(msg, { method: "t2", threshold: 3.0, trainedOn: 10 });
+                    // Enough components to reach the 95% target, out of 4 sensors
+                    expect(msg.pca.explainedVariance).toBeGreaterThanOrEqual(0.95);
+                    expect(msg.pca.nComponents).toBeGreaterThanOrEqual(1);
+                    expect(msg.pca.nComponents).toBeLessThanOrEqual(4);
                     done();
                 }
             };
@@ -337,13 +406,13 @@ describe("pca-anomaly Node", function () {
 
             // Send training data with correlated sensors - need at least 10 samples
             for (let i = 0; i < 15; i++) {
-                const base = i + Math.random() * 2;
+                const base = i + rng.next() * 2;
                 n1.receive({
                     payload: {
                         sensor1: base,
-                        sensor2: base * 2 + Math.random() * 0.5, // Correlated with sensor1
-                        sensor3: Math.random() * 10, // Independent
-                        sensor4: base + Math.random() * 0.5 // Correlated with sensor1
+                        sensor2: base * 2 + rng.next() * 0.5, // Correlated with sensor1
+                        sensor3: rng.next() * 10, // Independent
+                        sensor4: base + rng.next() * 0.5 // Correlated with sensor1
                     }
                 });
             }
@@ -380,9 +449,9 @@ describe("pca-anomaly Node", function () {
             for (let i = 0; i < 15; i++) {
                 n1.receive({
                     payload: {
-                        sensor1: 10 + i * 0.5 + Math.random(),
-                        sensor2: 20 + i * 0.3 + Math.random(),
-                        sensor3: 30 + i * 0.2 + Math.random()
+                        sensor1: 10 + i * 0.5 + rng.next(),
+                        sensor2: 20 + i * 0.3 + rng.next(),
+                        sensor3: 30 + i * 0.2 + rng.next()
                     }
                 });
             }
@@ -412,10 +481,10 @@ describe("pca-anomaly Node", function () {
             const handler = function (msg) {
                 if (msg.pca && !pcaMessageReceived) {
                     pcaMessageReceived = true;
-                    expect(msg).toHaveProperty("timestamp");
-                    expect(msg).toHaveProperty("bufferSize");
                     expect(msg.timestamp).toBeGreaterThanOrEqual(beforeTime);
-                    expect(msg.bufferSize).toBeLessThanOrEqual(20);
+                    expect(msg.timestamp).toBeLessThanOrEqual(Date.now());
+                    // First scored message is the 10th sample
+                    expect(msg.bufferSize).toBe(10);
                     done();
                 }
             };
@@ -427,9 +496,9 @@ describe("pca-anomaly Node", function () {
             const samples = [];
             for (let i = 0; i < 15; i++) {
                 samples.push({
-                    sensor1: 10 + i * 0.5 + Math.random(),
-                    sensor2: 20 + i * 0.3 + Math.random(),
-                    sensor3: 30 + i * 0.2 + Math.random()
+                    sensor1: 10 + i * 0.5 + rng.next(),
+                    sensor2: 20 + i * 0.3 + rng.next(),
+                    sensor3: 30 + i * 0.2 + rng.next()
                 });
             }
             samples.push({ sensor1: 12, sensor2: 22, sensor3: 32 }); // Final sample
@@ -514,9 +583,9 @@ describe("pca-anomaly Node", function () {
 
             const handler = function (msg) {
                 if (msg.pca && msg.pca.eigenvalues) {
-                    expect(msg.pca).toHaveProperty("eigenvalues");
                     expect(Array.isArray(msg.pca.eigenvalues)).toBe(true);
                     expect(msg.pca.eigenvalues.length).toBeGreaterThan(0);
+                    expectConsistentPca(msg, { method: "t2", threshold: 3.0, trainedOn: 10 });
                     // Eigenvalues should be positive
                     msg.pca.eigenvalues.forEach((ev) => {
                         expect(ev).toBeGreaterThanOrEqual(0);
@@ -531,9 +600,9 @@ describe("pca-anomaly Node", function () {
             for (let i = 0; i < 15; i++) {
                 n1.receive({
                     payload: {
-                        sensor1: 10 + Math.random() * 2,
-                        sensor2: 20 + Math.random() * 2,
-                        sensor3: 30 + Math.random() * 2
+                        sensor1: 10 + rng.next() * 2,
+                        sensor2: 20 + rng.next() * 2,
+                        sensor3: 30 + rng.next() * 2
                     }
                 });
             }
@@ -563,10 +632,12 @@ describe("pca-anomaly Node", function () {
 
             const handler = function (msg) {
                 if (msg.pca) {
-                    expect(msg.pca).toHaveProperty("explainedVariance");
-                    // Explained variance should be between 0 and 1
-                    expect(msg.pca.explainedVariance).toBeGreaterThan(0);
-                    expect(msg.pca.explainedVariance).toBeLessThanOrEqual(1);
+                    // Three sensors driven by one factor: a single component
+                    // already clears the 90% target
+                    expect(msg.pca.nComponents).toBe(1);
+                    expect(msg.pca.explainedVariance).toBeGreaterThanOrEqual(0.9);
+                    expect(msg.pca.explainedVariance).toBeLessThanOrEqual(1 + 1e-12);
+                    expectConsistentPca(msg, { method: "t2", threshold: 3.0, trainedOn: 10 });
                     done();
                 }
             };
@@ -575,12 +646,12 @@ describe("pca-anomaly Node", function () {
 
             // Send correlated data (should result in fewer components needed)
             for (let i = 0; i < 15; i++) {
-                const base = i + Math.random();
+                const base = i + rng.next();
                 n1.receive({
                     payload: {
                         sensor1: base,
-                        sensor2: base * 2 + Math.random() * 0.1, // Highly correlated
-                        sensor3: base * 3 + Math.random() * 0.1 // Highly correlated
+                        sensor2: base * 2 + rng.next() * 0.1, // Highly correlated
+                        sensor3: base * 3 + rng.next() * 0.1 // Highly correlated
                     }
                 });
             }
@@ -604,9 +675,8 @@ describe("pca-anomaly Node", function () {
             const handler = function (msg) {
                 if (msg.pca && msg.topContributor && !hasDone) {
                     hasDone = true;
-                    expect(msg).toHaveProperty("topContributor");
-                    // Top contributor should be a string (sensor name)
-                    expect(typeof msg.topContributor).toBe("string");
+                    expect(msg.sensorNames).toEqual(["temp", "pressure", "humidity"]);
+                    expectConsistentContributions(msg, 3);
                     done();
                 }
             };
@@ -617,9 +687,9 @@ describe("pca-anomaly Node", function () {
             for (let i = 0; i < 15; i++) {
                 n1.receive({
                     payload: {
-                        temp: 25 + Math.random() * 0.1,
-                        pressure: 100 + Math.random() * 0.1,
-                        humidity: 50 + Math.random() * 0.1
+                        temp: 25 + rng.next() * 0.1,
+                        pressure: 100 + rng.next() * 0.1,
+                        humidity: 50 + rng.next() * 0.1
                     }
                 });
             }
@@ -651,8 +721,10 @@ describe("pca-anomaly Node", function () {
             const handler = function (msg) {
                 if (msg.pca) {
                     // With perfectly correlated data, PCA should need fewer components
-                    expect(msg.pca.nComponents).toBeLessThanOrEqual(3);
-                    expect(msg.pca.explainedVariance).toBeGreaterThan(0.9);
+                    expect(msg.pca.nComponents).toBe(1);
+                    expect(msg.pca.explainedVariance).toBeGreaterThan(0.99);
+                    // windowSize 30: first fit at sample 15
+                    expectConsistentPca(msg, { method: "t2", threshold: 3.0, trainedOn: 15 });
                     done();
                 }
             };
@@ -661,7 +733,7 @@ describe("pca-anomaly Node", function () {
 
             // Send perfectly correlated data (all sensors move together)
             for (let i = 0; i < 20; i++) {
-                const base = i * 2 + Math.random() * 0.01;
+                const base = i * 2 + rng.next() * 0.01;
                 n1.receive({
                     payload: {
                         sensor1: base,
@@ -702,9 +774,8 @@ describe("pca-anomaly Node", function () {
                     // Thresholds should be set
                     expect(msg.pca.t2Threshold).toBeGreaterThan(0);
                     expect(msg.pca.speThreshold).toBeGreaterThan(0);
-                    // Anomaly flags should be boolean
-                    expect(typeof msg.pca.t2Anomaly).toBe("boolean");
-                    expect(typeof msg.pca.speAnomaly).toBe("boolean");
+                    // Value, limit and flags agree with each other and the config
+                    expectConsistentPca(msg, { method: "combined", threshold: 3.0, trainedOn: 10 });
                     done();
                 }
             };
@@ -715,9 +786,9 @@ describe("pca-anomaly Node", function () {
             for (let i = 0; i < 15; i++) {
                 n1.receive({
                     payload: {
-                        sensor1: 10 + Math.random(),
-                        sensor2: 20 + Math.random(),
-                        sensor3: 30 + Math.random()
+                        sensor1: 10 + rng.next(),
+                        sensor2: 20 + rng.next(),
+                        sensor3: 30 + rng.next()
                     }
                 });
             }
@@ -747,10 +818,11 @@ describe("pca-anomaly Node", function () {
 
             const handler = function (msg) {
                 if (msg.pca && msg.pca.scores) {
-                    expect(msg.pca).toHaveProperty("scores");
                     expect(Array.isArray(msg.pca.scores)).toBe(true);
-                    // Scores length should match nComponents
-                    expect(msg.pca.scores.length).toBe(msg.pca.nComponents);
+                    // Fixed component count: exactly the configured 2
+                    expect(msg.pca.nComponents).toBe(2);
+                    expect(msg.pca.scores.length).toBe(2);
+                    expectConsistentPca(msg, { method: "t2", threshold: 3.0, trainedOn: 10 });
                     // Each score should be a number
                     msg.pca.scores.forEach((score) => {
                         expect(typeof score).toBe("number");
@@ -766,9 +838,9 @@ describe("pca-anomaly Node", function () {
             for (let i = 0; i < 15; i++) {
                 n1.receive({
                     payload: {
-                        sensor1: 10 + Math.random(),
-                        sensor2: 20 + Math.random(),
-                        sensor3: 30 + Math.random()
+                        sensor1: 10 + rng.next(),
+                        sensor2: 20 + rng.next(),
+                        sensor3: 30 + rng.next()
                     }
                 });
             }

@@ -2,15 +2,15 @@
 
 ## Supported Versions
 
-This project is currently at **0.3.x (beta)**. Security fixes land on the `main`
+This project is currently at **0.4.x (beta)**. Security fixes land on the `main`
 branch and are released as soon as a fix is available. Older patch
 releases are not back-ported.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.3.x   | :white_check_mark: |
-| 0.2.x   | :x:                |
-| < 0.2   | :x:                |
+| 0.4.x   | :white_check_mark: |
+| 0.3.x   | :x:                |
+| < 0.3   | :x:                |
 
 ## Reporting a Vulnerability
 

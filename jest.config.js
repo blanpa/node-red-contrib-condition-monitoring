@@ -11,12 +11,12 @@ module.exports = {
         "/__pycache__/"
     ],
     // Coverage gate: keeps regressions out of merges/publishes. Measured the way
-    // CI measures it — `--omit=optional`, no tfjs/onnx — at ≈64.8/55.8/70.4/66.0
-    // as of v0.3.3.
+    // CI measures it — `--omit=optional`, no tfjs/onnx — at ≈79.5/70.0/83.4/80.8
+    // as of v0.4.0 (Node 20 container, `npm ci --omit=optional`).
     //
     // The margin below that is deliberately wide. Repeat runs are usually stable
     // to within ~0.1, but one run came in ~4.5 points lower across the board
-    // (functions 70.4 -> 65.9) and did not reproduce; the cause was not pinned
+    // (functions 70.4 -> 65.9, at the v0.3.3 level) and did not reproduce; the cause was not pinned
     // down. Until it is, the gate sits below that outlier rather than just below
     // the typical reading, so a rare low sample cannot redden a green branch.
     //
@@ -24,10 +24,10 @@ module.exports = {
     collectCoverageFrom: ["nodes/**/*.js", "!nodes/python/**"],
     coverageThreshold: {
         global: {
-            statements: 60,
-            branches: 51,
-            functions: 64,
-            lines: 61
+            statements: 74,
+            branches: 65,
+            functions: 78,
+            lines: 75
         }
     },
     modulePathIgnorePatterns: ["/\\.venv/", "/notebooks_venv/", "/training/notebooks/.*/.pixi/"],

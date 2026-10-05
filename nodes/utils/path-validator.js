@@ -38,6 +38,41 @@ const path = require("path");
  * @property {string|null} reason   Human-readable rejection reason.
  */
 
+/** True when something exists at `p` — including a dangling symlink. */
+function lexists(p) {
+    try {
+        fs.lstatSync(p);
+        return true;
+    } catch (err) {
+        return false;
+    }
+}
+
+/**
+ * Real path of `resolved`, also when the path itself does not exist yet.
+ *
+ * `realpathSync` only works on existing paths, but a file that is about to be
+ * created can still sit behind a symlinked *parent*: `<base>/link/new.bin` with
+ * `link -> /etc` is lexically inside `<base>` and physically outside it. So
+ * resolve the nearest existing ancestor and re-attach the missing tail.
+ *
+ * @throws when an existing component cannot be resolved (e.g. dangling symlink)
+ */
+function realpathAllowingMissing(resolved) {
+    const tail = [];
+    let current = resolved;
+    for (;;) {
+        if (lexists(current)) {
+            const real = fs.realpathSync(current);
+            return tail.length > 0 ? path.join(real, ...tail.reverse()) : real;
+        }
+        const parent = path.dirname(current);
+        if (parent === current) return resolved;
+        tail.push(path.basename(current));
+        current = parent;
+    }
+}
+
 /**
  * Validate that `inputPath` resolves inside one of `allowedBases`.
  *
@@ -71,11 +106,10 @@ function validatePath(inputPath, options) {
 
     if (followSymlinks) {
         try {
-            // realpathSync only succeeds for existing paths; for not-yet-created files
-            // we still validate the lexical resolution against the allowlist below.
-            if (fs.existsSync(resolved)) {
-                resolved = fs.realpathSync(resolved);
-            }
+            // Not-yet-created files are resolved through their nearest existing
+            // ancestor, so a symlinked parent directory cannot smuggle a new
+            // file out of the allowlist.
+            resolved = realpathAllowingMissing(resolved);
         } catch (err) {
             return { ok: false, resolved: null, reason: "cannot resolve real path: " + err.message };
         }
@@ -85,14 +119,27 @@ function validatePath(inputPath, options) {
 
     for (const baseDir of options.allowedBases) {
         if (typeof baseDir !== "string" || baseDir.length === 0) continue;
-        const allowed = path.normalize(path.resolve(baseDir));
-        if (normalised === allowed) {
-            return { ok: true, resolved: normalised, reason: null };
+        const candidates = [path.normalize(path.resolve(baseDir))];
+        if (followSymlinks) {
+            // The candidate was real-pathed above, so an allowlisted directory
+            // that is itself a symlink (a mounted /data, say) has to be compared
+            // by its real location too — the operator allowlisted the target.
+            try {
+                const realBase = path.normalize(realpathAllowingMissing(candidates[0]));
+                if (realBase !== candidates[0]) candidates.push(realBase);
+            } catch (err) {
+                // Unresolvable base: the lexical form is still enforced.
+            }
         }
-        // Append separator to ensure /a/b is not considered inside /a/bc.
-        const allowedWithSep = allowed.endsWith(path.sep) ? allowed : allowed + path.sep;
-        if (normalised.startsWith(allowedWithSep)) {
-            return { ok: true, resolved: normalised, reason: null };
+        for (const allowed of candidates) {
+            if (normalised === allowed) {
+                return { ok: true, resolved: normalised, reason: null };
+            }
+            // Append separator to ensure /a/b is not considered inside /a/bc.
+            const allowedWithSep = allowed.endsWith(path.sep) ? allowed : allowed + path.sep;
+            if (normalised.startsWith(allowedWithSep)) {
+                return { ok: true, resolved: normalised, reason: null };
+            }
         }
     }
 

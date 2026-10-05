@@ -22,23 +22,8 @@
 module.exports = function (RED) {
     "use strict";
 
-    function mulberry32(a) {
-        return function () {
-            a |= 0;
-            a = (a + 0x6d2b79f5) | 0;
-            let t = Math.imul(a ^ (a >>> 15), 1 | a);
-            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-        };
-    }
-    const clampInt = (v, lo, hi, d) => {
-        const n = parseInt(v, 10);
-        return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d;
-    };
-    const clampFloat = (v, lo, hi, d) => {
-        const n = parseFloat(v);
-        return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d;
-    };
+    const { clampInt, clampFloat } = require("./utils/config-validator");
+    const { mulberry32 } = require("./utils/seeded-random");
 
     const DEFAULT_FIELDS = {
         temperature: { mean: 60, noise: 2, trend: 0.05, min: 0, max: 150 },
@@ -69,7 +54,10 @@ module.exports = function (RED) {
 
         try {
             node.fields = config.fields ? sanitizeFields(JSON.parse(config.fields)) : DEFAULT_FIELDS;
-            if (!node.fields) node.fields = DEFAULT_FIELDS;
+            if (!node.fields) {
+                node.warn("json-source: fields must be a JSON object, using defaults");
+                node.fields = DEFAULT_FIELDS;
+            }
         } catch (e) {
             node.warn("json-source: invalid fields JSON, using defaults");
             node.fields = DEFAULT_FIELDS;
@@ -111,8 +99,12 @@ module.exports = function (RED) {
                     const noise = clampFloat(spec.noise, 0, 1e12, 0);
                     const trend = clampFloat(spec.trend, -1e12, 1e12, 0);
                     let val = mean + trend * node.sampleCount + gauss(rng) * noise;
-                    if (spec.min !== undefined) val = Math.max(spec.min, val);
-                    if (spec.max !== undefined) val = Math.min(spec.max, val);
+                    // Non-numeric bounds are ignored — Math.max("abc", v) is NaN
+                    // and would poison the whole field.
+                    const lo = clampFloat(spec.min, -Number.MAX_VALUE, Number.MAX_VALUE, null);
+                    const hi = clampFloat(spec.max, -Number.MAX_VALUE, Number.MAX_VALUE, null);
+                    if (lo !== null) val = Math.max(lo, val);
+                    if (hi !== null) val = Math.min(hi, val);
                     out[key] = +val.toFixed(4);
                     numericFields.push({ key: key, noise: noise || 1 });
                 } else {
@@ -153,14 +145,27 @@ module.exports = function (RED) {
         function start() {
             if (node.timer) return;
             node.running = true;
-            node.timer = setInterval(() => emit((m) => node.send(m)), node.intervalMs);
+            node.timer = setInterval(() => {
+                // An exception escaping a timer callback is an uncaught
+                // exception for the whole runtime — contain it here.
+                try {
+                    emit((m) => node.send(m));
+                } catch (err) {
+                    stop();
+                    node.status({ fill: "red", shape: "ring", text: "error - stopped" });
+                    node.error("json-source: " + err.message);
+                }
+            }, node.intervalMs);
         }
         function stop() {
+            const wasRunning = node.running;
             node.running = false;
             if (node.timer) {
                 clearInterval(node.timer);
                 node.timer = null;
             }
+            // The last emit left a "running" (dot) status behind.
+            if (wasRunning) node.status({ fill: "grey", shape: "ring", text: "stopped · #" + node.sampleCount });
         }
 
         node.on("input", function (msg, send, done) {
@@ -198,6 +203,7 @@ module.exports = function (RED) {
 
         node.on("close", function (done) {
             stop();
+            node.status({});
             if (done) done();
         });
 

@@ -174,6 +174,23 @@ describe("MaxBridgeManager", () => {
             expect(hits.length).toBe(1);
         });
 
+        it("does not retry a 4xx whose body is not JSON (proxy error page)", async () => {
+            const hits = [];
+            const { port } = await startServer(jsonResponder(404, "<html>Not Found</html>", hits));
+            const manager = makeManager(port, { retryAttempts: 3, retryDelay: 5 });
+
+            await expect(manager.getStatus()).rejects.toThrow("Invalid JSON response");
+            expect(hits.length).toBe(1);
+        });
+
+        it("does not keep the event loop alive with its health-check timer", async () => {
+            const { port } = await startServer(jsonResponder(200, { status: "healthy" }));
+            const manager = makeManager(port, { healthCheckInterval: 60000 });
+            manager.startHealthCheck();
+            expect(manager.healthCheckTimer.hasRef()).toBe(false);
+            manager.stopHealthCheck();
+        });
+
         it("succeeds when a retry attempt gets a good response", async () => {
             let calls = 0;
             const { port } = await startServer((req, res) => {

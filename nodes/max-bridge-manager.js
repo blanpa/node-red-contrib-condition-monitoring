@@ -22,6 +22,7 @@
 const http = require("http");
 const https = require("https");
 const EventEmitter = require("events");
+const { requestJson, withRetry, isClientError } = require("./utils/json-http-client");
 
 class MaxBridgeManager extends EventEmitter {
     constructor(options = {}) {
@@ -58,67 +59,17 @@ class MaxBridgeManager extends EventEmitter {
     /**
      * Make HTTP request to MAX bridge server
      */
-    async _request(method, path, data = null) {
-        return new Promise((resolve, reject) => {
-            const startTime = Date.now();
-
-            const options = {
-                hostname: this.hostname,
-                port: this.port,
-                path: path,
-                method: method,
-                headers: {
-                    "Content-Type": "application/json",
-                    Accept: "application/json"
-                },
-                timeout: this.requestTimeout
-            };
-
-            const req = this.protocol.request(options, (res) => {
-                let responseData = "";
-
-                res.on("data", (chunk) => {
-                    responseData += chunk;
-                });
-
-                res.on("end", () => {
-                    const responseTime = Date.now() - startTime;
-                    this._updateStats(responseTime, res.statusCode < 400);
-
-                    try {
-                        const parsed = JSON.parse(responseData);
-
-                        if (res.statusCode >= 400) {
-                            const httpErr = new Error(parsed.error || `HTTP ${res.statusCode}`);
-                            // Carry the status so retry logic doesn't have to
-                            // guess it from a body-dependent message string.
-                            httpErr.statusCode = res.statusCode;
-                            reject(httpErr);
-                        } else {
-                            resolve(parsed);
-                        }
-                    } catch (e) {
-                        reject(new Error(`Invalid JSON response: ${responseData.substring(0, 100)}`));
-                    }
-                });
-            });
-
-            req.on("error", (err) => {
-                this._updateStats(Date.now() - startTime, false);
-                reject(err);
-            });
-
-            req.on("timeout", () => {
-                req.destroy();
-                this._updateStats(Date.now() - startTime, false);
-                reject(new Error("Request timeout"));
-            });
-
-            if (data) {
-                req.write(JSON.stringify(data));
-            }
-
-            req.end();
+    _request(method, path, data = null) {
+        return requestJson({
+            protocol: this.protocol,
+            hostname: this.hostname,
+            port: this.port,
+            method: method,
+            path: path,
+            data: data,
+            timeoutMs: this.requestTimeout,
+            contentTypeAlways: true,
+            onSettled: (responseTime, success) => this._updateStats(responseTime, success)
         });
     }
 
@@ -142,33 +93,15 @@ class MaxBridgeManager extends EventEmitter {
     /**
      * Make request with retry
      */
-    async _requestWithRetry(method, path, data = null) {
-        let lastError;
-
-        for (let attempt = 0; attempt < this.retryAttempts; attempt++) {
-            try {
-                return await this._request(method, path, data);
-            } catch (err) {
-                lastError = err;
-
-                // Don't retry on client errors (4xx). Prefer the structured
-                // statusCode; the message check stays as a fallback for
-                // errors raised without one.
-                const status = err.statusCode;
-                if (
-                    (typeof status === "number" && status >= 400 && status < 500) ||
-                    (err.message && err.message.includes("HTTP 4"))
-                ) {
-                    throw err;
-                }
-
-                if (attempt < this.retryAttempts - 1) {
-                    await new Promise((resolve) => setTimeout(resolve, this.retryDelay * (attempt + 1)));
-                }
-            }
-        }
-
-        throw lastError;
+    _requestWithRetry(method, path, data = null) {
+        return withRetry(() => this._request(method, path, data), {
+            retryAttempts: this.retryAttempts,
+            retryDelay: this.retryDelay,
+            // Don't retry on client errors (4xx). Prefer the structured
+            // statusCode; the message check stays as a fallback for
+            // errors raised without one.
+            isFinal: (err) => isClientError(err) || !!(err.message && err.message.includes("HTTP 4"))
+        });
     }
 
     /**
@@ -211,6 +144,10 @@ class MaxBridgeManager extends EventEmitter {
                 // Error already emitted via 'unhealthy' event
             }
         }, this.healthCheckInterval);
+        // A health probe must never be the thing that keeps the process alive.
+        if (this.healthCheckTimer.unref) {
+            this.healthCheckTimer.unref();
+        }
 
         // Initial check
         this.checkHealth().catch(() => {});

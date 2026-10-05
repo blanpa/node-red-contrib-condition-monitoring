@@ -23,6 +23,11 @@ services:
       # Set to http://inference:8770 to offload keras/sklearn/tflite inference
       # to the sidecar container below (start it with: --profile inference).
       - CM_INFERENCE_URL=${CM_INFERENCE_URL:-}
+    # Lets flows reach services on the Docker host by name on Linux too (Docker
+    # Desktop defines it by itself). The test suite's llm-analyzer tab calls the
+    # demo mock at host.docker.internal:18088.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     networks:
       - node-red-network

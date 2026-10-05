@@ -40,12 +40,15 @@
             s3Bucket: { value: "" },
             s3Prefix: { value: "training-data/" },
             s3Region: { value: "eu-central-1" },
-            s3AccessKeyId: { value: "" },
-            s3SecretAccessKey: { value: "" },
+            // Disk-usage limits (0 = unlimited)
+            maxStreamFileMB: { value: 100 },
+            maxFiles: { value: 0 },
             // Data quality
-            validateData: { value: true },
-            removeOutliers: { value: false },
-            outlierThreshold: { value: 5.0 }
+            validateData: { value: true }
+        },
+        credentials: {
+            s3AccessKeyId: { type: "text" },
+            s3SecretAccessKey: { type: "password" }
         },
         inputs: 1,
         outputs: 1,
@@ -148,7 +151,7 @@
                         var icon = d.compressed ? 'file-archive-o' : 'file-text-o';
                         listHtml += '<div class="tdc-dataset-item">';
                         listHtml += '<i class="fa fa-' + icon + '"></i>';
-                        listHtml += '<span class="tdc-dataset-name">' + d.name + '</span>';
+                        listHtml += '<span class="tdc-dataset-name">' + $('<span>').text(d.name).html() + '</span>';
                         listHtml += '<span class="tdc-dataset-size">' + size + '</span>';
                         listHtml += '</div>';
                     });
@@ -165,11 +168,16 @@
             });
         },
         oneditsave: function() {
-            // Convert split percentages to ratio object for node config
+            // Convert split percentages to ratio object for node config.
+            // 0 is a valid share (e.g. no validation split) and must survive.
+            function ratio(selector, fallback) {
+                const n = parseInt($(selector).val(), 10);
+                return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) / 100 : fallback;
+            }
             this.splitRatio = {
-                train: parseInt($("#node-input-splitTrain").val()) / 100 || 0.8,
-                val: parseInt($("#node-input-splitVal").val()) / 100 || 0.1,
-                test: parseInt($("#node-input-splitTest").val()) / 100 || 0.1
+                train: ratio("#node-input-splitTrain", 0.8),
+                val: ratio("#node-input-splitVal", 0.1),
+                test: ratio("#node-input-splitTest", 0.1)
             };
         }
     });
@@ -564,6 +572,18 @@
                 <input type="checkbox" id="node-input-flushOnDeploy">
                 <label for="node-input-flushOnDeploy">Save buffer on deploy/restart</label>
             </div>
+            <div class="tdc-config-grid" style="margin-top: 12px;">
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-scissors"></i> Rotate stream file at (MB)</label>
+                    <input type="number" id="node-input-maxStreamFileMB" min="0" placeholder="100">
+                    <div class="tdc-help-text">Streaming mode: <code>&lt;dataset&gt;_stream.jsonl</code> is renamed with a timestamp once it reaches this size. 0 = never rotate.</div>
+                </div>
+                <div class="tdc-config-item">
+                    <label><i class="fa fa-trash-o"></i> Keep at most (files)</label>
+                    <input type="number" id="node-input-maxFiles" min="0" placeholder="0">
+                    <div class="tdc-help-text">Oldest exported / rotated files of this dataset are deleted beyond this count. 0 = keep everything.</div>
+                </div>
+            </div>
         </div>
     </div>
     
@@ -656,15 +676,17 @@
                 <div class="tdc-config-grid" style="margin-top: 12px;">
                     <div class="tdc-config-item">
                         <label><i class="fa fa-key"></i> Access Key ID</label>
-                        <input type="text" id="node-input-s3AccessKeyId" placeholder="(or use env var)">
+                        <input type="text" id="node-input-s3AccessKeyId" placeholder="(empty = env var / AWS default chain)">
                     </div>
                     <div class="tdc-config-item">
                         <label><i class="fa fa-lock"></i> Secret Access Key</label>
-                        <input type="password" id="node-input-s3SecretAccessKey" placeholder="(or use env var)">
+                        <input type="password" id="node-input-s3SecretAccessKey" placeholder="(empty = env var / AWS default chain)">
                     </div>
                 </div>
                 <div class="tdc-help-text" style="margin-top: 8px;">
-                    <strong>Tip:</strong> For security, use environment variables: <code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>
+                    Keys entered here are stored as Node-RED <strong>credentials</strong> (encrypted, never part of a flow export).
+                    Leave both empty to use <code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code> or the AWS SDK default
+                    credential chain (shared config, IAM role).
                 </div>
             </div>
         </div>
@@ -696,7 +718,7 @@
     <p><b>Collection Modes:</b></p>
     <ul>
         <li><b>Batch:</b> Collects samples in memory, exports on demand or when buffer is full.</li>
-        <li><b>Streaming:</b> Appends each sample directly to a JSONL file.</li>
+        <li><b>Streaming:</b> Appends each sample directly to a JSONL file (rotated at the configured size).</li>
         <li><b>Time-Series:</b> Creates sliding windows for sequence models (LSTM, Transformer).</li>
     </ul>
     

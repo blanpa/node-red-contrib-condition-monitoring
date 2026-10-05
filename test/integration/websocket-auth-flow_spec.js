@@ -132,7 +132,7 @@ describe("integration: anomaly-detector WebSocket auth", () => {
             try {
                 const m = JSON.parse(raw.toString());
                 messages.push(m);
-            } catch (_) {
+            } catch {
                 /* ignore */
             }
         });

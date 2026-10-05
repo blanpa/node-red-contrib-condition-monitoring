@@ -19,7 +19,7 @@ function pythonAvailable() {
         try {
             const r = spawnSync(cmd, ["--version"], { stdio: "ignore" });
             if (!r.error && r.status === 0) return true;
-        } catch (_) {
+        } catch {
             /* not available */
         }
     }
@@ -63,6 +63,14 @@ const FAKE_BRIDGE_PY = [
     '        print(json.dumps({"id": req["id"], "success": False, "error": "synthetic failure"}))',
     '    elif cmd == "crash":',
     "        sys.exit(3)",
+    '    elif cmd == "noise":',
+    '        print("1/1 [==============================] - 0s 20ms/step")',
+    '        print(json.dumps({"id": req["id"], "success": True, "result": {"noisy": True}}))',
+    '    elif cmd == "closestdin":',
+    "        import os",
+    "        os.close(0)",
+    "        time.sleep(1.5)",
+    "        sys.exit(0)",
     '    elif cmd == "shutdown":',
     '        print(json.dumps({"id": req["id"], "success": True, "result": "bye"}))',
     "        sys.stdout.flush()",
@@ -75,10 +83,14 @@ const FAKE_BRIDGE_PY = [
 
 const NEVER_READY_PY = ["import time", "time.sleep(60)", ""].join("\n");
 
+// Survives the 100ms spawn settle window, then dies without ever signalling ready.
+const DIES_EARLY_PY = ["import sys, time", "time.sleep(0.4)", "sys.exit(7)", ""].join("\n");
+
 describe("PythonBridgeManager", () => {
     let tmpDir;
     let fakeBridgeScript;
     let neverReadyScript;
+    let diesEarlyScript;
 
     beforeAll(() => {
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ncm-pybridge-"));
@@ -86,12 +98,14 @@ describe("PythonBridgeManager", () => {
         neverReadyScript = path.join(tmpDir, "never_ready.py");
         fs.writeFileSync(fakeBridgeScript, FAKE_BRIDGE_PY);
         fs.writeFileSync(neverReadyScript, NEVER_READY_PY);
+        diesEarlyScript = path.join(tmpDir, "dies_early.py");
+        fs.writeFileSync(diesEarlyScript, DIES_EARLY_PY);
     });
 
     afterAll(() => {
         try {
             fs.rmSync(tmpDir, { recursive: true, force: true });
-        } catch (_) {
+        } catch {
             /* best effort */
         }
     });
@@ -171,6 +185,29 @@ describe("PythonBridgeManager", () => {
             expect(err.message).toMatch(/Failed to parse response/);
         });
 
+        it("does not throw on a non-JSON line when nobody listens for 'error'", async () => {
+            // ml-inference only subscribes to 'stderr' and 'exit'. A bare
+            // 'error' emit would throw here and crash the runtime.
+            const bridge = makeStubbedBridge();
+            const protocolErrors = [];
+            bridge.on("protocolError", (e) => protocolErrors.push(e));
+            expect(() => bridge._handleResponse("1/1 [=====] - 0s 20ms/step")).not.toThrow();
+            expect(() => bridge._handleResponse("null")).not.toThrow();
+            expect(() => bridge._handleResponse("42")).not.toThrow();
+            expect(protocolErrors).toHaveLength(3);
+            expect(protocolErrors[0].message).toMatch(/Failed to parse response/);
+        });
+
+        it("rejects pending requests when stop() detaches the process", async () => {
+            const bridge = makeStubbedBridge({ requestTimeout: 5000 });
+            const pending = bridge.sendCommand("ping");
+            // The stub never answers "shutdown"; don't wait for its timeout.
+            bridge.sendCommand = jest.fn().mockRejectedValue(new Error("no answer"));
+            await bridge.stop();
+            await expect(pending).rejects.toThrow("Python bridge stopped");
+            expect(bridge.getStats().pendingRequests).toBe(0);
+        });
+
         it("emits 'response' but leaves pending requests alone for unknown ids", async () => {
             const bridge = makeStubbedBridge();
             const pending = bridge.sendCommand("ping");
@@ -225,6 +262,20 @@ describe("PythonBridgeManager", () => {
     });
 
     describe("singleton helpers", () => {
+        it("shutdownGlobalBridge frees the singleton before the old bridge has stopped", async () => {
+            const a = getGlobalBridge();
+            let release;
+            a.stop = () => new Promise((resolve) => (release = resolve));
+            const shuttingDown = shutdownGlobalBridge();
+            // A node re-created during the shutdown window must not get the dying bridge.
+            const b = getGlobalBridge();
+            expect(b).not.toBe(a);
+            release();
+            await shuttingDown;
+            expect(getGlobalBridge()).toBe(b);
+            await shutdownGlobalBridge();
+        });
+
         it("getGlobalBridge returns the same instance until shutdown", async () => {
             const a = getGlobalBridge();
             expect(getGlobalBridge()).toBe(a);
@@ -242,7 +293,7 @@ describe("PythonBridgeManager", () => {
             if (bridge && bridge.process) {
                 try {
                     await bridge.stop();
-                } catch (_) {
+                } catch {
                     /* best effort */
                 }
             }
@@ -299,6 +350,73 @@ describe("PythonBridgeManager", () => {
             expect(bridge.process).toBeNull();
             expect(bridge.getStats().pendingRequests).toBe(0);
         });
+
+        it("survives stdout noise from the child without an 'error' listener", async () => {
+            bridge = new PythonBridgeManager({
+                bridgeScript: fakeBridgeScript,
+                startupTimeout: 10000,
+                requestTimeout: 5000
+            });
+            await bridge.start();
+            await expect(bridge.sendCommand("noise")).resolves.toEqual({ noisy: true });
+        });
+
+        it("turns an EPIPE on the child's stdin into rejected requests, not a crash", async () => {
+            bridge = new PythonBridgeManager({
+                bridgeScript: fakeBridgeScript,
+                startupTimeout: 10000,
+                requestTimeout: 800
+            });
+            await bridge.start();
+            // The child closes its end of the pipe but stays alive for a while.
+            bridge.sendCommand("closestdin").catch(() => {});
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const big = new Array(200000).fill(1.5);
+            const results = [];
+            for (let i = 0; i < 4; i++) {
+                results.push(bridge.sendCommand("predict", { input_data: big }).catch((e) => e));
+                await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            const settled = await Promise.all(results);
+            settled.forEach((r) => expect(r).toBeInstanceOf(Error));
+        });
+
+        it("fails start() promptly when the child dies before signalling ready", async () => {
+            bridge = new PythonBridgeManager({
+                bridgeScript: diesEarlyScript,
+                startupTimeout: 20000,
+                requestTimeout: 1000
+            });
+            const started = Date.now();
+            await expect(bridge.start()).rejects.toThrow(/exited during startup \(code 7/);
+            expect(Date.now() - started).toBeLessThan(5000);
+            expect(bridge.process).toBeNull();
+        });
+
+        it("ignores the late exit of a stopped child after a restart", async () => {
+            bridge = new PythonBridgeManager({
+                bridgeScript: fakeBridgeScript,
+                startupTimeout: 10000,
+                requestTimeout: 5000
+            });
+            const exits = [];
+            bridge.on("exit", (info) => exits.push(info));
+            await bridge.start();
+            await bridge.stop();
+            await bridge.start();
+            // Leave time for anything the first child still had to say.
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            expect(bridge.isReady).toBe(true);
+            await expect(bridge.sendCommand("ping")).resolves.toEqual({ pong: true });
+            expect(exits).toHaveLength(0);
+        });
+
+        it("speaks the protocol with the real bridge script (no ML packages needed)", async () => {
+            bridge = new PythonBridgeManager({ startupTimeout: 20000, requestTimeout: 10000 });
+            await bridge.start();
+            await expect(bridge.ping()).resolves.toEqual({ message: "pong" });
+            await expect(bridge.loadModel("/nonexistent/model.txt", "m")).rejects.toThrow(/Unsupported model format/);
+        }, 30000);
 
         it("rejects start() when the bridge never signals ready", async () => {
             bridge = new PythonBridgeManager({

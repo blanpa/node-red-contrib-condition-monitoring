@@ -39,7 +39,6 @@
             inputProperty: { value: "payload" },
             outputProperty: { value: "prediction" },
             preprocessMode: { value: "array" },
-            batchSize: { value: 1 },
             warmup: { value: true }
         },
         inputs: 1,
@@ -270,35 +269,45 @@
                     uploadGenericFile(file, 'keras');
                 } else if (ext === 'pkl' || ext === 'joblib') {
                     uploadGenericFile(file, 'sklearn');
-                } else if (file.name === 'model.json') {
+                } else if (fileList.some(function(f) { return f.name === 'model.json'; })) {
+                    // model.json need not be the first file of the selection
                     uploadTfjsFiles(fileList);
                 } else {
                     showUploadStatus('error', 'Unsupported file type: .' + ext);
                 }
             }
             
-            function uploadGenericFile(file, type) {
-                showUploadStatus('loading', 'Uploading ' + file.name + '...');
-                var formData = new FormData();
-                formData.append('file', file);
-                formData.append('type', type);
-                
-                $.ajax({
+            // POST one file to the model store as a raw body. The server writes the
+            // request body to disk verbatim, so it must be the file itself — never a
+            // multipart FormData (that stored the form envelope instead of the model).
+            // `modelDir` (optional) places the file in a sub-directory of the store.
+            function postModelFile(file, modelDir) {
+                var headers = { "X-Filename": file.name };
+                if (modelDir) headers["X-Model-Dir"] = modelDir;
+                return $.ajax({
                     url: "ml-inference/upload",
                     type: "POST",
-                    data: formData,
+                    data: file,
                     processData: false,
-                    contentType: false,
-                    success: function(response) {
-                        showUploadStatus('success', 'Uploaded: ' + response.name);
-                        loadModelList();
-                        if (response.path) {
-                            $("#node-input-modelPath").val(response.path);
-                        }
-                    },
-                    error: function(xhr) {
-                        showUploadStatus('error', 'Upload failed: ' + (xhr.responseJSON?.error || 'Unknown error'));
+                    contentType: "application/octet-stream",
+                    headers: headers
+                });
+            }
+            
+            function uploadErrorText(xhr) {
+                return (xhr && xhr.responseJSON && xhr.responseJSON.error) || 'Unknown error';
+            }
+            
+            function uploadGenericFile(file, type) {
+                showUploadStatus('loading', 'Uploading ' + file.name + '...');
+                postModelFile(file).done(function(response) {
+                    showUploadStatus('success', 'Uploaded: ' + response.name);
+                    loadModelList();
+                    if (response.path) {
+                        $("#node-input-modelPath").val(response.path);
                     }
+                }).fail(function(xhr) {
+                    showUploadStatus('error', 'Upload failed: ' + uploadErrorText(xhr));
                 });
             }
             
@@ -314,94 +323,47 @@
                 }
             }
             
-            function uploadOnnxFile(file) {
-                showUploadStatus('loading', 'Uploading ' + file.name + '...');
-                
-                var reader = new FileReader();
-                reader.onload = function(event) {
-                    $.ajax({
-                        url: "ml-inference/upload",
-                        type: "POST",
-                        data: event.target.result,
-                        processData: false,
-                        contentType: "application/octet-stream",
-                        headers: { "X-Filename": file.name },
-                        success: function(data) {
-                            showUploadStatus('success', 'Uploaded: ' + data.name);
-                            $("#node-input-modelPath").val(data.path);
-                            loadModelList();
-                        },
-                        error: function(xhr) {
-                            showUploadStatus('error', xhr.responseJSON?.error || "Upload failed");
-                        }
-                    });
-                };
-                reader.readAsArrayBuffer(file);
-            }
-            
+            // A TF.js model is model.json plus its weight shards. Each file goes up as
+            // its own raw request into one model directory: a single JSON document with
+            // base64 weights hits Node-RED's apiMaxLength (5 MB by default) very quickly.
             function uploadTfjsFiles(files) {
-                showUploadStatus('loading', 'Processing ' + files.length + ' files...');
-                
-                var modelJson = null;
-                var weights = [];
-                var modelName = "tfjs_model";
-                var processed = 0;
-                
-                files.forEach(function(file) {
-                    var reader = new FileReader();
-                    
-                    if (file.name === 'model.json') {
-                        reader.onload = function(event) {
-                            modelJson = event.target.result;
-                            processed++;
-                            checkComplete();
-                        };
-                        reader.readAsText(file);
-                    } else if (file.name.endsWith('.bin')) {
-                        reader.onload = function(event) {
-                            var bytes = new Uint8Array(event.target.result);
-                            var binary = '';
-                            for (var i = 0; i < bytes.length; i++) {
-                                binary += String.fromCharCode(bytes[i]);
-                            }
-                            weights.push({ name: file.name, data: btoa(binary) });
-                            processed++;
-                            checkComplete();
-                        };
-                        reader.readAsArrayBuffer(file);
-                    } else {
-                        processed++;
-                        checkComplete();
-                    }
+                var parts = files.filter(function(file) {
+                    return file.name === 'model.json' || /\.bin$/i.test(file.name);
+                });
+                var hasModelJson = parts.some(function(file) { return file.name === 'model.json'; });
+                if (!hasModelJson) {
+                    showUploadStatus('error', 'No model.json found');
+                    return;
+                }
+                // Weight shards first, model.json last: the model only shows up in
+                // the list once everything it references is in place.
+                parts.sort(function(a, b) {
+                    return (a.name === 'model.json' ? 1 : 0) - (b.name === 'model.json' ? 1 : 0);
                 });
                 
-                function checkComplete() {
-                    if (processed < files.length) return;
-                    
-                    if (!modelJson) {
-                        showUploadStatus('error', 'No model.json found');
+                var modelDir = 'tfjs_model_' + Date.now();
+                var index = 0;
+                var lastResponse = null;
+                
+                function next() {
+                    if (index >= parts.length) {
+                        showUploadStatus('success', 'Uploaded: ' + modelDir);
+                        if (lastResponse && lastResponse.dir) {
+                            $("#node-input-modelPath").val(lastResponse.dir);
+                        }
+                        loadModelList();
                         return;
                     }
-                    
-                    $.ajax({
-                        url: "ml-inference/upload-tfjs",
-                        type: "POST",
-                        data: JSON.stringify({
-                            name: modelName + '_' + Date.now(),
-                            modelJson: modelJson,
-                            weights: weights
-                        }),
-                        contentType: "application/json",
-                        success: function(data) {
-                            showUploadStatus('success', 'Uploaded: ' + data.name);
-                            $("#node-input-modelPath").val(data.path);
-                            loadModelList();
-                        },
-                        error: function(xhr) {
-                            showUploadStatus('error', xhr.responseJSON?.error || "Upload failed");
-                        }
+                    var file = parts[index++];
+                    showUploadStatus('loading', 'Uploading ' + file.name + ' (' + index + '/' + parts.length + ')...');
+                    postModelFile(file, modelDir).done(function(response) {
+                        lastResponse = response;
+                        next();
+                    }).fail(function(xhr) {
+                        showUploadStatus('error', 'Upload failed (' + file.name + '): ' + uploadErrorText(xhr));
                     });
                 }
+                next();
             }
             
             // Collapsible sections

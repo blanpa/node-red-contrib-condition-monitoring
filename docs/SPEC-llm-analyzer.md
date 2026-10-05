@@ -30,7 +30,7 @@ sensor → [batch buffer N] → [build prompt] → LLM API → msg.payload = "<a
 | D5 | **`msg.prompt` overrides** the user-prompt template (after substitution). `msg.systemPrompt` overrides system. | Lets a `change`-node pick a different prompt per shift / context without redeploying. |
 | D6 | **API key via Node-RED credentials** (encrypted-at-rest), with an inline-config backstop for tests/dev only. | Same pattern as `mcp-bridge` had. |
 | D7 | **Output as `msg.payload` text by default**; structured-JSON output deferred to Phase 2. | Phase 1 keeps schema design out of scope. |
-| D8 | **`apiUrl` is overridable** (config + `msg.apiUrl`). | So integration tests can point at a local mock server without touching `fetch`. |
+| D8 | **`apiUrl` is overridable** (config; `msg.apiUrl` only with the opt-in **Allow msg.apiUrl override** setting, and then only within the configured origin). | So integration tests can point at a local mock server without touching `fetch`. |
 
 ## Configuration
 
@@ -74,7 +74,7 @@ Recent values (oldest first):
 | `flush` | `true` | (manual mode only) trigger the LLM call now with the current buffer. Ignored in `batch`/`interval` modes. |
 | `prompt` | `string` | Replace the *user* prompt entirely (substitution still applied). |
 | `systemPrompt` | `string` | Replace the *system* prompt. |
-| `apiUrl` | `string` | Per-message API URL override (testing). |
+| `apiUrl` | `string` | Per-message API URL override (testing). Ignored unless `allowMsgApiUrl` is enabled; must share the origin of the configured endpoint. |
 | `model` | `string` | Per-message model override. |
 
 ## Outputs (single output pin)
@@ -114,7 +114,7 @@ output on error.
 |----------|------------------|---------|-------|
 | `anthropic` | `https://api.anthropic.com/v1/messages` | `x-api-key` header | Native Messages API. |
 | `openai` | `https://api.openai.com/v1/chat/completions` | `Authorization: Bearer` | Chat Completions. |
-| `google` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` | `?key=` query param | Substitutes `{model}` from config; `systemInstruction` shape. |
+| `google` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` | `x-goog-api-key` header | Substitutes `{model}` from config; `systemInstruction` shape. |
 | `ollama` | `http://localhost:11434/api/chat` | none (or optional Bearer) | Local model runner; works offline. |
 | `openai-compatible` | **REQUIRED** to be set | `Authorization: Bearer` | Generic adapter — Groq, Together, OpenRouter, DeepSeek, Mistral API, vLLM, LMStudio, … |
 

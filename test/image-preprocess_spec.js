@@ -122,3 +122,31 @@ describe("image-preprocess Node", function () {
         });
     });
 });
+
+describe("image-preprocess hardening", function () {
+    beforeEach(function (done) {
+        helper.startServer(done);
+    });
+    afterEach(function (done) {
+        helper.unload().then(function () {
+            helper.stopServer(done);
+        });
+    });
+
+    it("clamps a negative / absurd target size instead of failing every message", function (done) {
+        const flow = [
+            { id: "n1", type: "image-preprocess", targetWidth: -5, targetHeight: 99999999, wires: [["n2"]] },
+            { id: "n2", type: "helper" }
+        ];
+        helper.load(ipNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            try {
+                expect(n1.targetWidth).toBe(1);
+                expect(n1.targetHeight).toBe(4096);
+                done();
+            } catch (e) {
+                done(e);
+            }
+        });
+    });
+});

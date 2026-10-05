@@ -12,10 +12,18 @@ module.exports = function (RED) {
     const fs = require("fs");
     const path = require("path");
     const zlib = require("zlib");
-    const { promisify } = require("util");
+    const { Readable } = require("stream");
+    const { pipeline } = require("stream/promises");
 
-    const gzip = promisify(zlib.gzip);
-    const { clampInt, clampFloat } = require("./utils/config-validator");
+    const { clampInt, clampFloat, isIsoDateLike } = require("./utils/config-validator");
+    const { validatePath, assertPath } = require("./utils/path-validator");
+
+    // Rows per chunk when streaming an export to disk. Exports are written
+    // through a stream so a large buffer never has to exist as one string.
+    const EXPORT_CHUNK_ROWS = 2000;
+    // Backoff after a failed auto-save: base * 2^(failures-1), capped.
+    const AUTOSAVE_RETRY_BASE_MS = 5000;
+    const AUTOSAVE_RETRY_MAX_MS = 5 * 60 * 1000;
 
     // Optional S3 support
     let S3Client = null;
@@ -31,6 +39,58 @@ module.exports = function (RED) {
     // Data directory relative to Node-RED userDir
     function getDataDir(RED) {
         return path.join(RED.settings.userDir || process.cwd(), "training-data");
+    }
+
+    // Directories a training-data path may resolve into: the data dir itself
+    // and, when userDir is reached through a symlink, its real location (the
+    // path validator compares real paths for files that already exist).
+    function getAllowedBases(RED) {
+        const dataDir = getDataDir(RED);
+        const bases = [dataDir];
+        try {
+            if (fs.existsSync(dataDir)) {
+                const real = fs.realpathSync(dataDir);
+                if (real !== dataDir) bases.push(real);
+            }
+        } catch (err) {
+            // fall back to the lexical base only
+        }
+        return bases;
+    }
+
+    // SECURITY: every path this node hands to `fs` goes through here. Throws
+    // (EPATHFORBIDDEN) if it would resolve outside the training-data directory.
+    function safeDataPath(RED, candidate) {
+        return assertPath(candidate, { allowedBases: getAllowedBases(RED), base: getDataDir(RED) });
+    }
+
+    // RFC 4180 quoting: a label or feature name containing a comma, quote or
+    // newline must not shift the columns of every row after it.
+    function csvCell(value) {
+        if (value === null || value === undefined) return "";
+        const text = String(value);
+        return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+    }
+
+    // The editor stores the split as three percentages (splitTrain / splitVal
+    // / splitTest); a `splitRatio` object ({train,val,test} as 0..1 fractions)
+    // is accepted too and wins when present. Previously only `splitRatio` was
+    // read — which the editor never saves — so every flow silently got 80/10/10.
+    function normalizeSplitRatio(config) {
+        const fallback = { train: 0.8, val: 0.1, test: 0.1 };
+        const raw = config.splitRatio;
+        if (raw && typeof raw === "object") {
+            return {
+                train: clampFloat(raw.train, 0, 1, fallback.train),
+                val: clampFloat(raw.val, 0, 1, fallback.val),
+                test: clampFloat(raw.test, 0, 1, fallback.test)
+            };
+        }
+        return {
+            train: clampFloat(config.splitTrain, 0, 100, fallback.train * 100) / 100,
+            val: clampFloat(config.splitVal, 0, 100, fallback.val * 100) / 100,
+            test: clampFloat(config.splitTest, 0, 100, fallback.test * 100) / 100
+        };
     }
 
     /**
@@ -85,34 +145,49 @@ module.exports = function (RED) {
         this.flushOnDeploy = config.flushOnDeploy !== false;
 
         // Export settings
-        this.exportFormat = config.exportFormat || "csv"; // csv, jsonl, json, npy
+        this.exportFormat = config.exportFormat || "csv"; // csv, jsonl, json
         this.compressionEnabled = config.compressionEnabled !== false;
         this.compressionThreshold = clampInt(config.compressionThreshold, 1, 100000000, 10000); // Samples before compression
-        this.splitRatio = config.splitRatio || { train: 0.8, val: 0.1, test: 0.1 };
+        this.splitRatio = normalizeSplitRatio(config);
         this.shuffleOnExport = config.shuffleOnExport !== false;
         this.includeMetadata = config.includeMetadata !== false;
+
+        // Disk-usage limits. Both default to 0 (= unlimited) when the key is
+        // absent, so flows saved before these options existed behave as before.
+        // maxStreamFileMB: rotate <dataset>_stream.jsonl once it reaches this size.
+        // maxFiles: keep at most this many exported/rotated files of this dataset.
+        this.maxStreamFileMB = clampFloat(config.maxStreamFileMB, 0, 1000000, 0);
+        this.maxFiles = clampInt(config.maxFiles, 0, 1000000, 0);
 
         // S3 settings
         this.s3Enabled = config.s3Enabled === true;
         this.s3Bucket = config.s3Bucket || "";
         this.s3Prefix = config.s3Prefix || "training-data/";
         this.s3Region = config.s3Region || "eu-central-1";
-        // SECURITY: Credentials from environment variables only - never from node config
-        // This prevents accidental exposure of credentials in flow exports
-        this.s3AccessKeyId = process.env.AWS_ACCESS_KEY_ID || "";
-        this.s3SecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY || "";
+        // SECURITY: S3 keys live in Node-RED credentials (encrypted, never part
+        // of a flow export). Resolution order: node credentials → the
+        // AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY environment variables →
+        // the AWS SDK default chain (shared config, IAM role, IRSA, …).
+        const credentials = node.credentials || {};
+        const credAccessKeyId = typeof credentials.s3AccessKeyId === "string" ? credentials.s3AccessKeyId.trim() : "";
+        const credSecretAccessKey =
+            typeof credentials.s3SecretAccessKey === "string" ? credentials.s3SecretAccessKey.trim() : "";
+        const useNodeCredentials = credAccessKeyId.length > 0 && credSecretAccessKey.length > 0;
+        const s3AccessKeyId = useNodeCredentials ? credAccessKeyId : process.env.AWS_ACCESS_KEY_ID || "";
+        const s3SecretAccessKey = useNodeCredentials ? credSecretAccessKey : process.env.AWS_SECRET_ACCESS_KEY || "";
 
-        // Warn if credentials were provided in config (deprecated)
+        // Keys saved by an older version of the editor sit in the flow file in
+        // plain text. They were never used and still are not.
         if (config.s3AccessKeyId || config.s3SecretAccessKey) {
             node.warn(
-                "S3 credentials in node config are deprecated and ignored for security. Use AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables instead."
+                "S3 credentials stored in the node config (plain text in flows.json) are ignored. Open the node, " +
+                    "re-enter them in the credential fields and deploy — or use the AWS_ACCESS_KEY_ID / " +
+                    "AWS_SECRET_ACCESS_KEY environment variables."
             );
         }
 
         // Data quality settings
         this.validateData = config.validateData !== false;
-        this.removeOutliers = config.removeOutliers === true;
-        this.outlierThreshold = clampFloat(config.outlierThreshold, 0.1, 1000, 5.0); // Z-score threshold
 
         // ========================================
         // State
@@ -134,22 +209,45 @@ module.exports = function (RED) {
 
         // S3 client
         this.s3Client = null;
-        if (this.s3Enabled && S3Client && this.s3AccessKeyId && this.s3SecretAccessKey) {
+        if (this.s3Enabled && !S3Client) {
+            node.warn("S3 upload enabled but @aws-sdk/client-s3 not installed. Run: npm install @aws-sdk/client-s3");
+        } else if (this.s3Enabled && !this.s3Bucket) {
+            node.warn("S3 upload enabled but no bucket configured — nothing will be uploaded.");
+        } else if (this.s3Enabled) {
             try {
-                this.s3Client = new S3Client({
-                    region: this.s3Region,
-                    credentials: {
-                        accessKeyId: this.s3AccessKeyId,
-                        secretAccessKey: this.s3SecretAccessKey
-                    }
-                });
-                node.log("S3 client initialized for bucket: " + this.s3Bucket);
+                const clientConfig = { region: this.s3Region };
+                if (s3AccessKeyId && s3SecretAccessKey) {
+                    clientConfig.credentials = { accessKeyId: s3AccessKeyId, secretAccessKey: s3SecretAccessKey };
+                    node.log(
+                        "S3 client initialized for bucket: " +
+                            this.s3Bucket +
+                            " (" +
+                            (useNodeCredentials ? "node credentials" : "environment credentials") +
+                            ")"
+                    );
+                } else {
+                    // No explicit keys: let the SDK resolve them (IAM role,
+                    // shared config, …). A failure surfaces on the first upload.
+                    node.log("S3 client initialized for bucket: " + this.s3Bucket + " (AWS default credential chain)");
+                }
+                this.s3Client = new S3Client(clientConfig);
             } catch (err) {
                 node.warn("Failed to initialize S3 client: " + err.message);
             }
-        } else if (this.s3Enabled && !S3Client) {
-            node.warn("S3 upload enabled but @aws-sdk/client-s3 not installed. Run: npm install @aws-sdk/client-s3");
         }
+
+        // Export / auto-save bookkeeping.
+        // exportChain serialises exports so two never write at the same time.
+        let exportChain = Promise.resolve();
+        let lastExportStamp = "";
+        let exportSeq = 0;
+        let autoSaveFailures = 0;
+        let autoSaveNotBefore = 0;
+        // Streaming mode: appends are chained so lines land in arrival order,
+        // and the file size is tracked for rotation (null = not measured yet).
+        let streamChain = Promise.resolve();
+        let streamBytes = null;
+        let streamWarned = false;
 
         // Initial status
         updateStatus();
@@ -159,7 +257,18 @@ module.exports = function (RED) {
         // ========================================
 
         function updateStatus() {
-            if (node.isPaused) {
+            if (Date.now() < autoSaveNotBefore) {
+                node.status({
+                    fill: "red",
+                    shape: "ring",
+                    text:
+                        "export failed - retry in " +
+                        Math.ceil((autoSaveNotBefore - Date.now()) / 1000) +
+                        "s - " +
+                        node.dataBuffer.length +
+                        " buffered"
+                });
+            } else if (node.isPaused) {
                 node.status({ fill: "yellow", shape: "ring", text: "paused - " + node.dataBuffer.length + " samples" });
             } else if (node.dataBuffer.length >= node.bufferSize) {
                 node.status({ fill: "yellow", shape: "dot", text: "buffer full - " + node.dataBuffer.length });
@@ -224,15 +333,17 @@ module.exports = function (RED) {
             if (node.outputPath) {
                 const sanitized = sanitizePath(node.outputPath);
                 if (sanitized) {
-                    const fullPath = path.join(baseDir, sanitized);
-                    // SECURITY: Ensure the resolved path is still within baseDir
-                    const resolvedPath = path.resolve(fullPath);
-                    const resolvedBase = path.resolve(baseDir);
-                    if (!resolvedPath.startsWith(resolvedBase)) {
-                        node.warn("Output path attempted directory traversal. Using base directory.");
+                    // SECURITY: the resolved path must stay inside baseDir
+                    // (path-validator also rejects symlinks pointing out of it).
+                    const checked = validatePath(path.join(baseDir, sanitized), {
+                        allowedBases: getAllowedBases(RED),
+                        base: baseDir
+                    });
+                    if (!checked.ok) {
+                        node.warn("Output path rejected (" + checked.reason + "). Using base directory.");
                         return baseDir;
                     }
-                    return fullPath;
+                    return checked.resolved;
                 }
             }
             return baseDir;
@@ -260,7 +371,9 @@ module.exports = function (RED) {
 
         let parseWarned = false;
         function safeParseFloat(v, fieldName) {
-            const parsed = parseFloat(v);
+            // A date-shaped string is not a number, even though parseFloat
+            // would read "2024-05-01" as 2024.
+            const parsed = isIsoDateLike(v) ? NaN : parseFloat(v);
             if (isNaN(parsed)) {
                 if (!parseWarned) {
                     node.warn(
@@ -300,7 +413,7 @@ module.exports = function (RED) {
                     featData.forEach(function (v, i) {
                         features["feature_" + i] = safeParseFloat(v, "feature_" + i);
                     });
-                } else if (typeof featData === "object") {
+                } else if (featData && typeof featData === "object") {
                     Object.keys(featData).forEach(function (key) {
                         features[key] = safeParseFloat(featData[key], key);
                         values.push(features[key]);
@@ -318,7 +431,10 @@ module.exports = function (RED) {
                 } else if (typeof msg.payload === "object" && msg.payload !== null) {
                     Object.keys(msg.payload).forEach(function (key) {
                         const val = msg.payload[key];
-                        if (typeof val === "number" || (typeof val === "string" && !isNaN(parseFloat(val)))) {
+                        if (
+                            typeof val === "number" ||
+                            (typeof val === "string" && !isIsoDateLike(val) && !isNaN(parseFloat(val)))
+                        ) {
                             features[key] = safeParseFloat(val, key);
                             values.push(features[key]);
                         }
@@ -482,9 +598,9 @@ module.exports = function (RED) {
             return summary;
         }
 
-        function getLabelDistribution() {
+        function getLabelDistribution(data) {
             const distribution = {};
-            node.dataBuffer.forEach(function (sample) {
+            (data || node.dataBuffer).forEach(function (sample) {
                 const label = sample.label;
                 if (label !== null && label !== undefined) {
                     distribution[label] = (distribution[label] || 0) + 1;
@@ -522,57 +638,112 @@ module.exports = function (RED) {
         // Export Functions
         // ========================================
 
-        async function exportToCSV(data, filename) {
-            if (data.length === 0) return null;
+        // Unique per-export file stem. Millisecond resolution plus a sequence
+        // number for exports landing in the same millisecond — a second-
+        // resolution name let fast auto-saves overwrite one another.
+        function nextExportStem() {
+            const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
+            if (stamp === lastExportStamp) {
+                exportSeq++;
+            } else {
+                lastExportStamp = stamp;
+                exportSeq = 0;
+            }
+            return node.datasetName + "_" + stamp + (exportSeq > 0 ? "_" + exportSeq : "");
+        }
 
-            const outputDir = ensureOutputDir();
+        // Stream `chunks` (an iterable of strings) to `filePath`, gzipped when
+        // asked. Written to a .part file first and renamed, so a failed export
+        // never leaves a truncated dataset behind. Returns the final path.
+        async function writeChunks(filePath, chunks, compress) {
+            const target = safeDataPath(RED, compress ? filePath + ".gz" : filePath);
+            const partial = safeDataPath(RED, target + ".part");
+            const stages = [Readable.from(chunks, { objectMode: false })];
+            if (compress) stages.push(zlib.createGzip());
+            stages.push(fs.createWriteStream(partial));
+            try {
+                await pipeline(stages);
+                await fs.promises.rename(partial, target);
+            } catch (err) {
+                fs.promises.unlink(partial).catch(function () {});
+                throw err;
+            }
+            return target;
+        }
+
+        function shouldCompress(data) {
+            return node.compressionEnabled && data.length >= node.compressionThreshold;
+        }
+
+        // Time-series samples carry a window: an array of per-step value arrays.
+        function isWindowSample(sample) {
+            return !!sample && Array.isArray(sample.features);
+        }
+
+        function* csvChunks(data) {
+            const windowed = isWindowSample(data[0]);
             let headers = node.includeTimestamp ? ["timestamp"] : [];
-            headers = headers.concat(node.featureNames);
+            let steps = 0;
+            let width = 0;
+            if (windowed) {
+                // One row per window, flattened step by step: t0_a, t0_b, t1_a, …
+                steps = data.reduce(function (m, s) {
+                    return Math.max(m, isWindowSample(s) ? s.features.length : 0);
+                }, 0);
+                width = node.featureNames.length || (data[0].features[0] ? data[0].features[0].length : 0);
+                for (let t = 0; t < steps; t++) {
+                    for (let j = 0; j < width; j++) {
+                        headers.push("t" + t + "_" + (node.featureNames[j] || "feature_" + j));
+                    }
+                }
+            } else {
+                headers = headers.concat(node.featureNames);
+            }
             if (node.labelMode !== "unlabeled") {
                 headers.push("label");
                 headers.push("severity");
             }
+            yield headers.map(csvCell).join(",") + "\n";
 
-            const lines = [headers.join(",")];
-
-            data.forEach(function (sample) {
+            let lines = [];
+            for (const sample of data) {
                 const row = [];
                 if (node.includeTimestamp) {
                     row.push(sample.timestamp);
                 }
-                node.featureNames.forEach(function (name) {
-                    row.push(sample.features[name] !== undefined ? sample.features[name] : "");
-                });
-                if (node.labelMode !== "unlabeled") {
-                    row.push(sample.label !== null ? sample.label : "");
-                    row.push(sample.severity !== undefined ? sample.severity : "");
+                if (windowed) {
+                    const win = isWindowSample(sample) ? sample.features : [];
+                    for (let t = 0; t < steps; t++) {
+                        const step = Array.isArray(win[t]) ? win[t] : [];
+                        for (let j = 0; j < width; j++) row.push(step[j]);
+                    }
+                } else {
+                    node.featureNames.forEach(function (name) {
+                        row.push(sample.features[name]);
+                    });
                 }
-                lines.push(row.join(","));
-            });
-
-            const content = lines.join("\n");
-            let filePath = path.join(outputDir, filename);
-
-            // Compress if enabled and over threshold
-            if (node.compressionEnabled && data.length >= node.compressionThreshold) {
-                const compressed = await gzip(Buffer.from(content, "utf8"));
-                filePath += ".gz";
-                fs.writeFileSync(filePath, compressed);
-            } else {
-                fs.writeFileSync(filePath, content, "utf8");
+                if (node.labelMode !== "unlabeled") {
+                    row.push(sample.label);
+                    row.push(sample.severity);
+                }
+                lines.push(row.map(csvCell).join(","));
+                if (lines.length >= EXPORT_CHUNK_ROWS) {
+                    yield lines.join("\n") + "\n";
+                    lines = [];
+                }
             }
-
-            return filePath;
+            if (lines.length > 0) yield lines.join("\n");
         }
 
-        async function exportToJSONL(data, filename) {
-            if (data.length === 0) return null;
+        function sampleVector(sample) {
+            return sample.values || (isWindowSample(sample) ? sample.features : Object.values(sample.features));
+        }
 
-            const outputDir = ensureOutputDir();
-            const lines = data.map(function (sample) {
-                const obj = {
-                    features: sample.values || Object.values(sample.features)
-                };
+        function* jsonlChunks(data) {
+            let lines = [];
+            for (let i = 0; i < data.length; i++) {
+                const sample = data[i];
+                const obj = { features: sampleVector(sample) };
                 if (node.includeTimestamp) {
                     obj.timestamp = sample.timestamp;
                 }
@@ -582,67 +753,61 @@ module.exports = function (RED) {
                 if (sample.severity !== undefined && sample.severity !== 0) {
                     obj.severity = sample.severity;
                 }
-                return JSON.stringify(obj);
-            });
-
-            const content = lines.join("\n");
-            let filePath = path.join(outputDir, filename);
-
-            if (node.compressionEnabled && data.length >= node.compressionThreshold) {
-                const compressed = await gzip(Buffer.from(content, "utf8"));
-                filePath += ".gz";
-                fs.writeFileSync(filePath, compressed);
-            } else {
-                fs.writeFileSync(filePath, content, "utf8");
+                lines.push(JSON.stringify(obj));
+                if (lines.length >= EXPORT_CHUNK_ROWS && i < data.length - 1) {
+                    yield lines.join("\n") + "\n";
+                    lines = [];
+                }
             }
+            if (lines.length > 0) yield lines.join("\n");
+        }
 
-            return filePath;
+        function* jsonChunks(data) {
+            const info = {
+                name: node.datasetName,
+                created: new Date().toISOString(),
+                samples: data.length,
+                features: node.featureNames,
+                classes: Array.from(node.labelClasses),
+                featureDimension: node.featureNames.length,
+                statistics: getStatisticsSummary()
+            };
+            yield '{\n  "datasetInfo": ' + JSON.stringify(info, null, 2).replace(/\n/g, "\n  ") + ',\n  "data": [\n';
+            let lines = [];
+            for (let i = 0; i < data.length; i++) {
+                const sample = data[i];
+                const obj = { x: sampleVector(sample) };
+                if (node.labelMode !== "unlabeled" && sample.label !== null) {
+                    obj.y = sample.label;
+                }
+                if (sample.severity !== undefined && sample.severity !== 0) {
+                    obj.severity = sample.severity;
+                }
+                lines.push("    " + JSON.stringify(obj) + (i < data.length - 1 ? "," : ""));
+                if (lines.length >= EXPORT_CHUNK_ROWS) {
+                    yield lines.join("\n") + "\n";
+                    lines = [];
+                }
+            }
+            yield (lines.length > 0 ? lines.join("\n") + "\n" : "") + "  ]\n}";
+        }
+
+        async function exportToCSV(data, filename) {
+            if (data.length === 0) return null;
+            return writeChunks(path.join(ensureOutputDir(), filename), csvChunks(data), shouldCompress(data));
+        }
+
+        async function exportToJSONL(data, filename) {
+            if (data.length === 0) return null;
+            return writeChunks(path.join(ensureOutputDir(), filename), jsonlChunks(data), shouldCompress(data));
         }
 
         async function exportToJSON(data, filename) {
             if (data.length === 0) return null;
-
-            const outputDir = ensureOutputDir();
-
-            const output = {
-                datasetInfo: {
-                    name: node.datasetName,
-                    created: new Date().toISOString(),
-                    samples: data.length,
-                    features: node.featureNames,
-                    classes: Array.from(node.labelClasses),
-                    featureDimension: node.featureNames.length,
-                    statistics: getStatisticsSummary()
-                },
-                data: data.map(function (sample) {
-                    const obj = {
-                        x: sample.values || Object.values(sample.features)
-                    };
-                    if (node.labelMode !== "unlabeled" && sample.label !== null) {
-                        obj.y = sample.label;
-                    }
-                    if (sample.severity !== undefined && sample.severity !== 0) {
-                        obj.severity = sample.severity;
-                    }
-                    return obj;
-                })
-            };
-
-            const content = JSON.stringify(output, null, 2);
-            let filePath = path.join(outputDir, filename);
-
-            if (node.compressionEnabled && data.length >= node.compressionThreshold) {
-                const compressed = await gzip(Buffer.from(content, "utf8"));
-                filePath += ".gz";
-                fs.writeFileSync(filePath, compressed);
-            } else {
-                fs.writeFileSync(filePath, content, "utf8");
-            }
-
-            return filePath;
+            return writeChunks(path.join(ensureOutputDir(), filename), jsonChunks(data), shouldCompress(data));
         }
 
-        async function exportMetadata(filename) {
+        async function exportMetadata(filename, data) {
             const outputDir = ensureOutputDir();
 
             const metadata = {
@@ -651,7 +816,7 @@ module.exports = function (RED) {
                     created: new Date().toISOString(),
                     sessionStart: new Date(node.sessionStart).toISOString(),
                     totalSamples: node.sampleCount,
-                    exportedSamples: node.dataBuffer.length
+                    exportedSamples: data.length
                 },
                 features: {
                     names: node.featureNames,
@@ -661,7 +826,7 @@ module.exports = function (RED) {
                 labels: {
                     mode: node.labelMode,
                     classes: Array.from(node.labelClasses),
-                    distribution: getLabelDistribution()
+                    distribution: getLabelDistribution(data)
                 },
                 config: {
                     mode: node.mode,
@@ -672,13 +837,13 @@ module.exports = function (RED) {
                 },
                 dataQuality: {
                     totalCollected: node.sampleCount,
-                    exported: node.dataBuffer.length,
+                    exported: data.length,
                     validationEnabled: node.validateData
                 }
             };
 
-            const filePath = path.join(outputDir, filename);
-            fs.writeFileSync(filePath, JSON.stringify(metadata, null, 2), "utf8");
+            const filePath = safeDataPath(RED, path.join(outputDir, filename));
+            await fs.promises.writeFile(filePath, JSON.stringify(metadata, null, 2), "utf8");
 
             return filePath;
         }
@@ -688,7 +853,7 @@ module.exports = function (RED) {
                 throw new Error("S3 client not configured");
             }
 
-            const fileContent = fs.readFileSync(filePath);
+            const fileContent = await fs.promises.readFile(safeDataPath(RED, filePath));
             let contentType = "application/octet-stream";
 
             if (filePath.endsWith(".csv")) contentType = "text/csv";
@@ -707,19 +872,97 @@ module.exports = function (RED) {
             return "s3://" + node.s3Bucket + "/" + node.s3Prefix + s3Key;
         }
 
-        async function performExport(msg) {
-            if (node.dataBuffer.length === 0) {
-                return {
-                    success: false,
-                    error: "No data to export",
-                    samples: 0
-                };
-            }
+        // Files this node produced for this dataset: timestamped exports
+        // (incl. split / metadata / .gz variants) and rotated stream files —
+        // never the live <dataset>_stream.jsonl, never another dataset's files.
+        function isOwnDatasetFile(name) {
+            const prefix = node.datasetName + "_";
+            if (!name.startsWith(prefix)) return false;
+            const rest = name.slice(prefix.length);
+            return /^(stream_)?\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(-\d{3})?(_\d+)?(_train|_val|_test|_metadata)?\.(csv|jsonl|json)(\.gz)?$/.test(
+                rest
+            );
+        }
 
-            const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-            const baseFilename = node.datasetName + "_" + timestamp;
+        // Retention: with maxFiles > 0, delete this dataset's oldest files so
+        // at most maxFiles remain. Best effort — never fails an export.
+        async function pruneOldFiles() {
+            if (!(node.maxFiles > 0)) return;
+            try {
+                const dir = getOutputDir();
+                const names = (await fs.promises.readdir(dir)).filter(isOwnDatasetFile);
+                if (names.length <= node.maxFiles) return;
+                const entries = [];
+                for (const name of names) {
+                    const filePath = safeDataPath(RED, path.join(dir, name));
+                    const stat = await fs.promises.stat(filePath);
+                    if (stat.isFile()) entries.push({ filePath: filePath, name: name, mtime: stat.mtimeMs });
+                }
+                entries.sort(function (a, b) {
+                    return a.mtime - b.mtime || (a.name < b.name ? -1 : 1);
+                });
+                const excess = entries.slice(0, Math.max(0, entries.length - node.maxFiles));
+                for (const entry of excess) {
+                    await fs.promises.unlink(entry.filePath);
+                }
+                if (excess.length > 0) {
+                    node.log("Retention: removed " + excess.length + " old file(s) (maxFiles=" + node.maxFiles + ")");
+                }
+            } catch (err) {
+                node.warn("Retention cleanup failed: " + err.message);
+            }
+        }
+
+        // Streaming mode: append one line, in arrival order, rotating the file
+        // once it would exceed maxStreamFileMB.
+        function appendToStream(line) {
+            streamChain = streamChain
+                .then(async function () {
+                    const outputDir = ensureOutputDir();
+                    const streamFile = safeDataPath(RED, path.join(outputDir, node.datasetName + "_stream.jsonl"));
+                    const bytes = Buffer.byteLength(line, "utf8");
+                    if (streamBytes === null) {
+                        try {
+                            streamBytes = (await fs.promises.stat(streamFile)).size;
+                        } catch (err) {
+                            streamBytes = 0;
+                        }
+                    }
+                    const limit = node.maxStreamFileMB * 1024 * 1024;
+                    if (limit > 0 && streamBytes > 0 && streamBytes + bytes > limit) {
+                        const rotated = safeDataPath(
+                            RED,
+                            path.join(
+                                outputDir,
+                                nextExportStem().replace(node.datasetName + "_", node.datasetName + "_stream_") +
+                                    ".jsonl"
+                            )
+                        );
+                        await fs.promises.rename(streamFile, rotated);
+                        streamBytes = 0;
+                        await pruneOldFiles();
+                    }
+                    await fs.promises.appendFile(streamFile, line, "utf8");
+                    streamBytes += bytes;
+                    streamWarned = false;
+                })
+                .catch(function (err) {
+                    // The size is unknown after a failure; re-measure next time.
+                    streamBytes = null;
+                    if (!streamWarned) {
+                        streamWarned = true;
+                        node.warn("Failed to append to stream file: " + err.message);
+                    }
+                });
+        }
+
+        // Write one batch to disk (and S3). Never throws: failures come back
+        // as { success: false }.
+        async function writeBatch(batch) {
+            const baseFilename = nextExportStem();
             const exportedFiles = [];
             const s3Urls = [];
+            const s3Errors = [];
 
             try {
                 node.status({ fill: "yellow", shape: "dot", text: "exporting..." });
@@ -730,9 +973,9 @@ module.exports = function (RED) {
                     node.splitRatio &&
                     (node.splitRatio.train < 1 || node.splitRatio.val > 0 || node.splitRatio.test > 0)
                 ) {
-                    splits = splitData(node.dataBuffer, node.splitRatio);
+                    splits = splitData(batch, node.splitRatio);
                 } else {
-                    splits.train = node.dataBuffer;
+                    splits.train = batch;
                 }
 
                 // Export each split
@@ -766,6 +1009,7 @@ module.exports = function (RED) {
                                 const s3Url = await uploadToS3(filePath, s3Key);
                                 s3Urls.push(s3Url);
                             } catch (s3Err) {
+                                s3Errors.push(s3Err.message);
                                 node.warn("S3 upload failed: " + s3Err.message);
                             }
                         }
@@ -774,7 +1018,7 @@ module.exports = function (RED) {
 
                 // Export metadata
                 if (node.includeMetadata) {
-                    const metaPath = await exportMetadata(baseFilename + "_metadata.json");
+                    const metaPath = await exportMetadata(baseFilename + "_metadata.json", batch);
                     exportedFiles.push(metaPath);
 
                     if (node.s3Enabled && node.s3Client) {
@@ -782,21 +1026,24 @@ module.exports = function (RED) {
                             const s3Url = await uploadToS3(metaPath, path.basename(metaPath));
                             s3Urls.push(s3Url);
                         } catch (s3Err) {
+                            s3Errors.push(s3Err.message);
                             node.warn("S3 metadata upload failed: " + s3Err.message);
                         }
                     }
                 }
 
+                await pruneOldFiles();
+
                 const result = {
                     success: true,
-                    samples: node.dataBuffer.length,
+                    samples: batch.length,
                     files: exportedFiles,
                     splits: {
                         train: splits.train ? splits.train.length : 0,
                         val: splits.val ? splits.val.length : 0,
                         test: splits.test ? splits.test.length : 0
                     },
-                    labelDistribution: getLabelDistribution(),
+                    labelDistribution: getLabelDistribution(batch),
                     statistics: getStatisticsSummary(),
                     features: node.featureNames,
                     classes: Array.from(node.labelClasses)
@@ -805,23 +1052,55 @@ module.exports = function (RED) {
                 if (s3Urls.length > 0) {
                     result.s3Urls = s3Urls;
                 }
-
-                // Clear buffer after successful export if autoSave
-                if (msg && msg.clearAfterExport !== false) {
-                    node.dataBuffer = [];
+                if (s3Errors.length > 0) {
+                    result.s3Errors = s3Errors;
                 }
-
-                updateStatus();
                 return result;
             } catch (err) {
                 node.error("Export failed: " + err.message);
-                updateStatus();
                 return {
                     success: false,
                     error: err.message,
-                    samples: node.dataBuffer.length
+                    samples: batch.length
                 };
             }
+        }
+
+        // Export the current buffer. The batch is taken out of the buffer
+        // SYNCHRONOUSLY (before the first await), so samples arriving while the
+        // files are being written start a fresh buffer instead of being wiped
+        // by the export that finishes — and cannot trigger a second export of
+        // the same data. If the write fails the batch is put back.
+        function performExport(msg) {
+            if (node.dataBuffer.length === 0) {
+                return Promise.resolve({
+                    success: false,
+                    error: "No data to export",
+                    samples: 0
+                });
+            }
+
+            const clear = !!(msg && msg.clearAfterExport !== false);
+            const batch = clear ? node.dataBuffer : node.dataBuffer.slice();
+            if (clear) {
+                node.dataBuffer = [];
+            }
+
+            const run = exportChain.then(function () {
+                return writeBatch(batch);
+            });
+            exportChain = run.then(
+                function () {},
+                function () {}
+            );
+            return run.then(function (result) {
+                if (!result.success && clear) {
+                    node.dataBuffer = batch.concat(node.dataBuffer);
+                    enforceBufferCap();
+                }
+                updateStatus();
+                return result;
+            });
         }
 
         // ========================================
@@ -861,6 +1140,12 @@ module.exports = function (RED) {
                             node.labelClasses.clear();
                             node.sampleCount = 0;
                             node.currentRul = node.rulStartValue;
+                            // Forget the locked feature schema too, otherwise a
+                            // cleared collector rejects any differently shaped data.
+                            node.featureNames = [];
+                            bufferCapWarned = false;
+                            autoSaveFailures = 0;
+                            autoSaveNotBefore = 0;
                             updateStatus();
                             send({ payload: { success: true, action: "clear" }, topic: "control" });
                             done();
@@ -896,7 +1181,7 @@ module.exports = function (RED) {
                             return;
 
                         case "resetRul":
-                            node.currentRul = msg.rulValue !== undefined ? msg.rulValue : node.rulStartValue;
+                            node.currentRul = clampFloat(msg.rulValue, 0, 1e12, node.rulStartValue);
                             send({
                                 payload: { success: true, action: "resetRul", rul: node.currentRul },
                                 topic: "control"
@@ -960,22 +1245,15 @@ module.exports = function (RED) {
 
                 // Handle based on mode
                 if (node.mode === "streaming") {
-                    // Streaming mode: immediately append to file (async)
-                    const outputDir = ensureOutputDir();
-                    const streamFile = path.join(outputDir, node.datasetName + "_stream.jsonl");
-
-                    const line =
+                    // Streaming mode: immediately append to file (async, ordered)
+                    appendToStream(
                         JSON.stringify({
                             timestamp: sample.timestamp,
                             features: values,
                             label: label,
                             severity: severity
-                        }) + "\n";
-
-                    // PERFORMANCE: Use async file I/O to avoid blocking the event loop
-                    fs.promises.appendFile(streamFile, line, "utf8").catch(function (err) {
-                        node.warn("Failed to append to stream file: " + err.message);
-                    });
+                        }) + "\n"
+                    );
                     node.dataBuffer.push(sample); // Also keep in buffer for stats
 
                     // Trim buffer to avoid memory issues
@@ -1000,7 +1278,10 @@ module.exports = function (RED) {
                         enforceBufferCap();
 
                         // Slide window with overlap
-                        const slideAmount = Math.floor(node.windowSize * (1 - node.windowOverlap / 100));
+                        // Always advance by at least one step: a small window
+                        // with a high overlap rounds to 0, which would never
+                        // slide and grow the window without bound.
+                        const slideAmount = Math.max(1, Math.floor(node.windowSize * (1 - node.windowOverlap / 100)));
                         node.windowBuffer = node.windowBuffer.slice(slideAmount);
                         node.windowLabels = node.windowLabels.slice(slideAmount);
                     }
@@ -1010,16 +1291,25 @@ module.exports = function (RED) {
                     enforceBufferCap();
                 }
 
-                // Auto-save when buffer is full
-                if (node.autoSave && node.dataBuffer.length >= node.bufferSize) {
+                // Auto-save when buffer is full. After a failed export, wait out
+                // a backoff instead of re-running the whole export (and logging
+                // an error) on every single incoming message.
+                if (node.autoSave && node.dataBuffer.length >= node.bufferSize && Date.now() >= autoSaveNotBefore) {
                     const exportResult = await performExport({ clearAfterExport: true });
                     if (exportResult.success) {
+                        autoSaveFailures = 0;
+                        autoSaveNotBefore = 0;
                         node.log(
                             "Auto-saved " +
                                 exportResult.samples +
                                 " samples to " +
                                 (exportResult.files || []).join(", ")
                         );
+                    } else {
+                        autoSaveFailures++;
+                        autoSaveNotBefore =
+                            Date.now() +
+                            Math.min(AUTOSAVE_RETRY_MAX_MS, AUTOSAVE_RETRY_BASE_MS * Math.pow(2, autoSaveFailures - 1));
                     }
                 }
 
@@ -1033,6 +1323,10 @@ module.exports = function (RED) {
 
         // Cleanup on close
         node.on("close", async function (removed, done) {
+            // Let queued stream appends and any running export finish first.
+            await streamChain;
+            await exportChain;
+
             // Save remaining data if configured
             if (node.flushOnDeploy && node.dataBuffer.length > 0) {
                 try {
@@ -1054,7 +1348,12 @@ module.exports = function (RED) {
         });
     }
 
-    RED.nodes.registerType("training-data-collector", TrainingDataCollectorNode);
+    RED.nodes.registerType("training-data-collector", TrainingDataCollectorNode, {
+        credentials: {
+            s3AccessKeyId: { type: "text" },
+            s3SecretAccessKey: { type: "password" }
+        }
+    });
 
     // ========================================
     // HTTP Admin Endpoints
@@ -1084,16 +1383,23 @@ module.exports = function (RED) {
                         );
                     })
                     .map(function (f) {
-                        const filePath = path.join(dataDir, f);
-                        const stats = fs.statSync(filePath);
+                        // Skip anything that does not resolve inside dataDir
+                        // (e.g. a symlink pointing elsewhere).
+                        const checked = validatePath(path.join(dataDir, f), {
+                            allowedBases: getAllowedBases(RED),
+                            base: dataDir
+                        });
+                        if (!checked.ok) return null;
+                        const stats = fs.statSync(checked.resolved);
                         return {
                             name: f,
-                            path: filePath,
+                            path: path.join(dataDir, f),
                             size: stats.size,
                             modified: stats.mtime,
                             compressed: f.endsWith(".gz")
                         };
-                    });
+                    })
+                    .filter(Boolean);
 
                 res.json({ datasets: datasets, path: dataDir });
             } catch (err) {
@@ -1126,18 +1432,18 @@ module.exports = function (RED) {
                 const filename = path.basename(req.params.filename || "");
                 const filePath = path.join(dataDir, filename);
 
-                // Defence in depth: ensure the resolved path stays within dataDir.
-                const resolvedPath = path.resolve(filePath);
-                const resolvedBase = path.resolve(dataDir);
-                if (resolvedPath !== resolvedBase && !resolvedPath.startsWith(resolvedBase + path.sep)) {
+                // Defence in depth: the resolved path (symlinks included) must
+                // stay within dataDir.
+                const checked = validatePath(filePath, { allowedBases: getAllowedBases(RED), base: dataDir });
+                if (!filename || !checked.ok) {
                     return res.status(400).json({ error: "Invalid filename" });
                 }
 
-                if (!filename || !fs.existsSync(filePath)) {
+                if (!fs.existsSync(checked.resolved)) {
                     return res.status(404).json({ error: "File not found" });
                 }
 
-                res.download(filePath);
+                res.download(checked.resolved, filename);
             } catch (err) {
                 res.status(500).json({ error: err.message });
             }

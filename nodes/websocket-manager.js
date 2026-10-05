@@ -89,6 +89,9 @@ class WebSocketManager extends EventEmitter {
         this.clientCounter = 0;
         this.heartbeatTimer = null;
         this.isRunning = false;
+        // In-flight start(): several nodes share this manager and call start()
+        // in the same tick, long before 'listening' flips isRunning.
+        this.startPromise = null;
 
         // Statistics
         this.stats = {
@@ -112,8 +115,13 @@ class WebSocketManager extends EventEmitter {
         if (this.isRunning) {
             return Promise.resolve();
         }
+        // A start is already under way: hand every caller the same promise
+        // instead of opening a second server on the same port (EADDRINUSE).
+        if (this.startPromise) {
+            return this.startPromise;
+        }
 
-        return new Promise((resolve, reject) => {
+        this.startPromise = new Promise((resolve, reject) => {
             try {
                 const wsServerOptions = {
                     port: this.port,
@@ -131,17 +139,19 @@ class WebSocketManager extends EventEmitter {
                         return this.allowedOrigins.indexOf(origin) !== -1;
                     };
                 }
-                this.server = new WebSocketServer(wsServerOptions);
+                const server = new WebSocketServer(wsServerOptions);
+                this.server = server;
 
-                this.server.on("listening", () => {
+                server.on("listening", () => {
                     this.isRunning = true;
+                    this.startPromise = null;
                     this.stats.startTime = Date.now();
                     this._startHeartbeat();
                     this.emit("started", { port: this.port, path: this.path });
                     resolve();
                 });
 
-                this.server.on("connection", (ws, req) => {
+                server.on("connection", (ws, req) => {
                     if (!this._authorize(ws, req)) {
                         // _authorize already closed the socket and bumped stats.errors
                         return;
@@ -149,17 +159,33 @@ class WebSocketManager extends EventEmitter {
                     this._handleConnection(ws, req);
                 });
 
-                this.server.on("error", (err) => {
+                server.on("error", (err) => {
                     this.stats.errors++;
-                    this.emit("error", err);
                     if (!this.isRunning) {
+                        // Failed to come up (port in use, EACCES…). Settle the
+                        // caller first and drop the dead server so a later
+                        // start() can try again.
+                        if (this.server === server) this.server = null;
+                        this.startPromise = null;
+                        try {
+                            server.close();
+                        } catch (_) {
+                            /* never listened */
+                        }
                         reject(err);
+                    }
+                    // A bare 'error' emit throws when nobody listens, which
+                    // would turn a busy port into a crash of the whole runtime.
+                    if (this.listenerCount("error") > 0) {
+                        this.emit("error", err);
                     }
                 });
             } catch (err) {
+                this.startPromise = null;
                 reject(err);
             }
         });
+        return this.startPromise;
     }
 
     /**
@@ -194,7 +220,20 @@ class WebSocketManager extends EventEmitter {
      */
     _checkToken(req) {
         const presented = this._extractToken(req);
-        return !!presented && timingSafeEqualStrings(presented, this.authToken);
+        if (presented && timingSafeEqualStrings(presented, this.authToken)) return true;
+        // A client may use Sec-WebSocket-Protocol for a real subprotocol and
+        // carry the token in the URL — the header must not shadow the query.
+        const queryToken = this._extractQueryToken(req);
+        return !!queryToken && timingSafeEqualStrings(queryToken, this.authToken);
+    }
+
+    _extractQueryToken(req) {
+        if (!req || !req.url) return null;
+        try {
+            return new URL(req.url, "ws://localhost").searchParams.get("token");
+        } catch (_) {
+            return null;
+        }
     }
 
     _authorize(ws, req) {
@@ -466,21 +505,33 @@ class WebSocketManager extends EventEmitter {
     }
 
     /**
-     * Get server statistics
+     * Get server statistics.
+     *
+     * The per-client list (with remote IP addresses) is only included on
+     * request: the plain statistics are also what any connected client gets
+     * back for a `{"type": "getStats"}` message, and peers have no business
+     * learning each other's addresses.
+     *
+     * @param {Object}  [options]
+     * @param {boolean} [options.includeClients=false]  Add `clients` (id, ip,
+     *        subscriptions, connectedAt, lastPing) — for server-side callers.
      */
-    getStats() {
-        return {
+    getStats(options) {
+        const stats = {
             ...this.stats,
             uptime: this.stats.startTime ? Date.now() - this.stats.startTime : 0,
-            isRunning: this.isRunning,
-            clients: Array.from(this.clients.entries()).map(([id, client]) => ({
+            isRunning: this.isRunning
+        };
+        if (options && options.includeClients === true) {
+            stats.clients = Array.from(this.clients.entries()).map(([id, client]) => ({
                 id: id,
                 ip: client.ip,
                 subscriptions: Array.from(client.subscriptions),
                 connectedAt: client.connectedAt,
                 lastPing: client.lastPing
-            }))
-        };
+            }));
+        }
+        return stats;
     }
 
     /**
@@ -502,9 +553,12 @@ class WebSocketManager extends EventEmitter {
                 }
             }
             this.clients.clear();
+            this.startPromise = null;
 
             if (this.server) {
-                this.server.close(() => {
+                const server = this.server;
+                this.server = null;
+                server.close(() => {
                     this.isRunning = false;
                     this.emit("stopped");
                     resolve();

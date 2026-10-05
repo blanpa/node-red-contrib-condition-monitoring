@@ -32,6 +32,12 @@ module.exports = function (RED) {
         jpeg = null;
     }
 
+    const { clampInt, clampFloat } = require("./utils/config-validator");
+
+    // Upper bound for the target tensor side. 4096² × 3 channels is already
+    // ~50M values; anything larger is a typo, not a model input.
+    const MAX_TARGET_SIDE = 4096;
+
     const IMAGENET_MEAN = [0.485, 0.456, 0.406];
     const IMAGENET_STD = [0.229, 0.224, 0.225];
 
@@ -103,15 +109,15 @@ module.exports = function (RED) {
         node.inputProperty = config.inputProperty || "payload";
         node.outputProperty = config.outputProperty || "payload";
         node.shapeProperty = config.shapeProperty || "tensorShape";
-        node.targetWidth = parseInt(config.targetWidth, 10) || 224;
-        node.targetHeight = parseInt(config.targetHeight, 10) || 224;
+        node.targetWidth = clampInt(config.targetWidth, 1, MAX_TARGET_SIDE, 224);
+        node.targetHeight = clampInt(config.targetHeight, 1, MAX_TARGET_SIDE, 224);
         node.normalize = config.normalize || "0-1"; // 0-1 | 0-255 | -1-1 | imagenet | custom
         node.layout = config.layout || "nchw"; // nchw | nhwc
         node.channelOrder = config.channelOrder || "rgb"; // rgb | bgr
         node.grayscale = config.grayscale === true || config.grayscale === "true";
         node.resizeMode = config.resizeMode || "bilinear";
         node.keepImage = config.keepImage !== false && config.keepImage !== "false";
-        const f = (v, d) => (v !== undefined && v !== null && v !== "" && isFinite(parseFloat(v)) ? parseFloat(v) : d);
+        const f = (v, d) => clampFloat(v, -1e6, 1e6, d);
         node.mean = [f(config.meanR, 0), f(config.meanG, 0), f(config.meanB, 0)];
         node.std = [f(config.stdR, 1), f(config.stdG, 1), f(config.stdB, 1)];
 

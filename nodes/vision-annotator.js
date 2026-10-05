@@ -26,6 +26,14 @@ module.exports = function (RED) {
         PNG = null;
     }
 
+    const { clampInt, clampFloat } = require("./utils/config-validator");
+
+    // Largest canvas side accepted from config (blank-canvas fallback).
+    const MAX_CANVAS_SIDE = 8192;
+    // Editor thumbnails are published at most this often per node; a burst in
+    // between collapses to its latest frame.
+    const PREVIEW_MIN_INTERVAL_MS = 200;
+
     // --- 5x7 bitmap font (digits + symbols) for compact labels ---------------
     const FONT = {
         0: [0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e],
@@ -85,9 +93,11 @@ module.exports = function (RED) {
         this.data = data || new Uint8Array(width * height * 4);
     }
     Canvas.prototype.set = function (x, y, r, g, b, a) {
-        x = x | 0;
-        y = y | 0;
-        if (x < 0 || y < 0 || x >= this.width || y >= this.height) return;
+        // Math.trunc, not `| 0`: the bitwise form wraps values beyond 32 bits
+        // back into range (2**32 + 5 would paint column 5). NaN fails the test.
+        x = Math.trunc(x);
+        y = Math.trunc(y);
+        if (!(x >= 0 && y >= 0 && x < this.width && y < this.height)) return;
         const i = (y * this.width + x) * 4;
         const af = (a === undefined || a === null ? 255 : a) / 255;
         const d = this.data;
@@ -96,24 +106,83 @@ module.exports = function (RED) {
         d[i + 2] = Math.round(d[i + 2] * (1 - af) + b * af);
         d[i + 3] = Math.max(d[i + 3], a === undefined || a === null ? 255 : a);
     };
+    // Every primitive below clips its loops to the canvas first. Coordinates
+    // come straight from a model's output tensor; iterating over an unclipped
+    // (huge, or infinite) range would block — or never leave — the event loop.
+    const allFinite = function () {
+        for (let i = 0; i < arguments.length; i++) if (!Number.isFinite(arguments[i])) return false;
+        return true;
+    };
     Canvas.prototype.fillRect = function (x1, y1, x2, y2, c, a) {
-        for (let y = y1; y < y2; y++) for (let x = x1; x < x2; x++) this.set(x, y, c[0], c[1], c[2], a);
+        if (!allFinite(x1, y1, x2, y2)) return;
+        const xs = Math.max(0, x1),
+            xe = Math.min(this.width, x2);
+        const ys = Math.max(0, y1),
+            ye = Math.min(this.height, y2);
+        for (let y = ys; y < ye; y++) for (let x = xs; x < xe; x++) this.set(x, y, c[0], c[1], c[2], a);
     };
     Canvas.prototype.strokeRect = function (x1, y1, x2, y2, c, t) {
+        if (!allFinite(x1, y1, x2, y2)) return;
         t = t || 1;
+        const xs = Math.max(0, x1),
+            xe = Math.min(this.width - 1, x2);
+        const ys = Math.max(0, y1),
+            ye = Math.min(this.height - 1, y2);
         for (let k = 0; k < t; k++) {
-            for (let x = x1; x <= x2; x++) {
+            for (let x = xs; x <= xe; x++) {
                 this.set(x, y1 + k, c[0], c[1], c[2], 255);
                 this.set(x, y2 - k, c[0], c[1], c[2], 255);
             }
-            for (let y = y1; y <= y2; y++) {
+            for (let y = ys; y <= ye; y++) {
                 this.set(x1 + k, y, c[0], c[1], c[2], 255);
                 this.set(x2 - k, y, c[0], c[1], c[2], 255);
             }
         }
     };
+    // Liang–Barsky: clip segment (x0,y0)-(x1,y1) to [xmin,xmax]x[ymin,ymax].
+    // Returns the clipped endpoints, or null when nothing is inside.
+    function clipSegment(x0, y0, x1, y1, xmin, ymin, xmax, ymax) {
+        const dx = x1 - x0,
+            dy = y1 - y0;
+        let t0 = 0,
+            t1 = 1;
+        const p = [-dx, dx, -dy, dy];
+        const q = [x0 - xmin, xmax - x0, y0 - ymin, ymax - y0];
+        for (let i = 0; i < 4; i++) {
+            if (p[i] === 0) {
+                if (q[i] < 0) return null;
+            } else {
+                const r = q[i] / p[i];
+                if (p[i] < 0) {
+                    if (r > t1) return null;
+                    if (r > t0) t0 = r;
+                } else {
+                    if (r < t0) return null;
+                    if (r < t1) t1 = r;
+                }
+            }
+        }
+        return [x0 + t0 * dx, y0 + t0 * dy, x0 + t1 * dx, y0 + t1 * dy];
+    }
     Canvas.prototype.line = function (x0, y0, x1, y1, c, t) {
+        if (!allFinite(x0, y0, x1, y1)) return;
         t = t || 1;
+        const r = Math.floor((t - 1) / 2);
+        // Only segments that leave the (thickness-padded) canvas are clipped,
+        // so lines that were already inside render exactly as before.
+        const pad = r + 1;
+        const xmin = -pad,
+            ymin = -pad,
+            xmax = this.width + pad,
+            ymax = this.height + pad;
+        if (Math.min(x0, x1) < xmin || Math.max(x0, x1) > xmax || Math.min(y0, y1) < ymin || Math.max(y0, y1) > ymax) {
+            const clipped = clipSegment(x0, y0, x1, y1, xmin, ymin, xmax, ymax);
+            if (!clipped) return;
+            x0 = clipped[0];
+            y0 = clipped[1];
+            x1 = clipped[2];
+            y1 = clipped[3];
+        }
         x0 = Math.round(x0);
         y0 = Math.round(y0);
         x1 = Math.round(x1);
@@ -123,7 +192,6 @@ module.exports = function (RED) {
         const sx = x0 < x1 ? 1 : -1,
             sy = y0 < y1 ? 1 : -1;
         let err = dx - dy;
-        const r = Math.floor((t - 1) / 2);
         for (;;) {
             for (let oy = -r; oy <= r; oy++)
                 for (let ox = -r; ox <= r; ox++) this.set(x0 + ox, y0 + oy, c[0], c[1], c[2], 255);
@@ -140,11 +208,14 @@ module.exports = function (RED) {
         }
     };
     Canvas.prototype.circle = function (cx, cy, rad, c) {
+        if (!allFinite(cx, cy, rad)) return;
+        if (cx + rad < 0 || cy + rad < 0 || cx - rad >= this.width || cy - rad >= this.height) return;
         for (let y = -rad; y <= rad; y++)
             for (let x = -rad; x <= rad; x++)
                 if (x * x + y * y <= rad * rad) this.set(cx + x, cy + y, c[0], c[1], c[2], 255);
     };
     Canvas.prototype.text = function (x, y, str, c, scale) {
+        if (!allFinite(x, y)) return 0;
         scale = scale || 1;
         let cx = x;
         for (const ch of String(str).toUpperCase()) {
@@ -170,10 +241,25 @@ module.exports = function (RED) {
         out = out || [];
         if (Array.isArray(arr)) {
             for (const v of arr) deepFlatten(v, out);
+        } else if (ArrayBuffer.isView(arr) && !(arr instanceof DataView)) {
+            // Typed arrays (Float32Array straight from a runtime) and Buffers:
+            // flatten their elements instead of pushing the array as ONE value.
+            for (let i = 0; i < arr.length; i++) out.push(arr[i]);
         } else {
             out.push(arr);
         }
         return out;
+    }
+    // Guard a shape-declared element count against the data actually present.
+    // Without it a bad shape reads `undefined` (NaN geometry) or loops over a
+    // count the tensor never had.
+    function requireElements(flat, count, what) {
+        if (!Number.isFinite(count) || count < 0) {
+            throw new Error("Invalid " + what + " shape (needs a non-negative element count)");
+        }
+        if (count > flat.length) {
+            throw new Error(what + " shape needs " + count + " values but the data has only " + flat.length);
+        }
     }
     function getProp(msg, path) {
         if (!path) return undefined;
@@ -284,10 +370,6 @@ module.exports = function (RED) {
         c.fillRect(0, 0, w, h, [32, 36, 44], 255);
         return c;
     }
-    function num(v, d) {
-        return v !== undefined && v !== null && v !== "" && isFinite(parseFloat(v)) ? parseFloat(v) : d;
-    }
-
     // Base64 PNG of the canvas for the editor thumbnail — downscaled (nearest) when
     // the longest side exceeds maxSide, so we don't push a ~1 MB image over comms
     // on every inference. Reuses the already-encoded full PNG when small enough.
@@ -324,18 +406,18 @@ module.exports = function (RED) {
         node.inputProperty = config.inputProperty || "prediction";
         node.shapeProperty = config.shapeProperty || "mlInference.outputShape";
         node.imageProperty = config.imageProperty || "image";
-        node.canvasWidth = parseInt(config.canvasWidth, 10) || 128;
-        node.canvasHeight = parseInt(config.canvasHeight, 10) || 128;
-        node.alpha = Math.round(num(config.alpha, 0.5) * 255);
+        node.canvasWidth = clampInt(config.canvasWidth, 1, MAX_CANVAS_SIDE, 128);
+        node.canvasHeight = clampInt(config.canvasHeight, 1, MAX_CANVAS_SIDE, 128);
+        node.alpha = Math.round(clampFloat(config.alpha, 0, 1, 0.5) * 255);
         node.boxFormat = config.boxFormat || "xyxy";
-        node.scoreThreshold = num(config.scoreThreshold, 0.3);
-        node.iouThreshold = num(config.iouThreshold, 0.45);
-        node.boxThickness = parseInt(config.boxThickness, 10) || 2;
+        node.scoreThreshold = clampFloat(config.scoreThreshold, -1e9, 1e9, 0.3);
+        node.iouThreshold = clampFloat(config.iouThreshold, 0, 1, 0.45);
+        node.boxThickness = clampInt(config.boxThickness, 1, 64, 2);
         node.normalizedCoords = config.normalizedCoords === true || config.normalizedCoords === "true";
         node.colormap = config.colormap || "jet";
-        node.threshold = num(config.threshold, 0.5);
-        node.pointRadius = parseInt(config.pointRadius, 10) || 3;
-        node.kpThreshold = num(config.kpThreshold, 0.5);
+        node.threshold = clampFloat(config.threshold, -1e9, 1e9, 0.5);
+        node.pointRadius = clampInt(config.pointRadius, 1, 256, 3);
+        node.kpThreshold = clampFloat(config.kpThreshold, -1e9, 1e9, 0.5);
         node.polygonClosed = config.polygonClosed !== false && config.polygonClosed !== "false";
         try {
             node.skeleton = config.skeleton ? JSON.parse(config.skeleton) : [];
@@ -354,8 +436,8 @@ module.exports = function (RED) {
             .map((s) => s.trim())
             .filter(Boolean);
         node.editorPreview = config.editorPreview !== false && config.editorPreview !== "false";
-        node.previewWidth = parseInt(config.previewWidth, 10) || 200;
-        node.zoomWidth = parseInt(config.zoomWidth, 10) || 500;
+        node.previewWidth = clampInt(config.previewWidth, 16, 4096, 200);
+        node.zoomWidth = clampInt(config.zoomWidth, 16, 4096, 500);
 
         const color = (cls) => node.palette[((cls % node.palette.length) + node.palette.length) % node.palette.length];
         const labelOf = (cls) => (node.classLabels[cls] !== undefined ? node.classLabels[cls] : String(cls));
@@ -379,6 +461,7 @@ module.exports = function (RED) {
                     N = shape[0];
                     A = shape[1];
                 } else return [];
+                requireElements(flat, N * A, "boxes");
                 const nc = A - 5;
                 for (let i = 0; i < N; i++) {
                     const o = i * A,
@@ -397,7 +480,9 @@ module.exports = function (RED) {
                         }
                     }
                     const score = obj * (nc > 0 ? bestP : 1);
-                    if (score < node.scoreThreshold) continue;
+                    // `!(score >= thr)` also drops NaN scores; non-finite
+                    // geometry cannot be drawn or reported meaningfully.
+                    if (!(score >= node.scoreThreshold) || !allFinite(cx, cy, w, h)) continue;
                     boxes.push({
                         x1: (cx - w / 2) * sx,
                         y1: (cy - h / 2) * sy,
@@ -420,10 +505,12 @@ module.exports = function (RED) {
                 A = 6;
                 N = Math.floor(flat.length / 6);
             }
+            requireElements(flat, N * A, "boxes");
             for (let i = 0; i < N; i++) {
                 const o = i * A,
                     score = A > 4 ? flat[o + 4] : 1;
-                if (score < node.scoreThreshold) continue;
+                if (!(score >= node.scoreThreshold)) continue;
+                if (!allFinite(flat[o], flat[o + 1], flat[o + 2], flat[o + 3])) continue;
                 boxes.push({
                     x1: flat[o] * sx,
                     y1: flat[o + 1] * sy,
@@ -482,6 +569,7 @@ module.exports = function (RED) {
                 A = 7;
                 N = Math.floor(flat.length / 7);
             }
+            requireElements(flat, N * A, "obb");
             const sx = node.normalizedCoords ? canvas.width : 1,
                 sy = node.normalizedCoords ? canvas.height : 1;
             const out = [];
@@ -494,7 +582,7 @@ module.exports = function (RED) {
                     ang = flat[o + 4];
                 const score = A > 5 ? flat[o + 5] : 1,
                     cls = A > 6 ? Math.round(flat[o + 6]) : 0;
-                if (score < node.scoreThreshold) continue;
+                if (!(score >= node.scoreThreshold) || !allFinite(cx, cy, w, h, ang)) continue;
                 const cos = Math.cos(ang),
                     sin = Math.sin(ang);
                 const corners = [
@@ -554,6 +642,7 @@ module.exports = function (RED) {
                 const C = shape[1];
                 H = shape[2];
                 W = shape[3];
+                requireElements(flat, C * H * W, "segmentation");
                 classMap = new Array(H * W);
                 for (let h = 0; h < H; h++)
                     for (let w = 0; w < W; w++) {
@@ -636,6 +725,7 @@ module.exports = function (RED) {
                     canvas: baseCanvas(msg, node.imageProperty, node.canvasWidth, node.canvasHeight),
                     annotations: { mode: "instances", count: 0, instances: [] }
                 };
+            requireElements(flat, N * H * W, "instances");
             const canvas = baseCanvas(msg, node.imageProperty, node.canvasWidth, node.canvasHeight);
             const sxk = canvas.width / W,
                 syk = canvas.height / H;
@@ -704,6 +794,7 @@ module.exports = function (RED) {
                 N = 1;
                 V = Math.floor(flat.length / 2);
             }
+            requireElements(flat, N * V * 2, "polygons");
             const canvas = baseCanvas(msg, node.imageProperty, node.canvasWidth, node.canvasHeight);
             const sx = node.normalizedCoords ? canvas.width : 1,
                 sy = node.normalizedCoords ? canvas.height : 1;
@@ -761,6 +852,7 @@ module.exports = function (RED) {
                 P = 1;
                 K = Math.floor(flat.length / 3);
             }
+            requireElements(flat, P * K * 3, "keypoints");
             const canvas = baseCanvas(msg, node.imageProperty, node.canvasWidth, node.canvasHeight);
             const sx = node.normalizedCoords ? canvas.width : 1,
                 sy = node.normalizedCoords ? canvas.height : 1;
@@ -778,7 +870,7 @@ module.exports = function (RED) {
                         canvas.line(kps[a].x, kps[a].y, kps[b].x, kps[b].y, c, node.boxThickness);
                 const visible = [];
                 kps.forEach((kp, idx) => {
-                    const vis = kp.conf >= node.kpThreshold;
+                    const vis = kp.conf >= node.kpThreshold && allFinite(kp.x, kp.y);
                     if (vis) {
                         canvas.circle(Math.round(kp.x), Math.round(kp.y), node.pointRadius, c);
                         totalVisible++;
@@ -972,6 +1064,41 @@ module.exports = function (RED) {
             };
         }
 
+        // Editor preview throttle: publish immediately when the last publish
+        // is old enough, otherwise keep only the newest frame and publish it
+        // when the interval has passed. Encoding the thumbnail is deferred too.
+        let lastPreviewAt = 0;
+        let pendingPreview = null;
+        let previewTimer = null;
+        function publishPreview(makeData) {
+            try {
+                RED.comms.publish("vision-annotator-preview/" + node.id, { id: node.id, data: makeData() }, true);
+            } catch (e) {
+                /* ignore */
+            }
+            lastPreviewAt = Date.now();
+        }
+        function queuePreview(makeData) {
+            const wait = PREVIEW_MIN_INTERVAL_MS - (Date.now() - lastPreviewAt);
+            if (wait <= 0 && !previewTimer) {
+                publishPreview(makeData);
+                return;
+            }
+            pendingPreview = makeData;
+            if (!previewTimer) {
+                previewTimer = setTimeout(
+                    function () {
+                        previewTimer = null;
+                        const latest = pendingPreview;
+                        pendingPreview = null;
+                        if (latest) publishPreview(latest);
+                    },
+                    Math.max(1, wait)
+                );
+                if (previewTimer.unref) previewTimer.unref();
+            }
+        }
+
         const RENDERERS = {
             boxes: renderBoxes,
             obb: renderOBB,
@@ -1012,22 +1139,12 @@ module.exports = function (RED) {
                 if (node.editorPreview && RED.comms && RED.comms.publish) {
                     // per-node topic + retain=true so the thumbnail survives canvas
                     // redraws and reappears after an editor reload/reconnect.
-                    try {
-                        RED.comms.publish(
-                            "vision-annotator-preview/" + node.id,
-                            {
-                                id: node.id,
-                                data: thumbBase64(
-                                    result.canvas,
-                                    msg.payload,
-                                    Math.max(node.previewWidth, node.zoomWidth)
-                                )
-                            },
-                            true
-                        );
-                    } catch (e) {
-                        /* ignore */
-                    }
+                    const canvas = result.canvas,
+                        fullPng = msg.payload,
+                        maxSide = Math.max(node.previewWidth, node.zoomWidth);
+                    queuePreview(function () {
+                        return thumbBase64(canvas, fullPng, maxSide);
+                    });
                 }
                 const a = result.annotations;
                 const summary =
@@ -1056,6 +1173,11 @@ module.exports = function (RED) {
         });
 
         node.on("close", function () {
+            if (previewTimer) {
+                clearTimeout(previewTimer);
+                previewTimer = null;
+            }
+            pendingPreview = null;
             if (RED.comms && RED.comms.publish) {
                 // clear the retained thumbnail for this node
                 try {

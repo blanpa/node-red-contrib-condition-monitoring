@@ -29,6 +29,7 @@
             cusumThreshold: { value: 5.0 },
             cusumWarning: { value: 3.5 },
             cusumDrift: { value: 0.5 },
+            cusumMode: { value: "sigma" },
             // Moving Average
             maThreshold: { value: 2.0 },
             maWarning: { value: 1.5 },
@@ -40,6 +41,10 @@
             // Hysteresis
             hysteresisEnabled: { value: true },
             hysteresisPercent: { value: 10 },
+            regimeProperty: { value: "" },
+            maxRegimes: { value: 20 },
+            groupBy: { value: "" },
+            maxGroups: { value: 50 },
             consecutiveCount: { value: 1 },
             // Adaptive Thresholds
             adaptiveEnabled: { value: false },
@@ -66,6 +71,12 @@
         paletteLabel: "Anomaly Detector",
         oneditprepare: function() {
             var node = this;
+
+            // Nodes saved before this setting existed have no value for it; show
+            // the behaviour they actually get instead of an empty select.
+            if (!$("#node-input-cusumMode").val()) {
+                $("#node-input-cusumMode").val("raw");
+            }
             
             function showMethodConfig(method) {
                 $(".method-config").hide();
@@ -333,6 +344,14 @@
                         <div class="cm-help-text">Expected value (leave empty for auto-mean)</div>
                     </div>
                     <div class="cm-config-item">
+                        <label>Scale</label>
+                        <select id="node-input-cusumMode">
+                            <option value="sigma">Standard deviations (σ)</option>
+                            <option value="raw">Signal units (legacy)</option>
+                        </select>
+                        <div class="cm-help-text">σ: drift and thresholds are multiples of the window's standard deviation, so the same settings fit any signal scale. Signal units: they are absolute values in the unit of the input.</div>
+                    </div>
+                    <div class="cm-config-item">
                         <label>Drift (default: 0.5)</label>
                         <input type="number" id="node-input-cusumDrift" step="0.1" min="0" value="0.5">
                         <div class="cm-help-text">Allowable drift before detection</div>
@@ -406,6 +425,38 @@
                     </label>
                     <input type="checkbox" id="node-input-persistState" style="width: auto; margin-top: 8px;">
                     <div class="cm-help-text">Save buffer/statistics across Node-RED restarts</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-groupBy">
+                        <i class="fa fa-object-group"></i> Group By
+                    </label>
+                    <input type="text" id="node-input-groupBy" placeholder="e.g. topic or payload.deviceId (empty = one shared state)">
+                    <div class="cm-help-text">Message property naming the device. One independent state (window, baselines, per-sensor buffers) is kept per value, so one node can serve several machines. Combines with the regime property.</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-maxGroups">
+                        <i class="fa fa-database"></i> Max Groups
+                    </label>
+                    <input type="number" id="node-input-maxGroups" min="1" step="1" placeholder="50">
+                    <div class="cm-help-text">Devices kept in memory; the least recently used one is evicted beyond this (default 50)</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-regimeProperty">
+                        <i class="fa fa-sliders"></i> Regime Property
+                    </label>
+                    <input type="text" id="node-input-regimeProperty" placeholder="e.g. regime or payload.speedClass (empty = single baseline)">
+                    <div class="cm-help-text">Message property naming the operating point (speed/load class). One independent baseline is kept per value, so a load change does not read as an anomaly.</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-maxRegimes">
+                        <i class="fa fa-database"></i> Max Regimes
+                    </label>
+                    <input type="number" id="node-input-maxRegimes" min="1" step="1" placeholder="20">
+                    <div class="cm-help-text">Baselines kept in memory; the least recently used one is evicted beyond this (default 20)</div>
                 </div>
             </div>
         </div>
@@ -851,6 +902,6 @@ ws.onmessage = (event) => {
         <li><code>{"type": "subscribe", "topics": ["topic1", "topic2"]}</code> - Subscribe to topics</li>
         <li><code>{"type": "unsubscribe", "topics": ["topic1"]}</code> - Unsubscribe</li>
         <li><code>{"type": "ping"}</code> - Heartbeat check</li>
-        <li><code>{"type": "getStats"}</code> - Get server statistics</li>
+        <li><code>{"type": "getStats"}</code> - Get server statistics (connection and message counts; client addresses are not included)</li>
     </ul>
 </script>

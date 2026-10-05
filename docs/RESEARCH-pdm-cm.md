@@ -11,6 +11,11 @@
 claims extracted → top 25 adversarially verified → 23 confirmed / 2 refuted → synthesized.
 Generated 2026-06-16.
 
+**Companion document:** [RESEARCH-cm-pdm-landscape.md](RESEARCH-cm-pdm-landscape.md)
+covers the wider landscape — standards (ISO 17359/13374/20816/13381), measurement
+techniques, market and adoption data, barriers, and a mapping of this toolkit's nodes onto
+the ISO 13374 blocks.
+
 ---
 
 ## TL;DR

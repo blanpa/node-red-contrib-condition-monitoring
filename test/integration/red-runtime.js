@@ -117,7 +117,7 @@ async function startRed(options = {}) {
 
     let listenPort = port;
     let attempts = 0;
-    // eslint-disable-next-line no-constant-condition
+
     while (true) {
         try {
             await new Promise((resolve, reject) => {
@@ -151,7 +151,7 @@ async function startRed(options = {}) {
     // registry and fail with "unknown type".
     {
         const deadline = Date.now() + 10000;
-        // eslint-disable-next-line no-constant-condition
+
         while (true) {
             let ours = false;
             try {
@@ -162,7 +162,7 @@ async function startRed(options = {}) {
                         Array.isArray(m.types) &&
                         m.types.length > 0
                 );
-            } catch (_) {
+            } catch {
                 // ignore — runtime not ready yet
             }
             if (ours) break;
@@ -220,7 +220,7 @@ async function startRed(options = {}) {
      */
     async function getNodeAsync(nodeId, timeoutMs = 1500) {
         const start = Date.now();
-        // eslint-disable-next-line no-constant-condition
+
         while (true) {
             const node = RED.nodes.getNode(nodeId);
             if (node) return node;
@@ -272,7 +272,7 @@ async function startRed(options = {}) {
      */
     async function collect(captureId, count, timeoutMs = 1500) {
         const start = Date.now();
-        // eslint-disable-next-line no-constant-condition
+
         while (true) {
             const list = captures.get(captureId) || [];
             if (list.length >= count) return list.slice();
@@ -293,13 +293,13 @@ async function startRed(options = {}) {
     async function shutdown() {
         try {
             await RED.stop();
-        } catch (_) {
+        } catch {
             /* ignore */
         }
         await new Promise((r) => server.close(() => r()));
         try {
             fs.rmSync(userDir, { recursive: true, force: true });
-        } catch (_) {
+        } catch {
             /* ignore */
         }
     }

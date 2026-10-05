@@ -14,20 +14,39 @@ module.exports = function (RED) {
     // Config validation: parse + range-clamp (0 stays 0 where it is valid)
     const { clampInt, clampFloat } = require("./utils/config-validator");
 
-    // Load high-performance FFT library (Radix-4 Cooley-Tukey algorithm)
-    let FFT = null;
-    try {
-        FFT = require("fft.js");
-    } catch (err) {
-        // Fallback to naive implementation if fft.js not available
-    }
+    // ISO 20816 severity tables, bearing geometry, spectral integration
+    const vibration = require("./utils/vibration");
+
+    // Per-group state (Group By): key resolution and the LRU-bounded store
+    const groupState = require("./utils/group-state");
+
+    // Windowing, FFT, filters, peak picking, cepstrum and the bearing / gear
+    // diagnosis rules: pure functions, unit-testable without a runtime
+    const dsp = require("./utils/signal-processing");
+    const {
+        arrayMax,
+        arrayMin,
+        amplitudeScale,
+        performFFT,
+        findSpectralPeaks,
+        findSignificantPeaks,
+        calculateSpectralFeatures,
+        calculateSampleEntropy,
+        calculateAutocorrelation,
+        detectPeriodicity,
+        detectPeaks,
+        calculatePeakStatistics,
+        performEnvelopeAnalysis,
+        detectBearingFaults,
+        performCepstrum,
+        findRahmonics,
+        gearSidebandAnalysis,
+        detectGearFaults
+    } = dsp;
 
     function SignalAnalyzerNode(config) {
         RED.nodes.createNode(this, config);
         const node = this;
-
-        // FFT instance cache for performance
-        this.fftInstances = {};
 
         // Configuration
         this.mode = config.mode || "fft"; // fft, vibration, peaks, envelope, cepstrum
@@ -37,38 +56,57 @@ module.exports = function (RED) {
         this.fftSize = clampInt(config.fftSize, 2, 1048576, 256);
         this.samplingRate = clampFloat(config.samplingRate, 0.001, 1e9, 1000);
         this.peakThreshold = clampFloat(config.peakThreshold, 0, 1e12, 0.1);
-        this.vibrationThreshold =
-            config.vibrationThreshold !== "" && config.vibrationThreshold !== undefined
-                ? parseFloat(config.vibrationThreshold)
-                : 6;
+        this.vibrationThreshold = clampFloat(config.vibrationThreshold, 0, 1e12, 6);
         this.outputFormat = config.outputFormat || "peaks";
         this.windowFunction = config.windowFunction || "hann";
         this.overlapPercent = clampInt(config.overlapPercent, 0, 99, 50);
 
         // Peak detection settings
-        this.minPeakHeight =
-            config.minPeakHeight !== "" && config.minPeakHeight !== undefined ? parseFloat(config.minPeakHeight) : null;
+        // null = automatic (mean ± 2σ of the window)
+        this.minPeakHeight = (function (raw) {
+            const n = raw !== "" && raw !== undefined && raw !== null ? parseFloat(raw) : NaN;
+            return Number.isFinite(n) ? n : null;
+        })(config.minPeakHeight);
         this.minPeakDistance = clampInt(config.minPeakDistance, 0, 1000000, 5);
         this.peakType = config.peakType || "both";
 
         // Vibration settings
-        this.vibOutputMode = config.vibOutputMode || "all";
-        this.vibInputUnit = config.vibInputUnit || "mm_s"; // Input data unit for ISO 10816
-        this.iso10816Class = config.iso10816Class || "class2"; // ISO 10816 machine class
+        this.vibInputUnit = config.vibInputUnit || "mm_s"; // Input data unit for the ISO severity rating
+        // Machine class for the ISO 20816-3 zone table. The config key keeps its
+        // historical name so existing flows (class1..class4, ISO 10816-1 legacy
+        // tables) load unchanged; new nodes default to a 20816-3 group.
+        this.iso10816Class = vibration.ISO_SEVERITY_TABLES[config.iso10816Class]
+            ? config.iso10816Class
+            : vibration.DEFAULT_MACHINE_CLASS;
 
         // Envelope analysis settings (bearing fault detection)
         this.envelopeBandLow = clampFloat(config.envelopeBandLow, 0, 1e9, 500); // Hz
         this.envelopeBandHigh = clampFloat(config.envelopeBandHigh, 0, 1e9, 5000); // Hz
+        // Peak significance in the envelope spectrum: a line must exceed this
+        // multiple of the spectral noise floor (median magnitude). 8 keeps the
+        // largest noise peak of a 16k-bin spectrum (~5σ ≈ 6× median) out.
+        this.envelopePeakFloor = clampFloat(config.envelopePeakFloor, 1, 1000, 8);
+        // Fault frequencies can be typed in directly (Hz) …
         this.bearingBPFO = clampFloat(config.bearingBPFO, 0, 1e9, 0); // Ball Pass Freq Outer
         this.bearingBPFI = clampFloat(config.bearingBPFI, 0, 1e9, 0); // Ball Pass Freq Inner
         this.bearingBSF = clampFloat(config.bearingBSF, 0, 1e9, 0); // Ball Spin Freq
         this.bearingFTF = clampFloat(config.bearingFTF, 0, 1e9, 0); // Fundamental Train Freq
-        this.shaftSpeed = clampFloat(config.shaftSpeed, 0, 1e9, 0); // RPM
+        // … or derived from the bearing geometry and the current shaft speed.
+        // A typed-in value wins over the derived one for that frequency.
+        this.bearingBalls = clampInt(config.bearingBalls, 0, 1000, 0); // rolling elements
+        this.bearingBallDiameter = clampFloat(config.bearingBallDiameter, 0, 1e6, 0); // d
+        this.bearingPitchDiameter = clampFloat(config.bearingPitchDiameter, 0, 1e6, 0); // D
+        this.bearingContactAngle = clampFloat(config.bearingContactAngle, 0, 90, 0); // degrees
+        // Default shaft speed (RPM). Overridable per message via msg.rpm /
+        // msg.shaftSpeed / msg.config.shaftSpeed for variable-speed drives.
+        this.shaftSpeed = clampFloat(config.shaftSpeed, 0, 1e9, 0);
 
         // Cepstrum analysis settings
         this.quefrencyRangeLow = clampFloat(config.quefrencyRangeLow, 0, 1e9, 0.001); // seconds
         this.quefrencyRangeHigh = clampFloat(config.quefrencyRangeHigh, 0, 1e9, 0.1); // seconds
         this.cepstrumThreshold = clampFloat(config.cepstrumThreshold, 0, 1e12, 0.1);
+        // Sideband Energy Ratio above which a gear is reported as damaged
+        this.gearSerThreshold = clampFloat(config.gearSerThreshold, 0.01, 1000, 1);
         // Parse gear tooth count from comma-separated string
         this.gearTeeth = [];
         if (config.gearToothCount && config.gearToothCount.trim() !== "") {
@@ -99,7 +137,7 @@ module.exports = function (RED) {
 
         // State: one entry per group, in least-recently-used order.
         // Messages without a usable group value land in DEFAULT_GROUP.
-        const DEFAULT_GROUP = "";
+        const DEFAULT_GROUP = groupState.DEFAULT_GROUP;
         this.groups = new Map();
 
         // Debug logging helper
@@ -109,48 +147,34 @@ module.exports = function (RED) {
             }
         };
 
-        // Resolve the group key of a message. Anything that is not a non-empty
-        // string or a finite number (missing property, object, null) falls back
-        // to DEFAULT_GROUP, so ungrouped traffic still has a home.
+        // Resolve the group key of a message (missing / unusable values share
+        // DEFAULT_GROUP, so ungrouped traffic still has a home).
         function resolveGroupKey(msg) {
-            if (!node.groupBy) {
-                return DEFAULT_GROUP;
-            }
-            let value;
-            try {
-                value = RED.util.getMessageProperty(msg, node.groupBy);
-            } catch (e) {
-                return DEFAULT_GROUP;
-            }
-            if (typeof value === "number" && Number.isFinite(value)) {
-                return String(value);
-            }
-            return typeof value === "string" && value !== "" ? value : DEFAULT_GROUP;
+            return groupState.resolveGroupKey(RED, msg, node.groupBy);
         }
 
         // Fetch (or create) the buffer state for a key. Groups are kept in LRU
-        // order: re-inserting on access moves the key to the end, so an unbounded
-        // topic space evicts the least recently used buffer instead of growing
-        // without limit.
+        // order, so an unbounded topic space evicts the least recently used
+        // buffer instead of growing without limit.
         function getGroupState(key) {
-            let state = node.groups.get(key);
-            if (state) {
-                if (node.groupBy) {
-                    node.groups.delete(key);
-                    node.groups.set(key, state);
+            return groupState.getOrCreateGroup(node.groups, key, {
+                max: node.maxGroups,
+                lru: !!node.groupBy,
+                create: function (k) {
+                    return {
+                        key: k,
+                        buffer: [],
+                        timestamps: [],
+                        sampleCount: 0,
+                        lastProcessedIndex: 0,
+                        pending: 0, // samples buffered since the last analysis (overlap hop)
+                        analyzed: false
+                    };
+                },
+                onEvict: function (oldest) {
+                    debugLog("Evicted least recently used group '" + oldest + "' (maxGroups=" + node.maxGroups + ")");
                 }
-                return state;
-            }
-
-            state = { key: key, buffer: [], timestamps: [], sampleCount: 0, lastProcessedIndex: 0 };
-            node.groups.set(key, state);
-
-            while (node.groups.size > node.maxGroups) {
-                const oldest = node.groups.keys().next().value;
-                node.groups.delete(oldest);
-                debugLog("Evicted least recently used group '" + oldest + "' (maxGroups=" + node.maxGroups + ")");
-            }
-            return state;
+            });
         }
 
         // Backwards-compatible read-only view of the default (ungrouped) bucket.
@@ -254,201 +278,16 @@ module.exports = function (RED) {
         const calculateMean = stats.calculateMean;
         const calculateStdDev = stats.calculateStdDev;
 
-        // Window functions
-        function applyWindow(signal, windowType) {
-            const n = signal.length;
-            const windowed = new Array(n);
-
-            for (let i = 0; i < n; i++) {
-                let w = 1.0;
-                switch (windowType) {
-                    case "hann":
-                        w = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
-                        break;
-                    case "hamming":
-                        w = 0.54 - 0.46 * Math.cos((2 * Math.PI * i) / (n - 1));
-                        break;
-                    case "blackman":
-                        w =
-                            0.42 -
-                            0.5 * Math.cos((2 * Math.PI * i) / (n - 1)) +
-                            0.08 * Math.cos((4 * Math.PI * i) / (n - 1));
-                        break;
-                    case "rectangular":
-                    default:
-                        w = 1.0;
-                        break;
-                }
-                windowed[i] = signal[i] * w;
-            }
-            return windowed;
-        }
-
-        /**
-         * Perform Fast Fourier Transform on a signal.
-         *
-         * Uses fft.js (Radix-4 Cooley-Tukey algorithm) when available for
-         * O(n log n) performance. Falls back to naive DFT O(n²) otherwise.
-         *
-         * @param {number[]} signal - Time-domain signal values
-         * @param {number} fftSize - FFT size (will be rounded up to nearest power of 2)
-         * @param {number} samplingRate - Sampling rate in Hz
-         * @param {string} [windowType='hann'] - Window function: 'hann', 'hamming', 'blackman', 'rectangular'
-         * @returns {{frequencies: number[], magnitudes: number[]}} Frequency and magnitude arrays
-         *
-         * @example
-         * var result = performFFT(signalData, 256, 1000, 'hann');
-         * // result.frequencies = [0, 3.9, 7.8, ...] Hz
-         * // result.magnitudes = [0.5, 0.2, 0.8, ...]
-         */
-        function performFFT(signal, fftSize, samplingRate, windowType) {
-            let n = fftSize;
-
-            // Ensure n is power of 2 (required by fft.js)
-            if ((n & (n - 1)) !== 0) {
-                // Find next power of 2
-                n = Math.pow(2, Math.ceil(Math.log2(n)));
-            }
-
-            // Apply window function
-            const windowedSignal = applyWindow(
-                signal.slice(0, Math.min(signal.length, n)),
-                windowType || node.windowFunction
-            );
-
-            // Pad to FFT size
-            const paddedSignal = new Array(n);
-            for (let i = 0; i < n; i++) {
-                paddedSignal[i] = i < windowedSignal.length ? windowedSignal[i] : 0;
-            }
-
-            let magnitudes, frequencies;
-
-            if (FFT) {
-                // Use high-performance fft.js library (Radix-4 algorithm)
-                // Cache FFT instances for different sizes. Bounded: dynamic
-                // msg.config can change the FFT size at runtime, so evict the
-                // oldest entry rather than accumulating instances forever.
-                if (!node.fftInstances[n]) {
-                    const cached = Object.keys(node.fftInstances);
-                    if (cached.length >= 8) {
-                        delete node.fftInstances[cached[0]];
-                    }
-                    node.fftInstances[n] = new FFT(n);
-                }
-                const fft = node.fftInstances[n];
-
-                // fft.js requires real-input transform; output is interleaved [re0, im0, ...]
-                const complexOutput = fft.createComplexArray();
-
-                // Perform FFT
-                fft.realTransform(complexOutput, paddedSignal);
-                fft.completeSpectrum(complexOutput);
-
-                // Extract magnitudes (only positive frequencies: 0 to n/2)
-                magnitudes = new Array(n / 2);
-                frequencies = new Array(n / 2);
-
-                for (let k = 0; k < n / 2; k++) {
-                    const re = complexOutput[2 * k];
-                    const im = complexOutput[2 * k + 1];
-                    magnitudes[k] = Math.sqrt(re * re + im * im) / n;
-                    frequencies[k] = (k * samplingRate) / n;
-                }
-            } else {
-                // Fallback to naive DFT (O(n²) - slow for large signals)
-                debugLog("Using fallback DFT - install fft.js for better performance");
-
-                magnitudes = new Array(n / 2);
-                frequencies = new Array(n / 2);
-
-                for (let k = 0; k < n / 2; k++) {
-                    let sumReal = 0;
-                    let sumImag = 0;
-
-                    for (let t = 0; t < n; t++) {
-                        const angle = (-2 * Math.PI * k * t) / n;
-                        sumReal += paddedSignal[t] * Math.cos(angle);
-                        sumImag += paddedSignal[t] * Math.sin(angle);
-                    }
-
-                    magnitudes[k] = Math.sqrt(sumReal * sumReal + sumImag * sumImag) / n;
-                    frequencies[k] = (k * samplingRate) / n;
-                }
-            }
-
-            return { frequencies: frequencies, magnitudes: magnitudes };
-        }
-
-        function findSpectralPeaks(frequencies, magnitudes, threshold) {
-            const peaks = [];
-            if (magnitudes.length === 0) return peaks;
-            const maxMagnitude = Math.max.apply(null, magnitudes);
-
-            for (let i = 1; i < magnitudes.length - 1; i++) {
-                if (
-                    magnitudes[i] > magnitudes[i - 1] &&
-                    magnitudes[i] > magnitudes[i + 1] &&
-                    magnitudes[i] / maxMagnitude > threshold
-                ) {
-                    peaks.push({
-                        frequency: frequencies[i],
-                        magnitude: magnitudes[i],
-                        normalized: magnitudes[i] / maxMagnitude
-                    });
-                }
-            }
-
-            peaks.sort(function (a, b) {
-                return b.magnitude - a.magnitude;
-            });
-            return peaks;
-        }
-
-        function calculateSpectralFeatures(frequencies, magnitudes) {
-            const n = magnitudes.length;
-            let numerator = 0;
-            let denominator = 0;
-
-            for (let i = 0; i < n; i++) {
-                numerator += frequencies[i] * magnitudes[i];
-                denominator += magnitudes[i];
-            }
-
-            const spectralCentroid = denominator > 0 ? numerator / denominator : 0;
-
-            let variance = 0;
-            for (let i = 0; i < n; i++) {
-                variance += Math.pow(frequencies[i] - spectralCentroid, 2) * magnitudes[i];
-            }
-            const spectralSpread = denominator > 0 ? Math.sqrt(variance / denominator) : 0;
-
-            const sumSquares = magnitudes.reduce(function (sum, m) {
-                return sum + m * m;
-            }, 0);
-            const rms = Math.sqrt(sumSquares / n);
-            const peak = Math.max.apply(null, magnitudes);
-            const crestFactor = rms > 0 ? peak / rms : 0;
-
-            return {
-                spectralCentroid: spectralCentroid,
-                spectralSpread: spectralSpread,
-                rms: rms,
-                crestFactor: crestFactor,
-                totalEnergy: sumSquares
-            };
-        }
-
         // Vibration Features
-        function calculateVibrationFeatures(data) {
+        function calculateVibrationFeatures(data, shaftSpeedRpm, isWaveform) {
             const n = data.length;
             const sumSquares = data.reduce(function (sum, val) {
                 return sum + val * val;
             }, 0);
             const rms = Math.sqrt(sumSquares / n);
 
-            const max = Math.max.apply(null, data);
-            const min = Math.min.apply(null, data);
+            const max = arrayMax(data);
+            const min = arrayMin(data);
             const peakToPeak = max - min;
             const peak = Math.max(Math.abs(max), Math.abs(min));
             const crestFactor = rms !== 0 ? peak / rms : 0;
@@ -490,14 +329,19 @@ module.exports = function (RED) {
             // Detect periodicity from autocorrelation peaks
             const periodicity = detectPeriodicity(autocorrelation);
 
-            // ISO 10816-3 Vibration Severity Assessment
-            // Convert RMS to velocity in mm/s based on input unit
-            const rmsVelocity_mm_s = convertToVelocity(rms, node.vibInputUnit || "mm_s");
-            const iso10816 = evaluateISO10816(
-                rmsVelocity_mm_s,
-                node.iso10816Class || "class2",
-                node.vibInputUnit || "mm_s"
+            // ISO 20816-3 / ISO 10816 vibration severity assessment. Acceleration
+            // input is integrated to velocity in the 10–1000 Hz band when the
+            // sampling rate allows it (see convertToVelocity).
+            const inputUnit = node.vibInputUnit || "mm_s";
+            const conversion = convertToVelocity(rms, inputUnit, shaftSpeedRpm, isWaveform ? data : null);
+            const isoResult = vibration.evaluateVibrationSeverity(
+                conversion.rmsVelocity,
+                node.iso10816Class,
+                inputUnit
             );
+            isoResult.conversion = conversion.method;
+            if (conversion.band) isoResult.band = conversion.band;
+            if (conversion.frequency) isoResult.conversionFrequency = conversion.frequency;
 
             return {
                 rms: rms,
@@ -514,666 +358,125 @@ module.exports = function (RED) {
                 autocorrelation: autocorrelation,
                 periodicity: periodicity,
                 healthScore: healthScore,
-                iso10816: iso10816
+                // `iso20816` is the primary name; `iso10816` is kept as an alias of
+                // the same object so existing flows keep working.
+                iso20816: isoResult,
+                iso10816: isoResult
             };
-        }
-
-        // Convert RMS value to velocity in mm/s for ISO 10816 evaluation.
-        // Acceleration -> velocity uses the single-frequency relation v = a/(2πf).
-        // The conversion frequency is derived from the configured shaft speed
-        // (shaftSpeed in RPM -> Hz); only when no shaft speed is configured do we
-        // fall back to a generic 50 Hz, which is physically wrong for other speeds.
-        function convertToVelocity(rmsValue, inputUnit) {
-            // Derive conversion frequency from shaft speed when available.
-            const convFreq = node.shaftSpeed > 0 ? node.shaftSpeed / 60 : 50; // Hz
-
-            switch (inputUnit) {
-                case "mm_s":
-                    // Already in mm/s - no conversion needed
-                    return rmsValue;
-                case "m_s":
-                    // Convert m/s to mm/s
-                    return rmsValue * 1000;
-                case "g":
-                    // Convert g (acceleration) to mm/s (velocity)
-                    // v = a / (2 * π * f), where a is in m/s²
-                    // g = 9.81 m/s², so: v(mm/s) = (g * 9810) / (2 * π * f)
-                    return (rmsValue * 9810) / (2 * Math.PI * convFreq);
-                case "m_s2":
-                    // Convert m/s² (acceleration) to mm/s (velocity)
-                    // v = a / (2 * π * f), then convert to mm/s
-                    return (rmsValue * 1000) / (2 * Math.PI * convFreq);
-                case "raw":
-                default:
-                    // Raw/dimensionless - return as-is but mark as unconverted
-                    return rmsValue;
-            }
-        }
-
-        // ISO 10816-3 Vibration Severity Evaluation
-        // Based on ISO 10816-3:2009 for industrial machines with rated power > 15 kW
-        // RMS velocity in mm/s
-        function evaluateISO10816(rmsVelocity, machineClass, inputUnit) {
-            // If input is raw/dimensionless, return a warning that ISO evaluation is not applicable
-            if (inputUnit === "raw") {
-                return {
-                    zone: "N/A",
-                    severity: "unknown",
-                    recommendation:
-                        "ISO 10816 not applicable - input unit is raw/dimensionless. Configure velocity or acceleration unit for proper evaluation.",
-                    rmsVelocity: rmsVelocity,
-                    machineClass: machineClass,
-                    limits: null,
-                    zoneProgress: 0,
-                    isAlarm: false,
-                    isWarning: false,
-                    inputUnit: inputUnit,
-                    isValid: false
-                };
-            }
-
-            // ISO 10816-3 Zones (RMS velocity in mm/s)
-            // Zone A: Newly commissioned machines
-            // Zone B: Acceptable for unrestricted long-term operation
-            // Zone C: Acceptable only for limited periods
-            // Zone D: Vibration causes damage - immediate action required
-
-            const thresholds = {
-                // Class I: Small machines up to 15 kW
-                class1: { ab: 0.71, bc: 1.8, cd: 4.5 },
-                // Class II: Medium machines 15-75 kW, or up to 300 kW on special foundations
-                class2: { ab: 1.12, bc: 2.8, cd: 7.1 },
-                // Class III: Large machines on rigid foundations, > 75 kW
-                class3: { ab: 1.8, bc: 4.5, cd: 11.2 },
-                // Class IV: Large machines on soft foundations (e.g., turbines)
-                class4: { ab: 2.8, bc: 7.1, cd: 18.0 }
-            };
-
-            const limits = thresholds[machineClass] || thresholds["class2"];
-
-            let zone, severity, recommendation;
-
-            if (rmsVelocity <= limits.ab) {
-                zone = "A";
-                severity = "good";
-                recommendation = "Newly commissioned machine condition - excellent";
-            } else if (rmsVelocity <= limits.bc) {
-                zone = "B";
-                severity = "acceptable";
-                recommendation = "Acceptable for unrestricted long-term operation";
-            } else if (rmsVelocity <= limits.cd) {
-                zone = "C";
-                severity = "warning";
-                recommendation = "Acceptable only for limited periods - schedule maintenance";
-            } else {
-                zone = "D";
-                severity = "critical";
-                recommendation = "Vibration causes damage - immediate action required";
-            }
-
-            // Calculate how far into the zone we are (0-100%)
-            let zoneProgress;
-            if (zone === "A") {
-                zoneProgress = (rmsVelocity / limits.ab) * 100;
-            } else if (zone === "B") {
-                zoneProgress = ((rmsVelocity - limits.ab) / (limits.bc - limits.ab)) * 100;
-            } else if (zone === "C") {
-                zoneProgress = ((rmsVelocity - limits.bc) / (limits.cd - limits.bc)) * 100;
-            } else {
-                zoneProgress = Math.min(100, ((rmsVelocity - limits.cd) / limits.cd) * 100);
-            }
-
-            return {
-                zone: zone,
-                severity: severity,
-                recommendation: recommendation,
-                rmsVelocity: rmsVelocity,
-                machineClass: machineClass,
-                limits: limits,
-                zoneProgress: Math.min(100, Math.max(0, zoneProgress)),
-                isAlarm: zone === "D",
-                isWarning: zone === "C" || zone === "D",
-                inputUnit: inputUnit,
-                isValid: true
-            };
-        }
-
-        // Sample Entropy - measures signal complexity/regularity
-        // Lower values = more regular/predictable, Higher = more complex/random
-        // NOTE: this is O(n²); cap the analysis length so a large windowSize
-        // (up to ~1M samples) cannot stall the flow on every message. We use the
-        // most recent SAMPEN_MAX samples, which is statistically sufficient.
-        const SAMPEN_MAX = 2000;
-        function calculateSampleEntropy(input, m, r) {
-            const data = input.length > SAMPEN_MAX ? input.slice(input.length - SAMPEN_MAX) : input;
-            const n = data.length;
-            if (n < m + 1) return 0;
-
-            // Count template matches for length m and m+1
-            function countMatches(templateLength) {
-                let count = 0;
-                for (let i = 0; i < n - templateLength; i++) {
-                    for (let j = i + 1; j < n - templateLength; j++) {
-                        let match = true;
-                        for (let k = 0; k < templateLength; k++) {
-                            if (Math.abs(data[i + k] - data[j + k]) > r) {
-                                match = false;
-                                break;
-                            }
-                        }
-                        if (match) count++;
-                    }
-                }
-                return count;
-            }
-
-            const A = countMatches(m + 1);
-            const B = countMatches(m);
-
-            if (B === 0 || A === 0) return 0;
-            return -Math.log(A / B);
-        }
-
-        // Autocorrelation Function (ACF) - detects periodicity
-        function calculateAutocorrelation(data, maxLag) {
-            const n = data.length;
-            const mean =
-                data.reduce(function (a, b) {
-                    return a + b;
-                }, 0) / n;
-            const variance =
-                data.reduce(function (sum, val) {
-                    return sum + (val - mean) * (val - mean);
-                }, 0) / n;
-
-            if (variance === 0) return [];
-
-            const acf = [];
-            for (let lag = 0; lag <= Math.min(maxLag, n - 1); lag++) {
-                let sum = 0;
-                for (let i = 0; i < n - lag; i++) {
-                    sum += (data[i] - mean) * (data[i + lag] - mean);
-                }
-                acf.push({
-                    lag: lag,
-                    value: sum / (n * variance)
-                });
-            }
-            return acf;
-        }
-
-        // Detect periodicity from ACF peaks
-        function detectPeriodicity(acf) {
-            if (acf.length < 3) return { detected: false };
-
-            // Find first significant peak after lag 0
-            const peaks = [];
-            for (let i = 2; i < acf.length - 1; i++) {
-                if (acf[i].value > acf[i - 1].value && acf[i].value > acf[i + 1].value && acf[i].value > 0.3) {
-                    // Threshold for significance
-                    peaks.push({ lag: acf[i].lag, strength: acf[i].value });
-                }
-            }
-
-            if (peaks.length === 0) {
-                return { detected: false, description: "No periodicity detected" };
-            }
-
-            return {
-                detected: true,
-                period: peaks[0].lag,
-                strength: peaks[0].strength,
-                allPeaks: peaks,
-                description: "Periodic pattern detected at lag " + peaks[0].lag
-            };
-        }
-
-        // Peak Detection
-        function detectPeaks(data, times, minHeight, minDistance, peakType) {
-            const peaks = [];
-            let threshold = minHeight;
-
-            if (threshold === null) {
-                const mean = calculateMean(data);
-                const stdDev = calculateStdDev(data, mean);
-                threshold = mean + 2 * stdDev;
-            }
-
-            let lastPeakIndex = -minDistance;
-
-            for (let i = 1; i < data.length - 1; i++) {
-                const current = data[i];
-                const prev = data[i - 1];
-                const next = data[i + 1];
-
-                let isPeak = false;
-                let peakDirection = null;
-
-                if ((peakType === "positive" || peakType === "both") && current > prev && current > next) {
-                    if (minHeight === null || current >= threshold) {
-                        isPeak = true;
-                        peakDirection = "positive";
-                    }
-                }
-
-                if ((peakType === "negative" || peakType === "both") && current < prev && current < next) {
-                    if (minHeight === null || current <= -threshold) {
-                        isPeak = true;
-                        peakDirection = "negative";
-                    }
-                }
-
-                if (isPeak && i - lastPeakIndex >= minDistance) {
-                    peaks.push({
-                        index: i,
-                        value: current,
-                        timestamp: times[i],
-                        direction: peakDirection
-                    });
-                    lastPeakIndex = i;
-                }
-            }
-
-            return peaks;
-        }
-
-        function calculatePeakStatistics(peaks, data) {
-            if (peaks.length === 0) {
-                return { averagePeakHeight: null, maxPeakHeight: null, minPeakHeight: null, peakFrequency: 0 };
-            }
-
-            const peakValues = peaks.map(function (p) {
-                return Math.abs(p.value);
-            });
-            const sum = peakValues.reduce(function (a, b) {
-                return a + b;
-            }, 0);
-
-            return {
-                averagePeakHeight: sum / peakValues.length,
-                maxPeakHeight: Math.max.apply(null, peakValues),
-                minPeakHeight: Math.min.apply(null, peakValues),
-                peakFrequency: peaks.length / data.length
-            };
-        }
-
-        // Envelope Analysis for Bearing Fault Detection
-        function performEnvelopeAnalysis(signal, samplingRate, bandLow, bandHigh) {
-            // Step 1: Bandpass filter (simple FIR implementation)
-            const filtered = bandpassFilter(signal, samplingRate, bandLow, bandHigh);
-
-            // Step 2: Rectify (absolute value)
-            const rectified = filtered.map(function (v) {
-                return Math.abs(v);
-            });
-
-            // Step 3: Low-pass filter to get envelope (simple moving average)
-            const envelopeWindowSize = Math.max(3, Math.floor(samplingRate / bandLow / 2));
-            const envelope = [];
-            for (let i = 0; i < rectified.length; i++) {
-                const start = Math.max(0, i - Math.floor(envelopeWindowSize / 2));
-                const end = Math.min(rectified.length, i + Math.floor(envelopeWindowSize / 2) + 1);
-                let sum = 0;
-                for (let j = start; j < end; j++) {
-                    sum += rectified[j];
-                }
-                envelope.push(sum / (end - start));
-            }
-
-            return envelope;
-        }
-
-        // Butterworth filter coefficient calculation
-        // Based on bilinear transform of analog Butterworth filter
-        function calculateButterworthCoefficients(cutoffFreq, samplingRate, order, filterType) {
-            // Normalize frequency (0 to 1, where 1 = Nyquist)
-            const nyquist = samplingRate / 2;
-            let normalizedCutoff = cutoffFreq / nyquist;
-
-            // Clamp to valid range
-            normalizedCutoff = Math.max(0.001, Math.min(0.999, normalizedCutoff));
-
-            // Pre-warp the cutoff frequency for bilinear transform
-            const warpedCutoff = Math.tan((Math.PI * normalizedCutoff) / 2);
-
-            // For 2nd order Butterworth (most common, good balance)
-            // Transfer function: H(s) = 1 / (s^2 + sqrt(2)*s + 1)
-            const sqrt2 = Math.sqrt(2);
-
-            // Bilinear transform coefficients for 2nd order
-            const k = warpedCutoff;
-            const k2 = k * k;
-            const sqrt2k = sqrt2 * k;
-
-            let a0, a1, a2, b0, b1, b2;
-
-            if (filterType === "lowpass") {
-                // Low-pass Butterworth
-                a0 = 1 + sqrt2k + k2;
-                b0 = k2 / a0;
-                b1 = (2 * k2) / a0;
-                b2 = k2 / a0;
-                a1 = (2 * (k2 - 1)) / a0;
-                a2 = (1 - sqrt2k + k2) / a0;
-            } else {
-                // High-pass Butterworth
-                a0 = 1 + sqrt2k + k2;
-                b0 = 1 / a0;
-                b1 = -2 / a0;
-                b2 = 1 / a0;
-                a1 = (2 * (k2 - 1)) / a0;
-                a2 = (1 - sqrt2k + k2) / a0;
-            }
-
-            return {
-                b: [b0, b1, b2], // Feedforward coefficients
-                a: [1, a1, a2] // Feedback coefficients (a0 normalized to 1)
-            };
-        }
-
-        // Apply IIR filter (Direct Form II Transposed)
-        function applyIIRFilter(signal, coeffs) {
-            const b = coeffs.b;
-            const a = coeffs.a;
-            const n = signal.length;
-            const output = new Array(n);
-
-            // Filter state variables (for Direct Form II Transposed)
-            let z1 = 0,
-                z2 = 0;
-
-            for (let i = 0; i < n; i++) {
-                const x = signal[i];
-
-                // Output
-                const y = b[0] * x + z1;
-
-                // Update state
-                z1 = b[1] * x - a[1] * y + z2;
-                z2 = b[2] * x - a[2] * y;
-
-                output[i] = y;
-            }
-
-            return output;
-        }
-
-        // Zero-phase filtering (forward-backward filtering)
-        // Eliminates phase distortion by filtering forward then backward
-        function filtfilt(signal, coeffs) {
-            // Forward pass
-            const forward = applyIIRFilter(signal, coeffs);
-
-            // Reverse the signal
-            const reversed = forward.slice().reverse();
-
-            // Backward pass
-            const backward = applyIIRFilter(reversed, coeffs);
-
-            // Reverse again to get original order
-            return backward.reverse();
-        }
-
-        // Butterworth bandpass filter
-        // Implemented as cascade of highpass and lowpass filters
-        function butterworthBandpass(signal, samplingRate, lowCut, highCut) {
-            // Calculate coefficients for high-pass (removes frequencies below lowCut)
-            const hpCoeffs = calculateButterworthCoefficients(lowCut, samplingRate, 2, "highpass");
-
-            // Calculate coefficients for low-pass (removes frequencies above highCut)
-            const lpCoeffs = calculateButterworthCoefficients(highCut, samplingRate, 2, "lowpass");
-
-            // Apply zero-phase high-pass filter first
-            const highPassed = filtfilt(signal, hpCoeffs);
-
-            // Then apply zero-phase low-pass filter
-            const bandPassed = filtfilt(highPassed, lpCoeffs);
-
-            return bandPassed;
-        }
-
-        // Main bandpass filter function - uses Butterworth
-        function bandpassFilter(signal, samplingRate, lowCut, highCut) {
-            const n = signal.length;
-
-            // Validate frequency parameters
-            const nyquist = samplingRate / 2;
-            if (lowCut >= highCut || lowCut <= 0 || highCut >= nyquist) {
-                // Fall back to simple filter if parameters invalid
-                debugLog(
-                    "Bandpass: Invalid frequencies, using simple filter. low=" +
-                        lowCut +
-                        ", high=" +
-                        highCut +
-                        ", nyquist=" +
-                        nyquist
-                );
-                return simpleBandpassFilter(signal, samplingRate, lowCut, highCut);
-            }
-
-            // Need minimum signal length for stable filtering
-            if (n < 12) {
-                return simpleBandpassFilter(signal, samplingRate, lowCut, highCut);
-            }
-
-            try {
-                return butterworthBandpass(signal, samplingRate, lowCut, highCut);
-            } catch (err) {
-                debugLog("Butterworth filter failed, using simple filter: " + err.message);
-                return simpleBandpassFilter(signal, samplingRate, lowCut, highCut);
-            }
-        }
-
-        // Simple bandpass filter (fallback)
-        function simpleBandpassFilter(signal, samplingRate, lowCut, highCut) {
-            const n = signal.length;
-
-            // High-pass: subtract low-frequency component
-            const lowWindow = Math.max(3, Math.floor(samplingRate / lowCut));
-            const highFiltered = [];
-            for (let i = 0; i < n; i++) {
-                const start = Math.max(0, i - Math.floor(lowWindow / 2));
-                const end = Math.min(n, i + Math.floor(lowWindow / 2) + 1);
-                let sum = 0;
-                for (let j = start; j < end; j++) {
-                    sum += signal[j];
-                }
-                const lowFreq = sum / (end - start);
-                highFiltered.push(signal[i] - lowFreq);
-            }
-
-            // Low-pass: smooth high frequencies
-            const highWindow = Math.max(3, Math.floor(samplingRate / highCut));
-            const bandpassed = [];
-            for (let i = 0; i < n; i++) {
-                const start = Math.max(0, i - Math.floor(highWindow / 2));
-                const end = Math.min(n, i + Math.floor(highWindow / 2) + 1);
-                let sum = 0;
-                for (let j = start; j < end; j++) {
-                    sum += highFiltered[j];
-                }
-                bandpassed.push(sum / (end - start));
-            }
-
-            return bandpassed;
         }
 
         /**
-         * Detect bearing fault frequencies in the envelope spectrum.
+         * Convert a broadband RMS reading to RMS velocity in mm/s for the ISO
+         * severity rating.
          *
-         * Analyzes spectral peaks to identify characteristic bearing defect frequencies:
-         * - BPFO: Ball Pass Frequency Outer race
-         * - BPFI: Ball Pass Frequency Inner race
-         * - BSF: Ball Spin Frequency
-         * - FTF: Fundamental Train Frequency (cage)
-         * Also checks for shaft-related frequencies (1X imbalance, 2X misalignment).
+         * Velocity input only needs scaling. Acceleration input is integrated
+         * bin-wise in the frequency domain (v_k = a_k / 2πf_k) over the 10–1000 Hz
+         * band the standard prescribes, which is exact for any spectral content.
+         * That needs an actual waveform: `samples` is only passed when the
+         * message carried a frame (array payload), never for a stream of scalar
+         * readings, whose buffer is a time series of *values* and not a signal.
+         * When there is no waveform, or the sampling rate cannot support the
+         * band (Nyquist below 10 Hz, fewer than 16 samples), we fall back to the
+         * single-frequency relation v = a / (2πf) at the shaft frequency —
+         * correct only when the signal is dominated by 1X, so the result says
+         * which path was taken.
          *
-         * @param {Array<{frequency: number, magnitude: number}>} envelopePeaks - Peaks from envelope spectrum
-         * @param {number} shaftFreq - Shaft rotational frequency in Hz (RPM/60)
-         * @param {number} bpfo - Ball Pass Frequency Outer race (from bearing geometry)
-         * @param {number} bpfi - Ball Pass Frequency Inner race
-         * @param {number} bsf - Ball Spin Frequency
-         * @param {number} ftf - Fundamental Train Frequency
-         * @param {number} [frequencyTolerance=0.05] - Tolerance for frequency matching (5% default)
-         * @returns {Array<{type: string, harmonic: number, description: string, expectedFreq: number, detectedFreq: number, magnitude: number, severity: string}>}
+         * @returns {{rmsVelocity:number, method:string, band?:number[], frequency?:number}}
          */
-        function detectBearingFaults(envelopePeaks, shaftFreq, bpfo, bpfi, bsf, ftf, frequencyTolerance) {
-            frequencyTolerance = frequencyTolerance || 0.05; // 5% frequency tolerance
-            const faults = [];
-
-            const faultFreqs = [
-                { name: "BPFO", freq: bpfo, desc: "Outer Race Fault" },
-                { name: "BPFI", freq: bpfi, desc: "Inner Race Fault" },
-                { name: "BSF", freq: bsf, desc: "Ball/Roller Fault" },
-                { name: "FTF", freq: ftf, desc: "Cage Fault" },
-                { name: "1X", freq: shaftFreq, desc: "Shaft Imbalance" },
-                { name: "2X", freq: shaftFreq * 2, desc: "Misalignment" }
-            ];
-
-            envelopePeaks.forEach(function (peak) {
-                faultFreqs.forEach(function (fault) {
-                    if (fault.freq > 0) {
-                        // Check fundamental and harmonics (up to 3x)
-                        for (let harmonic = 1; harmonic <= 3; harmonic++) {
-                            const targetFreq = fault.freq * harmonic;
-                            const freqDiff = Math.abs(peak.frequency - targetFreq) / targetFreq;
-
-                            if (freqDiff <= frequencyTolerance) {
-                                faults.push({
-                                    type: fault.name,
-                                    harmonic: harmonic,
-                                    description: fault.desc,
-                                    expectedFreq: targetFreq,
-                                    detectedFreq: peak.frequency,
-                                    magnitude: peak.magnitude,
-                                    severity: peak.magnitude > 0.5 ? "high" : peak.magnitude > 0.2 ? "medium" : "low"
-                                });
-                            }
-                        }
-                    }
-                });
-            });
-
-            return faults;
+        function convertToVelocity(rmsValue, inputUnit, shaftSpeedRpm, samples) {
+            switch (inputUnit) {
+                case "mm_s":
+                    return { rmsVelocity: rmsValue, method: "none" };
+                case "m_s":
+                    return { rmsVelocity: rmsValue * 1000, method: "scale" };
+                case "g":
+                case "m_s2": {
+                    const toMs2 = inputUnit === "g" ? 9.80665 : 1;
+                    const spectral = integrateAccelerationToVelocity(samples, toMs2);
+                    if (spectral) return spectral;
+                    const rpm = shaftSpeedRpm > 0 ? shaftSpeedRpm : node.shaftSpeed;
+                    const convFreq = rpm > 0 ? rpm / 60 : 50; // Hz
+                    return {
+                        rmsVelocity: (rmsValue * toMs2 * 1000) / (2 * Math.PI * convFreq),
+                        method: "single-frequency",
+                        frequency: convFreq
+                    };
+                }
+                case "raw":
+                default:
+                    return { rmsVelocity: rmsValue, method: "none" };
+            }
         }
 
-        // Cepstrum Analysis for gearbox diagnostics
-        function performCepstrum(signal, fftSize, samplingRate) {
-            // Step 1: FFT of signal
-            const fftResult = performFFT(signal, fftSize, samplingRate, "hann");
-
-            // Step 2: Log of magnitude spectrum
-            const logSpectrum = fftResult.magnitudes.map(function (m) {
-                return Math.log(Math.max(m, 1e-10)); // Avoid log(0)
-            });
-
-            // Step 3: Inverse FFT of log spectrum (approximation using DCT-like approach)
-            const n = logSpectrum.length;
-            const cepstrum = new Array(n);
-
-            for (let q = 0; q < n; q++) {
-                let sum = 0;
-                for (let k = 0; k < n; k++) {
-                    sum += logSpectrum[k] * Math.cos((2 * Math.PI * q * k) / n);
-                }
-                cepstrum[q] = sum / n;
+        // Spectral integration of an acceleration buffer to velocity RMS (mm/s).
+        // Uses the largest power-of-two tail of the buffer so the FFT needs no
+        // zero padding (padding would scale the amplitudes down by L/N), and a
+        // rectangular window so the bin energies stay uncorrected.
+        function integrateAccelerationToVelocity(samples, toMs2) {
+            const fs = node.samplingRate;
+            if (!Array.isArray(samples) || samples.length < 16 || !(fs / 2 > vibration.ISO_BAND_LOW_HZ)) {
+                return null;
             }
-
-            // Quefrencies (time-like domain)
-            const quefrencies = new Array(n);
+            let n = 1;
+            while (n * 2 <= samples.length) n *= 2;
+            const tail = samples.slice(samples.length - n);
+            const mean = calculateMean(tail);
+            const centred = new Array(n);
             for (let i = 0; i < n; i++) {
-                quefrencies[i] = i / samplingRate; // in seconds
+                centred[i] = (tail[i] - mean) * toMs2;
             }
-
-            return { quefrencies: quefrencies, cepstrum: cepstrum };
+            const spectrum = performFFT(centred, n, fs, "rectangular");
+            const fHigh = Math.min(vibration.ISO_BAND_HIGH_HZ, fs / 2);
+            const r = vibration.velocityRmsFromAccelerationSpectrum(
+                spectrum.frequencies,
+                spectrum.magnitudes,
+                vibration.ISO_BAND_LOW_HZ,
+                fHigh
+            );
+            if (r.bins === 0) return null;
+            return { rmsVelocity: r.rms * 1000, method: "spectral-integration", band: [r.fLow, r.fHigh] };
         }
 
-        // Find rahmonics (peaks in cepstrum)
-        function findRahmonics(quefrencies, cepstrum, minQuefrency, maxQuefrency, peakThreshold) {
-            const peaks = [];
-            peakThreshold = peakThreshold || 0.1; // Default 10%
-
-            // Skip the first few samples (aperiodic component)
-            const startIdx = 5;
-            if (cepstrum.length <= startIdx + 1) return peaks;
-            const maxCepstrum = Math.max.apply(null, cepstrum.slice(startIdx).map(Math.abs));
-            // No usable energy -> no peaks (avoids divide-by-zero / NaN normalization)
-            if (!(maxCepstrum > 0)) return peaks;
-
-            for (let i = startIdx + 1; i < cepstrum.length - 1; i++) {
-                if (quefrencies[i] < minQuefrency || quefrencies[i] > maxQuefrency) continue;
-
-                const current = Math.abs(cepstrum[i]);
-                if (current > Math.abs(cepstrum[i - 1]) && current > Math.abs(cepstrum[i + 1])) {
-                    const normalized = current / maxCepstrum;
-                    if (normalized > peakThreshold) {
-                        peaks.push({
-                            quefrency: quefrencies[i],
-                            fundamentalFrequency: 1 / quefrencies[i], // Hz
-                            magnitude: cepstrum[i],
-                            normalized: normalized
-                        });
-                    }
-                }
+        /**
+         * The band-pass band the envelope analysis can actually use at this
+         * sampling rate. An upper edge at or above Nyquist is lowered to 90 % of
+         * it; a band that still does not fit (lower edge above the upper one)
+         * leaves only the crude moving-average fallback, whose result is not a
+         * usable envelope spectrum. Either case is reported once — silently
+         * analysing the wrong band is how a healthy-looking result hides a
+         * misconfigured sampling rate.
+         */
+        function resolveEnvelopeBand(samplingRate) {
+            const nyquist = samplingRate / 2;
+            const low = node.envelopeBandLow;
+            let high = node.envelopeBandHigh;
+            let note = null;
+            if (high >= nyquist) {
+                high = 0.9 * nyquist;
+                note = "upper band edge lowered from " + node.envelopeBandHigh + " Hz to " + high + " Hz";
             }
-
-            peaks.sort(function (a, b) {
-                return Math.abs(b.magnitude) - Math.abs(a.magnitude);
-            });
-            return peaks;
-        }
-
-        // Detect gear mesh frequencies and faults
-        function detectGearFaults(rahmonics, shaftSpeed, gearTeeth) {
-            const faults = [];
-            const shaftFreq = shaftSpeed / 60;
-
-            if (gearTeeth && gearTeeth.length > 0) {
-                gearTeeth.forEach(function (teeth, idx) {
-                    const gmf = shaftFreq * teeth; // Gear Mesh Frequency
-                    const tolerance = 0.1; // 10%
-
-                    rahmonics.forEach(function (peak) {
-                        let freqDiff = Math.abs(peak.fundamentalFrequency - gmf) / gmf;
-                        if (freqDiff < tolerance) {
-                            faults.push({
-                                type: "GMF",
-                                gear: idx + 1,
-                                teeth: teeth,
-                                expectedFreq: gmf,
-                                detectedFreq: peak.fundamentalFrequency,
-                                magnitude: peak.normalized,
-                                severity: peak.normalized > 0.5 ? "high" : peak.normalized > 0.25 ? "medium" : "low",
-                                description: "Gear mesh frequency detected - possible gear wear"
-                            });
-                        }
-
-                        // Check sidebands (gear damage indicator)
-                        for (let sb = 1; sb <= 3; sb++) {
-                            const sideband = gmf + sb * shaftFreq;
-                            freqDiff = Math.abs(peak.fundamentalFrequency - sideband) / sideband;
-                            if (freqDiff < tolerance) {
-                                faults.push({
-                                    type: "Sideband",
-                                    gear: idx + 1,
-                                    order: sb,
-                                    expectedFreq: sideband,
-                                    detectedFreq: peak.fundamentalFrequency,
-                                    magnitude: peak.normalized,
-                                    severity: peak.normalized > 0.3 ? "high" : "medium",
-                                    description: "Sideband detected - indicates gear damage or eccentricity"
-                                });
-                            }
-                        }
-                    });
-                });
+            const valid = low > 0 && low < high;
+            if (!valid) {
+                high = node.envelopeBandHigh;
+                note =
+                    "band " +
+                    low +
+                    "-" +
+                    high +
+                    " Hz does not fit below the Nyquist frequency; falling back to a crude moving-average filter, " +
+                    "the result is unreliable";
             }
-
-            return faults;
+            if (note && !node.envelopeBandWarned) {
+                node.envelopeBandWarned = true;
+                node.warn(
+                    "Envelope: " + note + " (sampling rate " + samplingRate + " Hz, Nyquist " + nyquist + " Hz)."
+                );
+            }
+            return { low: low, high: high, filter: valid ? "butterworth" : "moving-average" };
         }
 
         // Process Cepstrum Analysis
-        function processCepstrum(msg, state, value) {
+        function processCepstrum(msg, state, value, shaftSpeedRpm) {
             state.buffer.push(value);
 
             if (state.buffer.length < node.fftSize) {
@@ -1188,8 +491,12 @@ module.exports = function (RED) {
             if (state.buffer.length > node.fftSize) {
                 state.buffer.shift();
             }
+            if (!dueForAnalysis(state)) return null;
 
-            const shaftFreq = (node.shaftSpeed || 1800) / 60;
+            // 0 = unknown. Gear-mesh matching needs the real shaft speed;
+            // assuming one would produce confident diagnoses from a guess.
+            const rpm = shaftSpeedRpm > 0 ? shaftSpeedRpm : 0;
+            const shaftFreq = rpm / 60;
             const minQuefrency = node.quefrencyRangeLow || 0.001;
             const maxQuefrency = node.quefrencyRangeHigh || 0.1;
 
@@ -1206,8 +513,25 @@ module.exports = function (RED) {
             );
 
             // Detect gear faults if teeth count provided
-            const gearTeeth = msg.gearTeeth || node.gearTeeth || [];
-            const gearFaults = detectGearFaults(rahmonics, node.shaftSpeed || 1800, gearTeeth);
+            const gearTeeth = (Array.isArray(msg.gearTeeth) ? msg.gearTeeth : node.gearTeeth || []).filter(
+                function (t) {
+                    return Number.isFinite(t) && t > 0;
+                }
+            );
+            // Gear condition from the sidebands around each mesh frequency
+            const gears =
+                rpm > 0
+                    ? gearTeeth.map(function (teeth) {
+                          return gearSidebandAnalysis(cepResult.frequencies, cepResult.magnitudes, shaftFreq, teeth);
+                      })
+                    : [];
+            const gearFaults = detectGearFaults(gears, node.gearSerThreshold);
+            if (rpm === 0 && gearTeeth.length > 0 && !node.gearSpeedWarned) {
+                node.gearSpeedWarned = true;
+                node.warn(
+                    "Cepstrum: gear teeth are configured but the shaft speed is unknown - set it or send msg.rpm"
+                );
+            }
 
             const hasAnomaly = gearFaults.length > 0;
 
@@ -1218,7 +542,19 @@ module.exports = function (RED) {
                     dominantQuefrency: rahmonics.length > 0 ? rahmonics[0].quefrency : null,
                     dominantFrequency: rahmonics.length > 0 ? rahmonics[0].fundamentalFrequency : null
                 },
+                gears: gears.filter(Boolean).map(function (g) {
+                    return {
+                        teeth: g.teeth,
+                        gmf: g.gmf,
+                        detectedGmf: g.detectedGmf,
+                        meshFound: g.meshFound,
+                        resolved: g.resolved,
+                        sidebandEnergyRatio: g.sidebandEnergyRatio,
+                        sidebands: g.sidebands
+                    };
+                }),
                 gearFaults: gearFaults,
+                shaftSpeed: rpm,
                 shaftFrequency: shaftFreq,
                 hasFault: hasAnomaly,
                 faultCount: gearFaults.length,
@@ -1242,8 +578,37 @@ module.exports = function (RED) {
             return { normal: hasAnomaly ? null : outputMsg, anomaly: hasAnomaly ? outputMsg : null };
         }
 
+        /**
+         * Resolve the bearing fault frequencies for this analysis: typed-in
+         * values win, anything left at 0 is derived from the geometry when the
+         * geometry and shaft speed allow it.
+         */
+        function resolveBearingFrequencies(shaftFreq, bearing) {
+            const derived = vibration.bearingFaultFrequencies(
+                shaftFreq,
+                bearing.balls,
+                bearing.ballDiameter,
+                bearing.pitchDiameter,
+                bearing.contactAngle
+            );
+            const out = { BPFO: 0, BPFI: 0, BSF: 0, FTF: 0 };
+            let manual = 0;
+            let geometry = 0;
+            ["BPFO", "BPFI", "BSF", "FTF"].forEach(function (key) {
+                if (bearing[key] > 0) {
+                    out[key] = bearing[key];
+                    manual++;
+                } else if (derived) {
+                    out[key] = derived[key];
+                    geometry++;
+                }
+            });
+            out.source = manual && geometry ? "mixed" : manual ? "manual" : geometry ? "geometry" : "none";
+            return out;
+        }
+
         // Process Envelope Analysis
-        function processEnvelope(msg, state, value) {
+        function processEnvelope(msg, state, value, shaftSpeedRpm, bearing, peakFloorFactor) {
             state.buffer.push(value);
 
             if (state.buffer.length < node.fftSize) {
@@ -1258,30 +623,39 @@ module.exports = function (RED) {
             if (state.buffer.length > node.fftSize) {
                 state.buffer.shift();
             }
+            if (!dueForAnalysis(state)) return null;
 
-            // Calculate shaft frequency from RPM
-            const shaftFreq = node.shaftSpeed / 60;
+            // Shaft frequency from the per-message / configured RPM
+            const shaftFreq = shaftSpeedRpm > 0 ? shaftSpeedRpm / 60 : 0;
+            const bearingFreqs = resolveBearingFrequencies(shaftFreq, bearing);
 
             // Perform envelope analysis
-            const envelope = performEnvelopeAnalysis(
-                state.buffer,
-                node.samplingRate,
-                node.envelopeBandLow,
-                node.envelopeBandHigh
-            );
+            const band = resolveEnvelopeBand(node.samplingRate);
+            const envelope = performEnvelopeAnalysis(state.buffer, node.samplingRate, band.low, band.high, debugLog);
 
-            // FFT of envelope
-            const envelopeFFT = performFFT(envelope, node.fftSize, node.samplingRate, "hann");
-            const envelopePeaks = findSpectralPeaks(envelopeFFT.frequencies, envelopeFFT.magnitudes, 0.05);
+            // FFT of the envelope with its mean removed: the envelope of a
+            // rectified signal has a large DC component that would otherwise set
+            // the peak-normalisation and hide the modulation lines behind it.
+            const envMean = calculateMean(envelope);
+            const envelopeAC = envelope.map(function (v) {
+                return v - envMean;
+            });
+            const envelopeFFT = performFFT(envelopeAC, node.fftSize, node.samplingRate, "hann");
+            const floorFactor = peakFloorFactor > 0 ? peakFloorFactor : node.envelopePeakFloor;
+            const envelopePeaks = findSignificantPeaks(envelopeFFT.frequencies, envelopeFFT.magnitudes, floorFactor);
+            const binWidth = envelopeFFT.frequencies.length > 1 ? envelopeFFT.frequencies[1] : 0;
 
             // Detect bearing faults
             const faults = detectBearingFaults(
                 envelopePeaks,
                 shaftFreq,
-                node.bearingBPFO,
-                node.bearingBPFI,
-                node.bearingBSF,
-                node.bearingFTF
+                bearingFreqs.BPFO,
+                bearingFreqs.BPFI,
+                bearingFreqs.BSF,
+                bearingFreqs.FTF,
+                0.05,
+                binWidth,
+                floorFactor
             );
 
             const hasAnomaly = faults.length > 0;
@@ -1290,17 +664,14 @@ module.exports = function (RED) {
                 payload: value,
                 envelope: {
                     peaks: envelopePeaks.slice(0, 10),
-                    bandLow: node.envelopeBandLow,
-                    bandHigh: node.envelopeBandHigh
+                    bandLow: band.low,
+                    bandHigh: band.high,
+                    filter: state.buffer.length < 12 ? "moving-average" : band.filter
                 },
                 bearingFaults: faults,
+                shaftSpeed: shaftSpeedRpm,
                 shaftFrequency: shaftFreq,
-                bearingFreqs: {
-                    BPFO: node.bearingBPFO,
-                    BPFI: node.bearingBPFI,
-                    BSF: node.bearingBSF,
-                    FTF: node.bearingFTF
-                },
+                bearingFreqs: bearingFreqs,
                 hasFault: hasAnomaly,
                 faultCount: faults.length,
                 timestamp: Date.now()
@@ -1321,6 +692,25 @@ module.exports = function (RED) {
             return { normal: hasAnomaly ? null : outputMsg, anomaly: hasAnomaly ? outputMsg : null };
         }
 
+        /**
+         * Whether a buffered-and-full group is due for another analysis.
+         *
+         * A frame (array payload) is analysed once per message. A stream of
+         * single samples is analysed when the buffer first fills and then every
+         * `hop` samples, the hop following from the configured overlap
+         * (fftSize · (1 − overlap)). Without this every single sample triggered
+         * a full transform of an almost identical buffer.
+         */
+        function dueForAnalysis(state) {
+            if (!state.isFrame) {
+                const hop = Math.max(1, Math.round(node.fftSize * (1 - node.overlapPercent / 100)));
+                if (state.analyzed && state.pending < hop) return false;
+            }
+            state.pending = 0;
+            state.analyzed = true;
+            return true;
+        }
+
         // Process FFT
         function processFFT(msg, state, value) {
             state.buffer.push(value);
@@ -1338,6 +728,8 @@ module.exports = function (RED) {
                 state.buffer.shift();
             }
 
+            if (!dueForAnalysis(state)) return null;
+
             debugLog(
                 "FFT: window=" +
                     node.windowFunction +
@@ -1347,14 +739,32 @@ module.exports = function (RED) {
                     node.overlapPercent +
                     "%"
             );
-            const fftResult = performFFT(state.buffer, node.fftSize, node.samplingRate, node.windowFunction);
+            // The mean is removed before the transform and reported separately.
+            // A DC offset (gravity on an accelerometer, a 4-20 mA live zero)
+            // otherwise dominates the spectrum, leaks into the first bins through
+            // the window, and pushes every real line below the relative peak
+            // threshold.
+            const dcOffset = calculateMean(state.buffer);
+            const centred = new Array(state.buffer.length);
+            for (let i = 0; i < centred.length; i++) {
+                centred[i] = state.buffer[i] - dcOffset;
+            }
+            const fftResult = performFFT(centred, node.fftSize, node.samplingRate, node.windowFunction);
             const peaks = findSpectralPeaks(fftResult.frequencies, fftResult.magnitudes, node.peakThreshold);
             const features = calculateSpectralFeatures(fftResult.frequencies, fftResult.magnitudes);
+            // `magnitude` stays |X_k| / N as before; `amplitude` is the physical
+            // single-sided amplitude (a sine of amplitude A reads A).
+            const scale = amplitudeScale(node.windowFunction);
+            peaks.forEach(function (p) {
+                p.amplitude = p.magnitude * scale;
+            });
 
             const outputMsg = {
                 payload: value,
                 peaks: peaks,
                 dominantFrequency: peaks.length > 0 ? peaks[0].frequency : null,
+                dcOffset: dcOffset,
+                amplitudeScale: scale,
                 features: features,
                 samplingRate: node.samplingRate,
                 fftSize: node.fftSize,
@@ -1381,8 +791,8 @@ module.exports = function (RED) {
         }
 
         // Process Vibration with configurable threshold (for msg.config override)
-        function processVibrationWithConfig(msg, state, values, vibrationThreshold) {
-            state.buffer.push.apply(state.buffer, values);
+        function processVibrationWithConfig(msg, state, values, vibrationThreshold, shaftSpeedRpm) {
+            for (let i = 0; i < values.length; i++) state.buffer.push(values[i]);
 
             if (state.buffer.length > node.windowSize) {
                 state.buffer = state.buffer.slice(-node.windowSize);
@@ -1397,7 +807,10 @@ module.exports = function (RED) {
                 return null;
             }
 
-            const features = calculateVibrationFeatures(state.buffer);
+            // A frame (array payload) is a waveform the ISO conversion may
+            // integrate; a scalar stream is not, even though it fills the same buffer.
+            const isWaveform = values.length >= 16;
+            const features = calculateVibrationFeatures(state.buffer, shaftSpeedRpm, isWaveform);
 
             node.status({
                 fill: "green",
@@ -1415,7 +828,7 @@ module.exports = function (RED) {
             copyPassthrough(outputMsg, msg);
 
             // Check for potential issues (vibrationThreshold overrides default crest factor check)
-            const crestFactorThreshold = vibrationThreshold || 6;
+            const crestFactorThreshold = vibrationThreshold > 0 ? vibrationThreshold : 6;
             const hasAnomaly = features.crestFactor > crestFactorThreshold || Math.abs(features.kurtosis) > 4;
 
             return { normal: hasAnomaly ? null : outputMsg, anomaly: hasAnomaly ? outputMsg : null };
@@ -1472,16 +885,60 @@ module.exports = function (RED) {
             return { normal: isPeak ? null : outputMsg, anomaly: isPeak ? outputMsg : null };
         }
 
+        function positiveNumber(v) {
+            const n = typeof v === "string" ? parseFloat(v) : v;
+            return Number.isFinite(n) && n > 0 ? n : null;
+        }
+
+        // Per-message shaft speed (RPM). Order: msg.rpm, msg.shaftSpeed,
+        // msg.config.shaftSpeed, node setting. 0 = unknown.
+        function resolveShaftSpeed(msg, cfg) {
+            return (
+                positiveNumber(msg.rpm) ||
+                positiveNumber(msg.shaftSpeed) ||
+                positiveNumber(cfg.shaftSpeed) ||
+                node.shaftSpeed ||
+                0
+            );
+        }
+
+        // Bearing frequencies / geometry, with msg.config overrides.
+        function resolveBearingConfig(cfg) {
+            const pick = function (key, fallback) {
+                const v = cfg[key] !== undefined ? parseFloat(cfg[key]) : NaN;
+                return Number.isFinite(v) && v >= 0 ? v : fallback;
+            };
+            return {
+                BPFO: pick("bearingBPFO", node.bearingBPFO),
+                BPFI: pick("bearingBPFI", node.bearingBPFI),
+                BSF: pick("bearingBSF", node.bearingBSF),
+                FTF: pick("bearingFTF", node.bearingFTF),
+                balls: pick("bearingBalls", node.bearingBalls),
+                ballDiameter: pick("bearingBallDiameter", node.bearingBallDiameter),
+                pitchDiameter: pick("bearingPitchDiameter", node.bearingPitchDiameter),
+                contactAngle: pick("bearingContactAngle", node.bearingContactAngle)
+            };
+        }
+
         node.on("input", function (msg, send, done) {
             try {
                 // Dynamic configuration via msg.config
                 // Allows runtime override of node settings
-                const cfg = msg.config || {};
+                const cfg = msg.config && typeof msg.config === "object" ? msg.config : {};
                 const activeMode = cfg.mode || node.mode;
                 const activeVibrationThreshold =
                     cfg.vibrationThreshold !== undefined ? parseFloat(cfg.vibrationThreshold) : node.vibrationThreshold;
-                const activePeakThreshold =
-                    cfg.peakThreshold !== undefined ? parseFloat(cfg.peakThreshold) : node.peakThreshold;
+                // Peak height for "peaks" mode: msg.config.minPeakHeight, the
+                // legacy msg.config.peakThreshold override, then the node's
+                // "Min Peak Height" (null = automatic).
+                const overrideHeight = parseFloat(
+                    cfg.minPeakHeight !== undefined ? cfg.minPeakHeight : cfg.peakThreshold
+                );
+                const activePeakHeight = Number.isFinite(overrideHeight) ? overrideHeight : node.minPeakHeight;
+                // Shaft speed for this message (variable-speed drives): msg.rpm,
+                // msg.shaftSpeed, msg.config.shaftSpeed, then the node setting.
+                const activeShaftSpeed = resolveShaftSpeed(msg, cfg);
+                const activeBearing = resolveBearingConfig(cfg);
 
                 // msg.reset clears the buffer of the group this message belongs to;
                 // msg.reset === "all" clears every group at once.
@@ -1499,6 +956,8 @@ module.exports = function (RED) {
                     state.timestamps = [];
                     state.sampleCount = 0;
                     state.lastProcessedIndex = 0;
+                    state.pending = 0;
+                    state.analyzed = false;
                     node.status({ fill: "blue", shape: "ring", text: groupText(state, activeMode + " - reset") });
                     done();
                     return;
@@ -1518,6 +977,8 @@ module.exports = function (RED) {
                         if (Number.isFinite(v)) finite.push(v);
                     }
                     if (finite.length === 0) return null;
+                    state.isFrame = Array.isArray(payload) && finite.length > 1;
+                    state.pending = (state.pending || 0) + finite.length;
                     for (let i = 0; i < finite.length - 1; i++) {
                         state.buffer.push(finite[i]);
                         if (state.buffer.length > node.fftSize) state.buffer.shift();
@@ -1544,7 +1005,7 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processVibrationWithConfig(msg, state, values, activeVibrationThreshold);
+                    result = processVibrationWithConfig(msg, state, values, activeVibrationThreshold, activeShaftSpeed);
                 } else if (activeMode === "peaks") {
                     const value = parseFloat(msg.payload);
                     const timestamp = msg.timestamp || Date.now();
@@ -1553,7 +1014,7 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processPeaksWithConfig(msg, state, value, timestamp, activePeakThreshold);
+                    result = processPeaksWithConfig(msg, state, value, timestamp, activePeakHeight);
                 } else if (activeMode === "envelope") {
                     const framed = bufferFrameReturnLast(msg.payload);
                     if (!framed) {
@@ -1561,7 +1022,11 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processEnvelope(msg, state, framed.last);
+                    const activePeakFloor =
+                        cfg.envelopePeakFloor !== undefined
+                            ? parseFloat(cfg.envelopePeakFloor)
+                            : node.envelopePeakFloor;
+                    result = processEnvelope(msg, state, framed.last, activeShaftSpeed, activeBearing, activePeakFloor);
                 } else if (activeMode === "cepstrum") {
                     const framed = bufferFrameReturnLast(msg.payload);
                     if (!framed) {
@@ -1569,7 +1034,7 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processCepstrum(msg, state, framed.last);
+                    result = processCepstrum(msg, state, framed.last, activeShaftSpeed);
                 }
 
                 if (result) {
@@ -1593,16 +1058,19 @@ module.exports = function (RED) {
         });
 
         node.on("close", async function (done) {
-            // Save state before closing if persistence enabled
-            if (persistence) {
-                await persistence.close();
+            try {
+                // Save state before closing if persistence enabled
+                if (persistence) {
+                    await persistence.close();
+                }
+
+                node.groups.clear();
+                node.status({});
+            } finally {
+                // Always release the runtime: a close handler that never calls
+                // done() stalls every deploy until Node-RED's close timeout.
+                if (done) done();
             }
-
-            node.groups.clear();
-            node.fftInstances = {}; // Clear FFT instance cache
-            node.status({});
-
-            if (done) done();
         });
     }
 
@@ -1611,9 +1079,9 @@ module.exports = function (RED) {
     // API endpoint to check FFT library availability
     RED.httpAdmin.get("/signal-analyzer/fft-status", needsPermission(RED, "signal-analyzer.read"), function (req, res) {
         res.json({
-            available: FFT !== null,
-            library: FFT ? "fft.js (Radix-4)" : "fallback DFT",
-            performance: FFT ? "O(n log n)" : "O(n²)"
+            available: dsp.fftAvailable,
+            library: dsp.fftAvailable ? "fft.js (Radix-4)" : "fallback DFT",
+            performance: dsp.fftAvailable ? "O(n log n)" : "O(n²)"
         });
     });
 };

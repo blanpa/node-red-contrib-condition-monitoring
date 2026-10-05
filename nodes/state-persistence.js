@@ -95,14 +95,14 @@ class NodeStateManager {
                 settled = true;
                 try {
                     if (stored && typeof stored === "object") {
-                        this.state = this._deserializeState(stored);
+                        // Loading is asynchronous: anything set() while the store
+                        // was still answering is newer than what was persisted
+                        // and must survive the load instead of being replaced.
+                        this.state = Object.assign(this._deserializeState(stored), this.state);
                         this.node.debug(`[Persistence] Loaded state: ${Object.keys(this.state).length} keys`);
-                    } else {
-                        this.state = {};
                     }
                 } catch (err) {
                     this.node.warn(`[Persistence] Failed to deserialize state: ${err.message}`);
-                    this.state = {};
                 }
                 this.isLoaded = true;
                 resolve(this.state);

@@ -87,7 +87,14 @@ function calculateMedian(values) {
 }
 
 /**
- * Calculate quartiles (Q1, Q2/median, Q3) and IQR
+ * Calculate quartiles (Q1, Q2/median, Q3) and IQR.
+ *
+ * Uses the same linearly interpolated percentile as calculatePercentile (the
+ * "linear" / R-7 definition, the default of NumPy and Excel's QUARTILE.INC), so
+ * q2 equals calculateMedian and q1 / q3 equal the 25th / 75th percentile. An
+ * earlier version picked the element at floor(n·p), which disagreed with both:
+ * for [1, 2, 3, 4] it gave q1 = 2, median = 3, q3 = 4.
+ *
  * @param {number[]} values - Array of numeric values
  * @returns {{q1: number, q2: number, q3: number, iqr: number, median: number}} Quartile statistics
  */
@@ -96,17 +103,11 @@ function calculateQuartiles(values) {
         return { q1: 0, q2: 0, q3: 0, iqr: 0, median: 0 };
     }
     const sorted = values.slice().sort((a, b) => a - b);
-    const q1Index = Math.floor(sorted.length * 0.25);
-    const q2Index = Math.floor(sorted.length * 0.5);
-    const q3Index = Math.floor(sorted.length * 0.75);
+    const q1 = calculatePercentileSorted(sorted, 25);
+    const q2 = calculatePercentileSorted(sorted, 50);
+    const q3 = calculatePercentileSorted(sorted, 75);
 
-    return {
-        q1: sorted[q1Index],
-        q2: sorted[q2Index],
-        q3: sorted[q3Index],
-        iqr: sorted[q3Index] - sorted[q1Index],
-        median: sorted[q2Index]
-    };
+    return { q1: q1, q2: q2, q3: q3, iqr: q3 - q1, median: q2 };
 }
 
 /**
@@ -244,7 +245,13 @@ function calculateSpearmanCorrelation(x, y) {
 }
 
 /**
- * Calculate skewness of a distribution
+ * Calculate skewness of a distribution.
+ *
+ * Adjusted Fisher–Pearson coefficient G1 (what Excel SKEW / pandas `.skew()`
+ * report). The n/((n-1)(n-2)) factor belongs with the *sample* standard
+ * deviation; pairing it with the population one inflates the result by
+ * (n/(n-1))^1.5.
+ *
  * @param {number[]} values - Array of numeric values
  * @returns {number} Skewness value
  */
@@ -252,7 +259,7 @@ function calculateSkewness(values) {
     if (!values || values.length < 3) return 0;
     const n = values.length;
     const mean = calculateMean(values);
-    const stdDev = calculateStdDev(values, mean);
+    const stdDev = calculateSampleStdDev(values, mean);
     if (stdDev === 0) return 0;
 
     let sum = 0;
@@ -264,7 +271,11 @@ function calculateSkewness(values) {
 }
 
 /**
- * Calculate kurtosis of a distribution
+ * Calculate kurtosis of a distribution.
+ *
+ * Sample excess kurtosis G2 (Excel KURT / pandas `.kurt()`); like G1 above it
+ * is defined on the sample standard deviation.
+ *
  * @param {number[]} values - Array of numeric values
  * @returns {number} Kurtosis value (excess kurtosis, 0 for normal distribution)
  */
@@ -272,7 +283,7 @@ function calculateKurtosis(values) {
     if (!values || values.length < 4) return 0;
     const n = values.length;
     const mean = calculateMean(values);
-    const stdDev = calculateStdDev(values, mean);
+    const stdDev = calculateSampleStdDev(values, mean);
     if (stdDev === 0) return 0;
 
     let sum = 0;
@@ -286,6 +297,79 @@ function calculateKurtosis(values) {
     const correction = (3 * nm1 * nm1) / ((n - 2) * (n - 3));
 
     return factor * sum - correction;
+}
+
+/**
+ * Chi-squared quantile for a confidence level given as a one-sided normal
+ * z-score (Wilson–Hilferty approximation).
+ *
+ * The detector nodes expose a "sigma-like" threshold; this turns it into the
+ * matching control limit for a statistic that is chi-squared distributed with
+ * `df` degrees of freedom (squared Mahalanobis distance, Hotelling's T², SPE),
+ * so the same threshold means the same false-alarm rate regardless of how many
+ * dimensions are monitored. `df` may be fractional. Accurate to a few percent
+ * for df >= 1.
+ *
+ * @param {number} df - Degrees of freedom (> 0)
+ * @param {number} z - Normal quantile of the confidence level (e.g. 3 ≈ 99.87%)
+ * @returns {number} Chi-squared quantile (0 when df is not positive)
+ */
+function chiSquaredQuantileFromZ(df, z) {
+    if (!Number.isFinite(df) || df <= 0 || !Number.isFinite(z)) return 0;
+    const a = 2 / (9 * df);
+    const base = 1 - a + z * Math.sqrt(a);
+    return base <= 0 ? 0 : df * base * base * base;
+}
+
+/**
+ * F-distribution quantile for a confidence level given as a one-sided normal
+ * z-score (Paulson's approximation, the F counterpart of Wilson–Hilferty).
+ *
+ * @param {number} d1 - Numerator degrees of freedom (> 0)
+ * @param {number} d2 - Denominator degrees of freedom (> 0)
+ * @param {number} z - Normal quantile of the confidence level
+ * @returns {number} F quantile, or Infinity when d2 is too small for the
+ *          requested confidence to have a finite, trustworthy limit
+ */
+function fQuantileFromZ(d1, d2, z) {
+    if (!(d1 > 0) || !(d2 > 0) || !Number.isFinite(z)) return Infinity;
+    const a = 1 - 2 / (9 * d2);
+    const b = 1 - 2 / (9 * d1);
+    const c = 2 / (9 * d2);
+    const d = 2 / (9 * d1);
+    // Solve (a·w − b)² = z²(c·w² + d) for w = F^(1/3)
+    const qa = a * a - z * z * c;
+    if (qa <= 0) return Infinity;
+    const disc = a * a * b * b - qa * (b * b - z * z * d);
+    if (disc < 0) return Infinity;
+    const w = (a * b + Math.sqrt(disc)) / qa;
+    return w <= 0 ? 0 : w * w * w;
+}
+
+/**
+ * Control limit for the squared Mahalanobis distance / Hotelling's T² of a NEW
+ * observation against a mean and covariance estimated from `n` reference
+ * samples in `p` dimensions:
+ *
+ *     p (n + 1)(n − 1) / (n (n − p)) · F(p, n − p)
+ *
+ * With plenty of reference data this converges to the chi-squared quantile;
+ * with little data it is considerably wider, because the covariance estimate
+ * itself is uncertain — using the chi-squared limit there raises a steady
+ * stream of false alarms. Falls back to the chi-squared quantile when `n` is
+ * unknown, and returns Infinity when there are too few samples (n − p < 1 or
+ * the F quantile does not exist) for any finite limit to be justified.
+ *
+ * @param {number} p - Number of dimensions / retained components
+ * @param {number} n - Number of reference samples
+ * @param {number} z - Normal quantile of the confidence level (e.g. 3)
+ * @returns {number} Limit for the SQUARED distance
+ */
+function hotellingLimitFromZ(p, n, z) {
+    if (!(p > 0) || !Number.isFinite(z)) return 0;
+    if (!Number.isFinite(n)) return chiSquaredQuantileFromZ(p, z);
+    if (n - p < 1) return Infinity;
+    return ((p * (n + 1) * (n - 1)) / (n * (n - p))) * fQuantileFromZ(p, n - p, z);
 }
 
 /**
@@ -476,6 +560,9 @@ module.exports = {
     // Anomaly detection helpers
     calculateZScore,
     calculateIQRBounds,
+    chiSquaredQuantileFromZ,
+    fQuantileFromZ,
+    hotellingLimitFromZ,
 
     // Correlation
     calculatePearsonCorrelation,

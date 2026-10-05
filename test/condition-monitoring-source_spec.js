@@ -19,7 +19,6 @@ describe("condition-monitoring-source Node", function () {
         helper.load(cmSourceNode, flow, function () {
             const n1 = helper.getNode("n1");
             try {
-                expect(n1).toBeDefined();
                 expect(n1.name).toBe("test cm-source");
                 expect(n1.running).toBe(false); // autoStart defaults to false
                 done();
@@ -41,13 +40,24 @@ describe("condition-monitoring-source Node", function () {
 
             n2.on("input", function (msg) {
                 try {
-                    expect(typeof msg.payload).toBe("object");
-                    expect(msg.payload.sensors).toBeDefined();
-                    expect(typeof msg.payload.sensors.vibrationRMS).toBe("number");
-                    expect(typeof msg.payload.sensors.temperature).toBe("number");
-                    expect(msg.payload.health).toBeLessThanOrEqual(100);
-                    expect(["normal", "warning", "alarm"]).toContain(msg.status);
-                    expect(msg.payload.rul).toBeDefined();
+                    // noise: 0 makes the first sample fully determined by the
+                    // defaults (load 70 %, 0.06 %/h degradation, 2 h per sample).
+                    expect(msg.payload.sensors).toEqual({
+                        vibrationRMS: 1.747,
+                        temperature: 57.64,
+                        current: 11.702,
+                        pressure: 4.598
+                    });
+                    expect(msg.payload.health).toBe(99.88);
+                    expect(msg.payload.simHours).toBe(2);
+                    expect(msg.payload.sampleCount).toBe(1);
+                    expect(msg.payload.rpm).toBe(1500);
+                    expect(msg.payload.shaftFrequencyHz).toBe(25);
+                    expect(msg.payload.faults).toEqual([]);
+                    expect(msg.status).toBe("normal");
+                    expect(msg.alarm).toBe(false);
+                    expect(msg.payload.rul).toEqual({ hours: 1664.67, label: "69.4 d", lossPerHour: 0.06 });
+                    expect(msg.rul).toEqual(msg.payload.rul);
                     done();
                 } catch (err) {
                     done(err);
@@ -150,15 +160,91 @@ describe("condition-monitoring-source Node", function () {
 
             n2.on("input", function (msg) {
                 try {
-                    expect(typeof msg.payload).toBe("number");
-                    expect(msg.condition).toBeDefined();
+                    expect(msg.payload).toBe(1.747);
                     expect(msg.condition.sensors.vibrationRMS).toBe(msg.payload);
+                    expect(msg.condition.health).toBe(99.88);
+                    expect(msg.health).toBe(99.88);
                     done();
                 } catch (err) {
                     done(err);
                 }
             });
 
+            n1.receive({});
+        });
+    });
+});
+
+describe("condition-monitoring-source hardening", function () {
+    beforeEach(function (done) {
+        helper.startServer(done);
+    });
+    afterEach(function (done) {
+        helper.unload().then(function () {
+            helper.stopServer(done);
+        });
+    });
+
+    it("describes active faults in English", function (done) {
+        const flow = [
+            {
+                id: "n1",
+                type: "condition-monitoring-source",
+                noise: 0,
+                faultImbalance: 0.2,
+                faultMisalignment: 0.4,
+                faultBearing: 0.8,
+                faultLooseness: 0.1,
+                degRate: 0,
+                wires: [["n2"]]
+            },
+            { id: "n2", type: "helper" }
+        ];
+        helper.load(cmSourceNode, flow, function () {
+            helper.getNode("n2").on("input", function (msg) {
+                try {
+                    expect(msg.payload.faults.map((f) => [f.type, f.description, f.severity, f.frequencyHz])).toEqual([
+                        ["imbalance", "Imbalance (1× shaft frequency)", "low", 25],
+                        ["misalignment", "Misalignment (2×)", "medium", 50],
+                        ["bearing", "Bearing fault (~3.5× / BPFO)", "high", 87.5],
+                        ["looseness", "Mechanical looseness (0.5×)", "low", 12.5]
+                    ]);
+                    // No degradation configured → RUL is reported as stable.
+                    expect(msg.payload.rul).toEqual({ hours: null, label: "stable", lossPerHour: 0 });
+                    done();
+                } catch (err) {
+                    done(err);
+                }
+            });
+            helper.getNode("n1").receive({});
+        });
+    });
+
+    it("a seeded stream replays identically after a reset", function (done) {
+        const flow = [
+            { id: "n1", type: "condition-monitoring-source", seed: 42, noise: 1, wires: [["n2"]] },
+            { id: "n2", type: "helper" }
+        ];
+        helper.load(cmSourceNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const seen = [];
+            helper.getNode("n2").on("input", function (msg) {
+                seen.push(msg.payload.sensors);
+                if (seen.length === 6) {
+                    try {
+                        expect(seen.slice(3)).toEqual(seen.slice(0, 3));
+                        done();
+                    } catch (err) {
+                        done(err);
+                    }
+                }
+            });
+            n1.receive({});
+            n1.receive({});
+            n1.receive({});
+            n1.receive({ payload: "reset" });
+            n1.receive({});
+            n1.receive({});
             n1.receive({});
         });
     });

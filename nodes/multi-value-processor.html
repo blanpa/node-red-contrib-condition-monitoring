@@ -18,11 +18,15 @@
             sensor2: { value: "sensor2" },
             correlationThreshold: { value: 0.7 },
             correlationMethod: { value: "pearson" },
+            maxLag: { value: "" },
             // Aggregation settings
             aggregateMethod: { value: "mean" },
             aggregateOutput: { value: "single" },
             outputTopic: { value: "" },
-            debug: { value: false }
+            groupBy: { value: "" },
+            maxGroups: { value: 50 },
+            debug: { value: false },
+            persistState: { value: false }
         },
         inputs: 1,
         outputs: 2,
@@ -162,7 +166,7 @@
                     <div class="cm-config-item mahalanobis-only" style="display: none;">
                         <label>Warning Threshold (default: 2.0)</label>
                         <input type="number" id="node-input-warningThreshold" step="0.1" min="0.5" value="2.0">
-                        <div class="cm-help-text">Distance for warning severity</div>
+                        <div class="cm-help-text">Sigma-like level for warning severity</div>
                     </div>
                 </div>
                 <div id="mahalanobis-info" style="margin-top: 12px; padding: 10px; background: #e8f5e9; border-radius: 4px; font-size: 11px; display: none;">
@@ -196,6 +200,11 @@
                             <option value="spearman">Spearman (rank-based)</option>
                             <option value="cross">Cross-Correlation (time lag)</option>
                         </select>
+                    </div>
+                    <div class="cm-config-item">
+                        <label>Max Lag (cross-correlation)</label>
+                        <input type="number" id="node-input-maxLag" min="1" step="1" placeholder="auto">
+                        <div class="cm-help-text">Lags searched each way; empty = &frac14; of the buffer, at most 256</div>
                     </div>
                 </div>
             </div>
@@ -254,11 +263,35 @@
                 </div>
                 
                 <div class="cm-config-item">
+                    <label for="node-input-groupBy">
+                        <i class="fa fa-sitemap"></i> Group By (msg property)
+                    </label>
+                    <input type="text" id="node-input-groupBy" placeholder="e.g. topic (empty = single state)">
+                    <div class="cm-help-text">Analyze / correlate: one separate set of buffers per value</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-maxGroups">
+                        <i class="fa fa-list-ol"></i> Max Groups
+                    </label>
+                    <input type="number" id="node-input-maxGroups" min="1" step="1" placeholder="50">
+                    <div class="cm-help-text">Limit when grouping; least recently used is dropped</div>
+                </div>
+
+                <div class="cm-config-item">
                     <label for="node-input-debug">
                         <i class="fa fa-bug"></i> Debug Mode
                     </label>
                     <input type="checkbox" id="node-input-debug" style="width: auto; margin-top: 8px;">
                     <div class="cm-help-text">Log detailed info to Node-RED debug</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-persistState">
+                        <i class="fa fa-save"></i> Persist State
+                    </label>
+                    <input type="checkbox" id="node-input-persistState" style="width: auto; margin-top: 8px;">
+                    <div class="cm-help-text">Keep analyze / correlate buffers across restarts</div>
                 </div>
             </div>
         </div>
@@ -299,7 +332,8 @@
         <br>Or object with named sensors: <code>{"temp": 23.5, "pressure": 1013, "humidity": 65}</code></dd>
         
         <dt>msg.reset <span class="property-type">boolean</span></dt>
-        <dd>Set to <code>true</code> to clear all internal buffers</dd>
+        <dd>Set to <code>true</code> to clear all internal buffers (with <b>Group By</b>: the buffers of the
+        group the message belongs to)</dd>
     </dl>
     
     <h3>Outputs</h3>
@@ -342,6 +376,16 @@
         
         <dt>msg.anomalyCount <span class="property-type">number</span></dt>
         <dd>Number of sensors with anomalies</dd>
+
+        <dt>msg.skippedValues <span class="property-type">array</span></dt>
+        <dd>Names of entries that were not finite numbers (<code>NaN</code>, <code>null</code>, text) and were
+        left out of the analysis. Only present when something was skipped.</dd>
+    </dl>
+    <p><b>Mahalanobis:</b> each sample is scored against the mean and covariance of the samples <i>before</i>
+    it (at least 10 complete ones). <b>Threshold</b> and <b>Warning Threshold</b> are sigma-like confidence
+    levels (3 &asymp; 99.87%); the distance limit derived from them accounts for the number of sensors and the
+    amount of history, and is reported as <code>mahalanobisThreshold</code>.</p>
+    <dl>
     </dl>
     
     <h3>Correlate Mode Output</h3>
@@ -352,6 +396,12 @@
         <br>0: No correlation
         <br>-1: Perfect negative correlation</dd>
         
+        <dt>msg.reason <span class="property-type">string</span></dt>
+        <dd>Only when the correlation is undefined: if a sensor held exactly the same value over the whole
+        window (machine off, stuck reading) there is nothing to correlate. <code>msg.correlation</code> is then
+        <code>null</code>, <code>msg.isAnomalous</code> is <code>false</code> and the message leaves on the
+        first output.</dd>
+
         <dt>msg.isAnomalous <span class="property-type">boolean</span></dt>
         <dd>True if |correlation| < threshold (default: 0.7)</dd>
         
@@ -363,8 +413,9 @@
         
         <dt>msg.crossCorrelation <span class="property-type">object</span></dt>
         <dd>(Cross-Correlation only) Time lag analysis:
-        <br>• <code>bestLag</code>: Optimal lag (positive = sensor2 leads)
-        <br>• <code>maxCorrelation</code>: Correlation at best lag
+        <br>• <code>bestLag</code>: Lag with the strongest (positive or negative) correlation.
+        Positive = sensor1 leads (the pattern reaches sensor2 that many samples later)
+        <br>• <code>maxCorrelation</code>: Signed correlation at best lag
         <br>• <code>interpretation</code>: Human-readable lag description
         <br><b>Use case:</b> Detect propagation delays between sensors (e.g., temperature wave through pipe)</dd>
         
@@ -372,6 +423,23 @@
         <dd>Statistics including sensor means and buffer size</dd>
     </dl>
     
+    <h3>Per-device grouping</h3>
+    <p>Set <b>Group By</b> to a message property (e.g. <code>topic</code>, or a nested path such as
+    <code>payload.deviceId</code>) to keep separate analyze / correlate buffers per value of that property, so one node can serve an
+    interleaved stream from several machines without mixing their baselines.</p>
+    <ul>
+        <li>Each result carries <code>msg.group</code> with the key it was computed from.</li>
+        <li>Messages whose group property is missing or empty share one "ungrouped" state.</li>
+        <li><b>Max Groups</b> caps memory: when exceeded, the least recently used group is dropped.</li>
+        <li><code>msg.reset</code> clears the group named by the message, or everything if it names none.</li>
+        <li>Leaving <b>Group By</b> empty keeps the single shared state of earlier releases.</li>
+    </ul>
+
+    <h3>State persistence</h3>
+    <p>With <b>Persist State</b> enabled, the analyze and correlate buffers (per group, when <b>Group By</b> is
+    set) are stored in the node context and restored on restart, so baselines do not have to be relearned.
+    Split and aggregate keep no state. <code>msg.reset</code> also clears the stored copy.</p>
+
     <h3>Use Cases</h3>
     <ul>
         <li><b>MQTT/OPC-UA Parsing:</b> Split mode to extract values from complex payloads</li>

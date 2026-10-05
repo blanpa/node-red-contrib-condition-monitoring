@@ -13,6 +13,8 @@
             degradedThreshold: { value: 40 },
             criticalThreshold: { value: 20 },
             outputTopic: { value: "" },
+            groupBy: { value: "" },
+            maxGroups: { value: 50 },
             debug: { value: false },
             persistState: { value: false }
         },
@@ -429,6 +431,22 @@
                 </div>
                 
                 <div class="cm-config-item">
+                    <label for="node-input-groupBy">
+                        <i class="fa fa-sitemap"></i> Group By (msg property)
+                    </label>
+                    <input type="text" id="node-input-groupBy" placeholder="e.g. topic (empty = single state)">
+                    <div class="cm-help-text">One separate history per value, so one node can serve many machines</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-maxGroups">
+                        <i class="fa fa-list-ol"></i> Max Groups
+                    </label>
+                    <input type="number" id="node-input-maxGroups" min="1" step="1" placeholder="50">
+                    <div class="cm-help-text">Limit when grouping; least recently used is dropped</div>
+                </div>
+
+                <div class="cm-config-item">
                     <label for="node-input-debug">
                         <i class="fa fa-bug"></i> Debug Mode
                     </label>
@@ -543,10 +561,36 @@
         <li><b>Geometric Mean:</b> Emphasizes poor sensors more than average</li>
     </ul>
     
+    <h3>Per-device grouping</h3>
+    <p>Set <b>Group By</b> to a message property (e.g. <code>topic</code>, or a nested path such as
+    <code>payload.deviceId</code>) to keep a separate health history and reliability record per value of that property, so one node can serve an
+    interleaved stream from several machines without mixing their baselines.</p>
+    <ul>
+        <li>Each result carries <code>msg.group</code> with the key it was computed from.</li>
+        <li>Messages whose group property is missing or empty share one "ungrouped" state.</li>
+        <li><b>Max Groups</b> caps memory: when exceeded, the least recently used group is dropped.</li>
+        <li><code>msg.reset</code> clears the group named by the message, or everything if it names none.</li>
+        <li>Leaving <b>Group By</b> empty keeps the single shared state of earlier releases.</li>
+    </ul>
+
+    <h3>Input handling</h3>
+    <ul>
+        <li>A weight of <code>0</code> excludes a sensor from the index (it is still listed in
+        <code>sensorScores</code>). Weights must be finite numbers &ge; 0; anything else is ignored with a warning.</li>
+        <li>Entries that carry no usable reading (<code>null</code>, <code>NaN</code>, free text) are left out and
+        listed in <code>msg.skippedSensors</code>.</li>
+        <li>If no sensor is left, the node emits <b>nothing</b> and shows "no valid sensor data" &mdash; missing data
+        is not reported as a healthy 100.</li>
+        <li>Thresholds are applied in descending order (healthy &ge; warning &ge; degraded &ge; critical);
+        <code>msg.method</code> and <code>msg.thresholds</code> report what was applied, including
+        <code>msg.config</code> overrides.</li>
+    </ul>
+
     <h3>Dynamic Weighting</h3>
     <p>The <b>Dynamic Weighted</b> method automatically adjusts sensor weights based on:</p>
     <ul>
-        <li><b>Anomaly Rate:</b> Sensors with high anomaly rates (>30%) have reduced influence</li>
+        <li><b>Anomaly Rate:</b> Reported per sensor as <code>anomalyRate</code>, but it does <i>not</i> reduce the
+        weight: a sensor that is anomalous all the time is the fault to surface, not a reading to mute</li>
         <li><b>Signal Variance:</b> Very noisy sensors (high coefficient of variation) are weighted lower</li>
         <li><b>Confidence:</b> If sensor provides a confidence value, it affects the weight</li>
     </ul>

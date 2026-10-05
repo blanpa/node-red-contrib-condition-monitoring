@@ -15,6 +15,9 @@
             // RUL settings
             failureThreshold: { value: "" },
             warningThreshold: { value: "" },
+            failureDirection: { value: "rising" },
+            groupBy: { value: "" },
+            maxGroups: { value: 50 },
             rulUnit: { value: "hours" },
             degradationModel: { value: "linear" },
             confidenceLevel: { value: 0.95 },
@@ -58,6 +61,21 @@
             
             showModeConfig(this.mode || "prediction");
             showWeibullParams();
+
+            // Nodes saved before this setting existed have no value for it; show
+            // the behaviour they actually get instead of an empty select.
+            if (!$("#node-input-failureDirection").val()) {
+                $("#node-input-failureDirection").val("rising");
+            }
+
+            // The window size is one setting shown in two mode panels. Only one
+            // element may carry the node-input id (a duplicate id is never read
+            // back on save), so the RUL panel mirrors the real field.
+            var windowSize = $("#node-input-windowSize");
+            var windowSizeMirror = $("#cm-rul-windowSize");
+            windowSizeMirror.val(windowSize.val());
+            windowSizeMirror.on("change input", function() { windowSize.val($(this).val()); });
+            windowSize.on("change input", function() { windowSizeMirror.val($(this).val()); });
             
             $(".cm-section-header").on("click", function() {
                 var $content = $(this).next(".cm-section-content");
@@ -175,6 +193,14 @@
                         <div class="cm-help-text">Early warning level (optional)</div>
                     </div>
                     <div class="cm-config-item">
+                        <label>Failure Direction</label>
+                        <select id="node-input-failureDirection">
+                            <option value="rising" selected>Rising to threshold</option>
+                            <option value="falling">Falling to threshold</option>
+                        </select>
+                        <div class="cm-help-text">Which way the value moves as the asset degrades: rising (vibration, temperature) or falling (pressure, health index)</div>
+                    </div>
+                    <div class="cm-config-item">
                         <label>RUL Unit</label>
                         <select id="node-input-rulUnit">
                             <option value="hours">Hours</option>
@@ -198,7 +224,7 @@
                     </div>
                     <div class="cm-config-item">
                         <label>Window Size (default: 50)</label>
-                        <input type="number" id="node-input-windowSize" min="5" value="50">
+                        <input type="number" id="cm-rul-windowSize" min="5" placeholder="50">
                         <div class="cm-help-text">Number of samples for trend analysis</div>
                     </div>
                 </div>
@@ -247,6 +273,20 @@
                     <div class="cm-help-text">Set msg.topic on output (empty = keep original)</div>
                 </div>
                 
+                <div class="cm-config-item">
+                    <label for="node-input-groupBy">
+                        <i class="fa fa-object-group"></i> Group By
+                    </label>
+                    <input type="text" id="node-input-groupBy" placeholder="e.g. topic or payload.deviceId (empty = one shared state)">
+                    <div class="cm-help-text">Message property naming the device. One independent buffer is kept per value, so one node can serve several machines.</div>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-maxGroups">
+                        <i class="fa fa-database"></i> Max Groups
+                    </label>
+                    <input type="number" id="node-input-maxGroups" min="1" step="1" placeholder="50">
+                    <div class="cm-help-text">Devices kept in memory; the least recently used one is evicted beyond this (default 50)</div>
+                </div>
                 <div class="cm-config-item">
                     <label for="node-input-debug">
                         <i class="fa fa-bug"></i> Debug Mode

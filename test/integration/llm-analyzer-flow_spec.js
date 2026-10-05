@@ -30,7 +30,7 @@ function startMockAnthropic() {
             let parsed = null;
             try {
                 parsed = JSON.parse(raw);
-            } catch (_) {
+            } catch {
                 parsed = null;
             }
             requests.push({

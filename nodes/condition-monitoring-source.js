@@ -7,30 +7,16 @@ module.exports = function (RED) {
     // Standardized error handling + prototype-pollution sanitizer
     const errorHandler = require("./utils/error-handler");
 
-    /**
-     * Deterministic pseudo-random generator (mulberry32).
-     * Used when a seed is configured so simulations are reproducible.
-     *
-     * @param {number} seed - 32-bit integer seed
-     * @returns {function(): number} Generator returning floats in [0, 1)
-     */
-    function mulberry32(seed) {
-        let a = seed >>> 0;
-        return function () {
-            a |= 0;
-            a = (a + 0x6d2b79f5) | 0;
-            let t = Math.imul(a ^ (a >>> 15), 1 | a);
-            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-        };
-    }
+    // Deterministic generator, used when a seed is configured so simulations
+    // are reproducible.
+    const { mulberry32 } = require("./utils/seeded-random");
 
     // Characteristic vibration order (× shaft frequency) per fault type.
     const FAULT_DEFS = [
-        { key: "imbalance", order: 1.0, gain: 2.6, label: "Unwucht (1× Drehfrequenz)" },
-        { key: "misalignment", order: 2.0, gain: 2.1, label: "Ausrichtungsfehler (2×)" },
-        { key: "bearing", order: 3.5, gain: 4.2, label: "Lagerschaden (~3.5× / BPFO)" },
-        { key: "looseness", order: 0.5, gain: 1.6, label: "Mechanische Lockerung (0.5×)" }
+        { key: "imbalance", order: 1.0, gain: 2.6, label: "Imbalance (1× shaft frequency)" },
+        { key: "misalignment", order: 2.0, gain: 2.1, label: "Misalignment (2×)" },
+        { key: "bearing", order: 3.5, gain: 4.2, label: "Bearing fault (~3.5× / BPFO)" },
+        { key: "looseness", order: 0.5, gain: 1.6, label: "Mechanical looseness (0.5×)" }
     ];
 
     function ConditionMonitoringSourceNode(config) {
@@ -67,7 +53,8 @@ module.exports = function (RED) {
 
         // Optional seed for reproducible streams (empty = non-deterministic).
         const seedParsed = parseInt(config.seed, 10);
-        node.rng = Number.isFinite(seedParsed) ? mulberry32(seedParsed) : Math.random;
+        const seeded = Number.isFinite(seedParsed);
+        node.rng = seeded ? mulberry32(seedParsed) : Math.random;
 
         // ------------------------------- Runtime state ---------------------------
         node.simHours = 0;
@@ -96,7 +83,7 @@ module.exports = function (RED) {
         function estimateRUL() {
             const lph = lossPerHour();
             if (lph <= 0) {
-                return { hours: null, label: "stabil", lossPerHour: 0 };
+                return { hours: null, label: "stable", lossPerHour: 0 };
             }
             const hours = node.health / lph;
             let label;
@@ -330,6 +317,8 @@ module.exports = function (RED) {
             node.simHours = 0;
             node.health = 100;
             node.sampleCount = 0;
+            // A seeded stream must replay identically after a reset.
+            if (seeded) node.rng = mulberry32(seedParsed);
             node.status({ fill: "blue", shape: "ring", text: "reset" });
             debugLog("Simulation reset");
         }

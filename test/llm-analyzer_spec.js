@@ -359,7 +359,9 @@ describe("callOpenAI", () => {
         expect(calls[0].init.headers["authorization"]).toBe("Bearer sk-test");
         const sent = JSON.parse(calls[0].init.body);
         expect(sent.model).toBe("gpt-4o-mini");
-        expect(sent.max_tokens).toBe(1024);
+        // OpenAI deprecated max_tokens in favour of max_completion_tokens.
+        expect(sent.max_completion_tokens).toBe(1024);
+        expect(sent.max_tokens).toBeUndefined();
         expect(sent.messages).toEqual([
             { role: "system", content: "be brief" },
             { role: "user", content: "ping" }
@@ -392,7 +394,7 @@ describe("callOpenAI", () => {
 // callGoogle — Gemini generateContent
 // ---------------------------------------------------------------------------
 describe("callGoogle", () => {
-    it("substitutes {model} into the URL and appends ?key=", async () => {
+    it("substitutes {model} into the URL and sends the key as a header, not in the URL", async () => {
         const calls = [];
         const fetchFn = (url, init) => {
             calls.push({ url, init });
@@ -409,7 +411,9 @@ describe("callGoogle", () => {
             userPrompt: "hello",
             fetchFn
         });
-        expect(calls[0].url).toMatch(/\/v1beta\/models\/gemini-2\.0-flash:generateContent\?key=AIzaTest$/);
+        expect(calls[0].url).toMatch(/\/v1beta\/models\/gemini-2\.0-flash:generateContent$/);
+        expect(calls[0].url).not.toContain("AIzaTest");
+        expect(calls[0].init.headers["x-goog-api-key"]).toBe("AIzaTest");
         const sent = JSON.parse(calls[0].init.body);
         expect(sent.systemInstruction).toEqual({ parts: [{ text: "system" }] });
         expect(sent.contents).toEqual([{ role: "user", parts: [{ text: "hello" }] }]);
@@ -585,6 +589,22 @@ describe("llm-analyzer node", () => {
         return fn;
     }
 
+    // A node that refused to start must ignore input: no provider call, no output.
+    function expectInert(n1, n2, provider, done) {
+        const seen = [];
+        n2.on("input", (msg) => seen.push(msg));
+        n1.receive({ payload: 1, flush: true });
+        setTimeout(() => {
+            try {
+                expect(provider.calls).toHaveLength(0);
+                expect(seen).toHaveLength(0);
+                done();
+            } catch (err) {
+                done(err);
+            }
+        }, 40);
+    }
+
     function mockProviderErr(err) {
         return async () => {
             throw err;
@@ -592,22 +612,35 @@ describe("llm-analyzer node", () => {
     }
 
     it("refuses to start without an API key", (done) => {
-        const flow = [{ id: "n1", type: "llm-analyzer", name: "x", triggerMode: "batch", batchSize: 5 }];
+        const flow = [
+            { id: "n1", type: "llm-analyzer", name: "x", triggerMode: "batch", batchSize: 1, wires: [["n2"]] },
+            { id: "n2", type: "helper" }
+        ];
+        const provider = mockProviderOk("must not be called");
+        flow[0].providerCall = provider;
         helper.load(llmAnalyzerNode, flow, function () {
-            const n1 = helper.getNode("n1");
-            expect(n1).toBeDefined();
-            done();
+            expectInert(helper.getNode("n1"), helper.getNode("n2"), provider, done);
         });
     });
 
     it("refuses an unknown provider name", (done) => {
         const flow = [
-            { id: "n1", type: "llm-analyzer", name: "x", provider: "made-up", apiKey: "k", triggerMode: "batch" }
+            {
+                id: "n1",
+                type: "llm-analyzer",
+                name: "x",
+                provider: "made-up",
+                apiKey: "k",
+                triggerMode: "batch",
+                batchSize: 1,
+                wires: [["n2"]]
+            },
+            { id: "n2", type: "helper" }
         ];
+        const provider = mockProviderOk("must not be called");
+        flow[0].providerCall = provider;
         helper.load(llmAnalyzerNode, flow, function () {
-            const n1 = helper.getNode("n1");
-            expect(n1).toBeDefined();
-            done();
+            expectInert(helper.getNode("n1"), helper.getNode("n2"), provider, done);
         });
     });
 
@@ -654,14 +687,16 @@ describe("llm-analyzer node", () => {
                 name: "x",
                 provider: "openai-compatible",
                 apiKey: "k",
-                triggerMode: "manual"
+                triggerMode: "manual",
                 // intentionally no apiUrl
-            }
+                wires: [["n2"]]
+            },
+            { id: "n2", type: "helper" }
         ];
+        const provider = mockProviderOk("must not be called");
+        flow[0].providerCall = provider;
         helper.load(llmAnalyzerNode, flow, function () {
-            const n1 = helper.getNode("n1");
-            expect(n1).toBeDefined();
-            done();
+            expectInert(helper.getNode("n1"), helper.getNode("n2"), provider, done);
         });
     });
 

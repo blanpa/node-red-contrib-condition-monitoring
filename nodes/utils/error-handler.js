@@ -88,8 +88,11 @@ function handleNodeError(node, errorMsg, msg, level, options) {
             node.warn(errorMsg);
             break;
         case ErrorLevel.INFO:
-            // Info level just logs to debug
-            if (node.debug) {
+            // Info level only logs when the node's debug option is on. The flag
+            // is `node.debugEnabled`; `node.debug` is Node-RED's own log METHOD
+            // (always truthy), so only an explicit boolean `true` there counts —
+            // that keeps nodes which still store the flag as `node.debug` working.
+            if (node.debugEnabled === true || node.debug === true) {
                 node.warn("[INFO] " + errorMsg);
             }
             break;

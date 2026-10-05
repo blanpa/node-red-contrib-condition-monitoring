@@ -55,7 +55,10 @@ describe("isolation-forest-anomaly Node", function () {
 
             n2.on("input", function (msg) {
                 try {
-                    expect(msg.payload).toBeDefined();
+                    // A single sample cannot be scored: passed through untouched
+                    expect(msg.payload).toBe(50);
+                    expect(msg).not.toHaveProperty("isAnomaly");
+                    expect(msg).not.toHaveProperty("method");
                     done();
                 } catch (err) {
                     done(err);
@@ -85,7 +88,11 @@ describe("isolation-forest-anomaly Node", function () {
                     try {
                         // Should use fallback method
                         expect(msg.method).toBe("fallback-zscore");
-                        expect(msg.isAnomaly).toBeDefined();
+                        // 5th sample of 50, 51, 52, 53, 54 against its own window:
+                        // (54 - 52) / sqrt(2)
+                        expect(msg.payload).toBe(54);
+                        expect(msg.zScore).toBeCloseTo(Math.SQRT2, 10);
+                        expect(msg.isAnomaly).toBe(false);
                         done();
                     } catch (err) {
                         done(err);
@@ -95,7 +102,7 @@ describe("isolation-forest-anomaly Node", function () {
 
             // Send enough values for fallback to work
             for (let i = 0; i < 10; i++) {
-                n1.receive({ payload: 50 + Math.random() * 5 });
+                n1.receive({ payload: 50 + i });
             }
         });
     });
@@ -189,14 +196,16 @@ describe("isolation-forest-anomaly Node", function () {
             const n1 = helper.getNode("n1");
             const n2 = helper.getNode("n2");
 
+            const startedAt = Date.now();
             let messageCount = 0;
             n2.on("input", function (msg) {
                 messageCount++;
                 // Need at least 2 messages for fallback method to output with timestamp
-                if (messageCount >= 3) {
+                if (messageCount === 3) {
                     try {
-                        expect(msg.timestamp).toBeDefined();
                         expect(typeof msg.timestamp).toBe("number");
+                        expect(msg.timestamp).toBeGreaterThanOrEqual(startedAt);
+                        expect(msg.timestamp).toBeLessThanOrEqual(Date.now());
                         done();
                     } catch (err) {
                         done(err);
@@ -238,19 +247,36 @@ describe("isolation-forest-anomaly Node", function () {
 
         helper.load(isolationForestNode, flow, function () {
             const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+
+            let messageCount = 0;
+            n2.on("input", function () {
+                messageCount++;
+                if (messageCount < 5) return;
+
+                let bufferedBeforeClose;
+                try {
+                    bufferedBeforeClose = n1.dataBuffer.length;
+                } catch (err) {
+                    done(err);
+                    return;
+                }
+
+                helper
+                    .unload()
+                    .then(function () {
+                        expect(bufferedBeforeClose).toBe(5);
+                        expect(n1.dataBuffer.length).toBe(0);
+                        expect(n1.isTrained).toBe(false);
+                        done();
+                    })
+                    .catch(done);
+            });
 
             // Add some data
             for (let i = 0; i < 5; i++) {
                 n1.receive({ payload: 50 + i });
             }
-
-            // Node should handle close gracefully
-            helper
-                .unload()
-                .then(function () {
-                    done();
-                })
-                .catch(done);
         });
     });
 });

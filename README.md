@@ -13,7 +13,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ## Table of Contents
 
-- [Project Status: v0.3.2 Beta](#project-status-v032-beta)
+- [Project Status: v0.4.0 Beta](#project-status-v040-beta)
 - [Important Disclaimer](#important-disclaimer)
 - [Background & Industry Context](#background--industry-context)
 - [Features](#features)
@@ -35,12 +35,16 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## Project Status: v0.3.2 Beta
+## Project Status: v0.4.0 Beta
 
-**Per-device signal buffers, LLM Analyzer, Vision Pipeline & Data-Source Simulators**
+**Per-device state in every analysis node, corrected detection maths, LLM Analyzer, Vision Pipeline & Data-Source Simulators**
+
+> Upgrading from 0.3.x: several nodes produce different (corrected) results — read "Changed behaviour" in the [changelog](CHANGELOG.md) before deploying.
 
 - **15 Nodes** - analysis, ML inference, vision pipeline, LLM analysis, and data-source simulators
-- **ISO 10816-3 Integration** - Vibration severity assessment with zones A-D
+- **ISO 20816-3 Integration** - Vibration severity zones A-D by machine group and foundation (legacy ISO 10816-1 classes kept); acceleration input integrated to velocity over 10–1000 Hz
+- **Bearing diagnostics** - fault frequencies from bearing geometry, per-message shaft speed (`msg.rpm`), BPFI sidebands, looseness and sub-synchronous rules
+- **Operating-point regimes** - one anomaly baseline per speed/load class, so a load change is not an alarm
 - **Butterworth Filter** - 2nd order IIR filter with zero-phase filtering (filtfilt)
 - **Hysteresis (Anti-Flicker)** - Prevents rapid alarm on/off switching
 - **Dynamic Sensor Weighting** - Auto-adjusts weights based on sensor reliability
@@ -74,7 +78,7 @@ module implements as composable Node-RED nodes.
 
 | Industry technique | Detects | Node(s) here |
 | --- | --- | --- |
-| Vibration analysis (the dominant technique by market share) | bearing wear, misalignment, imbalance, looseness | `signal-analyzer` (FFT, RMS, kurtosis, crest factor, envelope), ISO 10816-3 zones |
+| Vibration analysis (the dominant technique by market share) | bearing wear, misalignment, imbalance, looseness | `signal-analyzer` (FFT, RMS, kurtosis, crest factor, envelope), ISO 20816-3 zones |
 | Thermal / process trending | overheating, degradation drift | `trend-predictor`, `anomaly-detector` |
 | Anomaly detection on a learned "normal signature" | deviations preceding failure | `anomaly-detector`, `isolation-forest-anomaly`, `pca-anomaly` |
 | Multi-signal fusion + asset context | a "digital profile" per asset | `multi-value-processor`, `condition-monitoring-source`, `health-index` |
@@ -230,6 +234,25 @@ flowchart LR
     classDef sink fill:#26a69a,color:#fff,stroke:#1c7e74;
 ```
 
+### Standards map (ISO 13374)
+
+ISO 13374 splits a condition-monitoring system into six functional blocks. This
+is where the nodes sit — useful when you integrate with a platform that speaks
+the same vocabulary (MIMOSA OSA-CBM, most CM software):
+
+| Block | Name | Nodes |
+|---|---|---|
+| **DA** | Data Acquisition | MQTT / OPC UA nodes, `condition-monitoring-source`, `json-source`, `image-source` |
+| **DM** | Data Manipulation | `signal-analyzer` (FFT, envelope, indicators), `multi-value-processor`, `image-preprocess` |
+| **SD** | State Detection | `anomaly-detector`, `isolation-forest-anomaly`, `pca-anomaly` |
+| **HA** | Health Assessment | `signal-analyzer` (fault-frequency diagnosis, ISO 20816 zones), `health-index`, `ml-inference` (classification) |
+| **PA** | Prognostic Assessment | `trend-predictor` (RUL with confidence band), `ml-inference` (regression) |
+| **AG** | Advisory Generation | `llm-analyzer`, your CMMS integration |
+
+Background, standards and the research behind these choices:
+[docs/RESEARCH-cm-pdm-landscape.md](docs/RESEARCH-cm-pdm-landscape.md) (landscape) and
+[docs/RESEARCH-pdm-cm.md](docs/RESEARCH-pdm-cm.md) (methods literature).
+
 ### Core Analysis Nodes
 
 ### 1. Anomaly Detector
@@ -301,15 +324,21 @@ flowchart LR
 | Mode | Output |
 |------|--------|
 | **FFT** | Frequency peaks, spectral features |
-| **Vibration** | RMS, Crest Factor, Kurtosis, Skewness, Health Score, **ISO 10816-3 assessment** |
+| **Vibration** | RMS, Crest Factor, Kurtosis, Skewness, Health Score, **ISO 20816-3 assessment** |
 | **Peaks** | Local maxima/minima detection |
-| **Envelope** | Bearing fault detection (BPFO, BPFI, BSF, FTF) with **Butterworth filter** |
+| **Envelope** | Bearing fault detection (BPFO, BPFI, BSF, FTF from geometry or typed in), BPFI sidebands, looseness, sub-synchronous, with **Butterworth filter** |
 | **Cepstrum** | Gearbox fault detection (GMF, sidebands) |
 
-**ISO 10816-3 Vibration Severity:**
-- Machine classes I-IV (small to large machines)
-- Zones A-D with severity levels and recommendations
+**ISO 20816-3 Vibration Severity:**
+- Machine groups 1 (300 kW – 50 MW) and 2 (15 – 300 kW), rigid or flexible foundation; the legacy ISO 10816-1 classes I–IV stay selectable for existing flows
+- Zones A-D with severity levels and recommendations, output as `payload.iso20816` (`iso10816` kept as an alias)
+- Acceleration input (g, m/s²) is integrated to velocity bin-wise over 10–1000 Hz, not scaled at a single frequency
 - Automatic alarm/warning thresholds
+
+**Bearing diagnostics (Envelope mode):**
+- Enter the bearing geometry (rolling elements, element and pitch diameter, contact angle) and the node derives BPFO/BPFI/BSF/FTF from the current shaft speed; typed-in frequencies win over derived ones
+- `msg.rpm` overrides the shaft speed per message for variable-speed drives (vibration, envelope and cepstrum modes)
+- Rules beyond the line match: BPFI harmonics with ±1X sidebands (inner-race defect through the load zone), four or more 1X harmonics (looseness), 0.38–0.48X components (oil whirl / rub, suppressed when they match the cage frequency)
 
 **Butterworth Filter:**
 - 2nd order IIR filter for envelope analysis
@@ -330,7 +359,7 @@ pump-03/vibration ─┘    groupBy: "topic"
 
 **Example:**
 ```
-[Vibration Sensor] → [Signal Analyzer (Vibration)] → RMS, ISO 10816 Zone
+[Vibration Sensor] → [Signal Analyzer (Vibration)] → RMS, ISO 20816 Zone
                    → [Signal Analyzer (FFT)] → Frequency Peaks
                    → [Signal Analyzer (Envelope)] → Bearing faults
 ```
@@ -346,7 +375,7 @@ pump-03/vibration ─┘    groupBy: "topic"
 | **Rate of Change** | First/second derivative, acceleration |
 
 **RUL Features:**
-- Configurable failure and warning thresholds
+- Configurable failure and warning thresholds, for indicators rising or falling towards failure
 - Multiple time units (hours, minutes, days, cycles)
 - Confidence intervals for predictions
 - Status: healthy/warning/critical/failed
@@ -359,7 +388,7 @@ pump-03/vibration ─┘    groupBy: "topic"
 - Tracks threshold exceedance per sensor
 
 **Weibull Analysis:**
-- Automatic Weibull parameter estimation (β, η)
+- Weibull remaining life from the configured shape β and characteristic life η (equivalent-age method)
 - **B-Life calculation** (B1, B5, B10, B50) - time when X% have failed
 - Failure mode classification (infant_mortality, useful_life, wear_out, rapid_wear_out)
 - MTTF calculation
@@ -478,7 +507,8 @@ msg.action = "resetRul"; // Reset RUL counter
 msg.payload    // number / number[] (scalar) or object / object[] (record)
 msg.flush      // true → fire now (manual mode)
 msg.prompt     // per-message override of user prompt template
-msg.systemPrompt, msg.model, msg.apiUrl  // per-message overrides
+msg.systemPrompt, msg.model             // per-message overrides
+msg.apiUrl                              // only with "Allow msg.apiUrl override" enabled (same origin)
 
 // Outputs
 msg.payload    // text response, parsed JSON object, or extracted field
@@ -791,6 +821,7 @@ msg.config = {
   consecutiveCount: 5         // Override consecutive count
 };
 msg.payload = 42.5;
+msg.regime = "high-load";     // selects the baseline when "Regime Property" is set to "regime"
 ```
 
 #### Trend Predictor
@@ -813,9 +844,16 @@ msg.payload = 75.2;
 msg.config = {
   mode: "vibration",          // Override mode (fft/vibration/peaks/envelope/cepstrum)
   vibrationThreshold: 5,      // Override vibration threshold
-  peakThreshold: 0.3          // Override peak detection threshold
+  peakThreshold: 0.3,         // Override peak detection threshold
+  shaftSpeed: 1450,           // RPM for this message (msg.rpm does the same)
+  bearingBalls: 9,            // Bearing geometry overrides (envelope mode)
+  bearingBallDiameter: 7.94,
+  bearingPitchDiameter: 39.04,
+  bearingContactAngle: 0,
+  bearingBPFO: 107.5          // …or the frequencies directly
 };
 msg.payload = [0.5, 0.7, 0.3, ...];
+msg.rpm = 1450;               // shortest form of the shaft-speed override
 ```
 
 #### Health Index
@@ -1004,6 +1042,15 @@ node registers itself, so this is the node's own responsibility. If you use
 
 A wildcard permission (`*`) covers all of them.
 
+For operators under **NIS2** or an **IEC 62443** zone model this matters: the
+editor port is the only network surface these nodes add, every route on it is
+authenticated, every request-supplied file name is validated against an
+allowlist before it reaches the file system, and no node opens an outbound
+connection unless configured to (LLM provider, MLflow registry, WebSocket
+broadcast). Cybersecurity is one of the three most-cited barriers to
+condition-monitoring adoption — see
+[docs/RESEARCH-cm-pdm-landscape.md](docs/RESEARCH-cm-pdm-landscape.md).
+
 ### Settings
 
 Optional hardening knobs for `settings.js`:
@@ -1073,7 +1120,10 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - [x] Weibull reliability analysis
 - [x] Cepstrum analysis for gearbox diagnostics
 - [x] Mahalanobis distance for multivariate anomalies
-- [x] ISO 10816-3 vibration severity assessment
+- [x] ISO 20816-3 vibration severity assessment (machine groups, spectral integration of acceleration input)
+- [x] Bearing fault frequencies from geometry, per-message shaft speed, BPFI-sideband / looseness / sub-synchronous rules
+- [x] Operating-point regimes (one baseline per speed/load class) in the anomaly detector
+- [x] Real run-to-failure fixture (PRONOSTIA Bearing1_1) in the test suite
 - [x] Hysteresis (anti-flicker) for anomaly detection
 - [x] Pre-trained models for common use cases (model catalog + ML Inference picker)
 - [ ] Concept/data-drift monitoring + retraining feedback loop (current CUSUM `drift` is process drift, not model/distribution drift)

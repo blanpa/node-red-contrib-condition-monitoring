@@ -5,6 +5,7 @@ const signalAnalyzerNode = require("../nodes/signal-analyzer.js");
 const isolationForestNode = require("../nodes/isolation-forest-anomaly.js");
 const trendPredictorNode = require("../nodes/trend-predictor.js");
 const healthIndexNode = require("../nodes/health-index.js");
+const { NodeStateManager } = require("../nodes/state-persistence.js");
 
 helper.init(require.resolve("node-red"));
 
@@ -46,8 +47,9 @@ describe("State Persistence", function () {
             helper.load(anomalyDetectorNode, flow, function () {
                 const n1 = helper.getNode("n1");
                 // State manager should be initialized
-                expect(n1).toHaveProperty("stateManager");
-                expect(n1.stateManager).toBeTruthy();
+                expect(n1.stateManager).toBeInstanceOf(NodeStateManager);
+                expect(n1.stateManager.storeName).toBe("default");
+                expect(n1.stateManager.autoSave).toBe(true);
                 done();
             });
         });
@@ -362,8 +364,9 @@ describe("State Persistence", function () {
             ];
             helper.load(trendPredictorNode, flow, function () {
                 const n1 = helper.getNode("n1");
-                expect(n1).toHaveProperty("stateManager");
-                expect(n1.stateManager).toBeTruthy();
+                expect(n1.stateManager).toBeInstanceOf(NodeStateManager);
+                expect(n1.stateManager.storeName).toBe("default");
+                expect(n1.stateManager.autoSave).toBe(true);
                 done();
             });
         });
@@ -466,8 +469,9 @@ describe("State Persistence", function () {
             ];
             helper.load(healthIndexNode, flow, function () {
                 const n1 = helper.getNode("n1");
-                expect(n1).toHaveProperty("stateManager");
-                expect(n1.stateManager).toBeTruthy();
+                expect(n1.stateManager).toBeInstanceOf(NodeStateManager);
+                expect(n1.stateManager.storeName).toBe("default");
+                expect(n1.stateManager.autoSave).toBe(true);
                 done();
             });
         });
@@ -533,21 +537,133 @@ describe("State Persistence", function () {
     // ============================================
 
     describe("NodeStateManager", function () {
-        it("should be loadable as a module", function (done) {
-            const StatePersistence = require("../nodes/state-persistence.js");
-            expect(StatePersistence).toBeTruthy();
-            expect(StatePersistence.NodeStateManager).toBeTruthy();
-            expect(typeof StatePersistence.NodeStateManager).toBe("function");
-            done();
+        const StatePersistence = require("../nodes/state-persistence.js");
+        const managers = [];
+
+        /** Node double with a synchronous in-memory context store. */
+        function makeNode() {
+            const store = {};
+            return {
+                store,
+                warnings: [],
+                debug() {},
+                warn(m) {
+                    this.warnings.push(m);
+                },
+                context() {
+                    return {
+                        get: (key, storeName, cb) => cb(null, store[storeName + ":" + key]),
+                        set: (key, value, storeName, cb) => {
+                            // Stores persist JSON: typed arrays would not survive as such.
+                            store[storeName + ":" + key] = JSON.parse(JSON.stringify(value));
+                            cb(null);
+                        }
+                    };
+                }
+            };
+        }
+
+        function track(manager) {
+            managers.push(manager);
+            return manager;
+        }
+
+        afterEach(async function () {
+            for (const m of managers.splice(0)) await m.close();
         });
 
-        it("should export helper factory functions", function (done) {
-            const StatePersistence = require("../nodes/state-persistence.js");
-            expect(StatePersistence.createAnomalyStateManager).toBeTruthy();
-            expect(StatePersistence.createMLStateManager).toBeTruthy();
-            expect(StatePersistence.createSignalStateManager).toBeTruthy();
-            expect(typeof StatePersistence.createAnomalyStateManager).toBe("function");
-            done();
+        it("exports the manager class and its factories with their own keys and intervals", function () {
+            expect(Object.keys(StatePersistence).sort()).toEqual([
+                "NodeStateManager",
+                "createAnomalyStateManager",
+                "createMLStateManager",
+                "createSignalStateManager"
+            ]);
+
+            const node = makeNode();
+            const anomaly = track(StatePersistence.createAnomalyStateManager(node));
+            const ml = track(StatePersistence.createMLStateManager(node));
+            const signal = track(StatePersistence.createSignalStateManager(node, { saveInterval: 5000 }));
+
+            expect(anomaly).toBeInstanceOf(NodeStateManager);
+            expect([anomaly.stateKey, anomaly.saveInterval]).toEqual(["anomalyState", 60000]);
+            expect([ml.stateKey, ml.saveInterval]).toEqual(["mlState", 120000]);
+            expect([signal.stateKey, signal.saveInterval]).toEqual(["signalState", 5000]);
+        });
+
+        it("tracks values and the dirty flag through set/get/delete/clear", function () {
+            const manager = track(new NodeStateManager(makeNode(), { autoSave: false }));
+            expect(manager.isDirty).toBe(false);
+            expect(manager.get("missing", "fallback")).toBe("fallback");
+
+            manager.set("count", 3);
+            manager.setMultiple({ mean: 1.5, label: "a" });
+            expect(manager.isDirty).toBe(true);
+            expect(manager.get("count")).toBe(3);
+            expect(manager.has("mean")).toBe(true);
+            expect(manager.keys().sort()).toEqual(["count", "label", "mean"]);
+            expect(manager.getAll()).toEqual({ count: 3, mean: 1.5, label: "a" });
+
+            manager.delete("label");
+            expect(manager.has("label")).toBe(false);
+            manager.clear();
+            expect(manager.keys()).toEqual([]);
+        });
+
+        it("round-trips typed arrays and object arrays through the context store", async function () {
+            const node = makeNode();
+            const writer = track(new NodeStateManager(node, { stateKey: "s", autoSave: false }));
+            writer.setMultiple({
+                weights: new Float32Array([0.5, 1.5]),
+                precise: new Float64Array([Math.PI]),
+                samples: [{ t: 1, v: 2 }],
+                plain: [1, 2, 3],
+                count: 7
+            });
+            await expect(writer.save()).resolves.toBe(true);
+            expect(writer.isDirty).toBe(false);
+            expect(node.store["default:s"].weights).toEqual({ __type: "Float32Array", data: [0.5, 1.5] });
+
+            const reader = track(new NodeStateManager(node, { stateKey: "s", autoSave: false }));
+            const state = await reader.load();
+            expect(reader.isLoaded).toBe(true);
+            expect(state.weights).toBeInstanceOf(Float32Array);
+            expect(Array.from(state.weights)).toEqual([0.5, 1.5]);
+            expect(state.precise).toBeInstanceOf(Float64Array);
+            expect(state.precise[0]).toBe(Math.PI);
+            expect(state.samples).toEqual([{ t: 1, v: 2 }]);
+            expect(state.plain).toEqual([1, 2, 3]);
+            expect(state.count).toBe(7);
+        });
+
+        it("saves pending changes on close and starts empty when nothing was stored", async function () {
+            const node = makeNode();
+            const fresh = new NodeStateManager(node, { stateKey: "k", autoSave: false });
+            await expect(fresh.load()).resolves.toEqual({});
+
+            fresh.set("n", 1);
+            await fresh.close();
+            expect(node.store["default:k"]).toEqual({ n: 1 });
+            expect(fresh.saveTimer).toBeNull();
+        });
+
+        it("reports a failing store instead of throwing", async function () {
+            const node = makeNode();
+            node.context = () => ({
+                get: (key, storeName, cb) => cb(new Error("store offline")),
+                set: (key, value, storeName, cb) => cb(new Error("store offline"))
+            });
+            const manager = track(new NodeStateManager(node, { autoSave: false }));
+            await expect(manager.load()).resolves.toEqual({});
+            manager.set("x", 1);
+            await expect(manager.save()).resolves.toBe(false);
+            expect(manager.isDirty).toBe(true);
+            expect(node.warnings).toEqual([
+                "[Persistence] Failed to load state: store offline",
+                "[Persistence] Failed to save state: store offline"
+            ]);
+            // Keep afterEach's close() from warning again into a dead store.
+            manager.isDirty = false;
         });
     });
 });

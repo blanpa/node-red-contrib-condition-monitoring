@@ -28,23 +28,9 @@ module.exports = function (RED) {
         PNG = null;
     }
 
-    function mulberry32(a) {
-        return function () {
-            a |= 0;
-            a = (a + 0x6d2b79f5) | 0;
-            let t = Math.imul(a ^ (a >>> 15), 1 | a);
-            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-        };
-    }
-    const clampInt = (v, lo, hi, d) => {
-        const n = parseInt(v, 10);
-        return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d;
-    };
-    const clampFloat = (v, lo, hi, d) => {
-        const n = parseFloat(v);
-        return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d;
-    };
+    const { clampInt, clampFloat } = require("./utils/config-validator");
+    const { mulberry32 } = require("./utils/seeded-random");
+    const DEFECT_TYPES = ["none", "spot", "scratch", "multi"];
     const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
     function ImageSourceNode(config) {
@@ -53,7 +39,7 @@ module.exports = function (RED) {
 
         node.width = clampInt(config.width, 8, 4096, 64);
         node.height = clampInt(config.height, 8, 4096, 64);
-        node.defect = config.defect || "spot"; // none | spot | scratch | multi
+        node.defect = DEFECT_TYPES.indexOf(config.defect) !== -1 ? config.defect : "spot"; // none | spot | scratch | multi
         node.severity = clampFloat(config.severity, 0, 1, 0.7);
         node.noise = clampFloat(config.noise, 0, 1, 0.12);
         node.degrade = config.degrade === true; // grow the defect over time
@@ -183,15 +169,34 @@ module.exports = function (RED) {
 
         function start() {
             if (node.timer) return;
+            if (!PNG) {
+                // Don't start a timer that could only log the same error forever.
+                node.status({ fill: "red", shape: "ring", text: "pngjs missing" });
+                node.error("pngjs not available. Install: npm install pngjs");
+                return;
+            }
             node.running = true;
-            node.timer = setInterval(() => emit((m) => node.send(m)), node.intervalMs);
+            node.timer = setInterval(() => {
+                // An exception escaping a timer callback is an uncaught
+                // exception for the whole runtime — contain it here.
+                try {
+                    emit((m) => node.send(m));
+                } catch (err) {
+                    stop();
+                    node.status({ fill: "red", shape: "ring", text: "error - stopped" });
+                    node.error("image-source: " + err.message);
+                }
+            }, node.intervalMs);
         }
         function stop() {
+            const wasRunning = node.running;
             node.running = false;
             if (node.timer) {
                 clearInterval(node.timer);
                 node.timer = null;
             }
+            // The last emit left a "running" (dot) status behind.
+            if (wasRunning) node.status({ fill: "grey", shape: "ring", text: "stopped · #" + node.sampleCount });
         }
         function reset() {
             node.sampleCount = 0;
@@ -206,7 +211,8 @@ module.exports = function (RED) {
             if (msg.config && typeof msg.config === "object") {
                 if (msg.config.severity !== undefined)
                     node.curSeverity = clampFloat(msg.config.severity, 0, 1, node.curSeverity);
-                if (msg.config.defect !== undefined) node.defect = msg.config.defect;
+                if (msg.config.defect !== undefined && DEFECT_TYPES.indexOf(msg.config.defect) !== -1)
+                    node.defect = msg.config.defect;
                 if (msg.config.noise !== undefined) node.noise = clampFloat(msg.config.noise, 0, 1, node.noise);
             }
             if (cmd === "stop" || msg.stop === true) {
@@ -230,6 +236,7 @@ module.exports = function (RED) {
 
         node.on("close", function (done) {
             stop();
+            node.status({});
             if (done) done();
         });
 

@@ -12,7 +12,14 @@
 const stats = require("./utils/statistics");
 const providers = require("./utils/llm-providers");
 const persistenceHelper = require("./utils/persistence-helper");
-const { clampInt, stringOr } = require("./utils/config-validator");
+const { clampInt, stringOr, isIsoDateLike } = require("./utils/config-validator");
+
+// Retry backoff for retryable provider failures (timeout / network / 429 / 5xx):
+// base * 2^(failures-1), capped. A server-sent Retry-After wins when longer.
+const RETRY_BASE_MS = 2000;
+const RETRY_MAX_MS = 5 * 60 * 1000;
+// How often a dirty buffer is flushed to the context store (persistState).
+const PERSIST_INTERVAL_MS = 30000;
 
 const DEFAULT_SYSTEM_PROMPT =
     "You are an industrial sensor analyst. Analyse the time-series batch you " +
@@ -65,6 +72,13 @@ module.exports = function (RED) {
 
         node.sensorName = (config.sensorName || "").trim();
         node.unit = (config.unit || "").trim();
+
+        // Per-message endpoint override (msg.apiUrl) is OFF unless explicitly
+        // enabled: the adapters attach the API key to whatever URL they are
+        // given, so an unguarded override lets any upstream message exfiltrate
+        // the credential. Even when enabled it is pinned to the origin of the
+        // configured (or provider-default) endpoint.
+        node.allowMsgApiUrl = config.allowMsgApiUrl === true || config.allowMsgApiUrl === "true";
 
         node.passthroughOriginal = config.passthroughOriginal !== false;
         node.persistState = config.persistState === true;
@@ -119,6 +133,18 @@ module.exports = function (RED) {
             node.error("llm-analyzer: apiUrl is required for provider '" + node.provider + "' (no default endpoint)");
             return;
         }
+        if (node.apiUrl) {
+            const checked = providers.parseHttpUrl(node.apiUrl);
+            if (!checked.ok) {
+                node.status({ fill: "red", shape: "ring", text: "bad API URL" });
+                node.error("llm-analyzer: apiUrl is invalid — " + checked.reason);
+                return;
+            }
+        }
+        // Origin every request must stay on. Null only for a provider with no
+        // default endpoint and no configured URL, which was rejected above.
+        const baseEndpoint = node.apiUrl || providerMeta.defaultUrl || null;
+
         if (!["batch", "manual", "interval"].includes(node.triggerMode)) {
             node.status({ fill: "red", shape: "ring", text: "bad trigger mode" });
             node.error("llm-analyzer: triggerMode must be 'batch' | 'manual' | 'interval'");
@@ -162,6 +188,17 @@ module.exports = function (RED) {
         let pendingFire = null;
         let intervalHandle = null;
         let closed = false;
+        // Retry state: consecutive retryable failures, the earliest time the
+        // next automatic call may start, and the timer that makes it.
+        let consecutiveFailures = 0;
+        let retryNotBefore = 0;
+        let retryTimer = null;
+        // Cancels the in-flight HTTP request when the node closes.
+        let abortController = null;
+        let msgApiUrlWarned = false;
+        // Persistence bookkeeping (persistState only).
+        let stateDirty = false;
+        let persistTimer = null;
 
         // Apply the maxBufferSize cap: drop oldest if we've exceeded it.
         // O(k) where k = number to drop. For typical caps (< 100k) this is
@@ -183,8 +220,13 @@ module.exports = function (RED) {
             saveInterval: 30000,
             onStateLoaded: function (state) {
                 if (Array.isArray(state.buffer)) {
-                    const restored = state.buffer.slice(-node.maxBufferSize);
-                    for (const v of restored) buffer.push(v);
+                    // The load is asynchronous: samples may already have
+                    // arrived. Restored (older) samples go in front of them.
+                    const arrived = buffer.splice(0, buffer.length);
+                    for (const v of state.buffer) buffer.push(v);
+                    for (const v of arrived) buffer.push(v);
+                    applyBufferCap();
+                    droppedSinceLastFire = 0;
                 }
                 if (Array.isArray(state.detectedColumns) && state.detectedColumns.length > 0) {
                     detectedColumns = state.detectedColumns.slice();
@@ -203,6 +245,21 @@ module.exports = function (RED) {
                 };
             }
         });
+
+        // The state manager only writes what it was handed via saveNow(); hand
+        // it a fresh snapshot whenever something changed, then flush.
+        function persistIfDirty() {
+            if (!persistence || !stateDirty) return;
+            stateDirty = false;
+            persistence.saveNow();
+            if (persistence.manager && typeof persistence.manager.save === "function") {
+                persistence.manager.save();
+            }
+        }
+        if (persistence) {
+            persistTimer = setInterval(persistIfDirty, PERSIST_INTERVAL_MS);
+            if (persistTimer.unref) persistTimer.unref();
+        }
 
         function setStatus(state) {
             if (closed) return;
@@ -242,6 +299,13 @@ module.exports = function (RED) {
                     break;
                 case "error":
                     node.status({ fill: "red", shape: "ring", text: state.text || "error" });
+                    break;
+                case "backoff":
+                    node.status({
+                        fill: "yellow",
+                        shape: "ring",
+                        text: (state.text || "error") + " · retry in " + Math.ceil(state.delayMs / 1000) + "s"
+                    });
                     break;
             }
         }
@@ -308,13 +372,74 @@ module.exports = function (RED) {
                 added = ingestRecord(payload);
             }
             applyBufferCap();
+            if (added > 0) stateDirty = true;
             return added;
+        }
+
+        // Resolve the endpoint for one call. msg.apiUrl is honoured only when
+        // the operator opted in, and only on the configured endpoint's origin.
+        function resolveApiUrl(originalMsg) {
+            const requested =
+                originalMsg && typeof originalMsg.apiUrl === "string" && originalMsg.apiUrl.length > 0
+                    ? originalMsg.apiUrl
+                    : null;
+            if (!requested) return node.apiUrl;
+            if (!node.allowMsgApiUrl) {
+                if (!msgApiUrlWarned) {
+                    msgApiUrlWarned = true;
+                    node.warn(
+                        "llm-analyzer: msg.apiUrl ignored — per-message endpoint override is disabled. " +
+                            "Enable 'Allow msg.apiUrl override' in the node to use it."
+                    );
+                }
+                return node.apiUrl;
+            }
+            if (!providers.isSameOrigin(requested, baseEndpoint)) {
+                throw new providers.LlmHttpError(
+                    "msg.apiUrl rejected: it must be an http(s) URL on the same origin as the configured endpoint",
+                    { kind: "config" }
+                );
+            }
+            return requested;
+        }
+
+        function clearRetryTimer() {
+            if (retryTimer) {
+                clearTimeout(retryTimer);
+                retryTimer = null;
+            }
+        }
+
+        // After a retryable failure: wait, then try the (restored) batch again.
+        // Manual mode never retries on its own — the operator flushes again.
+        function scheduleRetry(err) {
+            consecutiveFailures += 1;
+            let delayMs = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * Math.pow(2, consecutiveFailures - 1));
+            if (err && Number.isFinite(err.retryAfterMs) && err.retryAfterMs > delayMs) {
+                delayMs = Math.min(RETRY_MAX_MS, err.retryAfterMs);
+            }
+            retryNotBefore = Date.now() + delayMs;
+            clearRetryTimer();
+            if (node.triggerMode !== "manual") {
+                retryTimer = setTimeout(() => {
+                    retryTimer = null;
+                    if (!closed && buffer.length > 0) fire(null, (m) => node.send(m), { isRetry: true });
+                }, delayMs);
+                if (retryTimer.unref) retryTimer.unref();
+            }
+            return delayMs;
         }
 
         // ------------------------------------------------------------------
         // The fire path: build prompt → call provider → emit msg
         // ------------------------------------------------------------------
-        async function fire(originalMsg, send) {
+        async function fire(originalMsg, send, opts) {
+            const isManual = !!(originalMsg && originalMsg.flush === true);
+            // During a backoff window only an explicit flush or the retry timer
+            // itself may call the provider; passive triggers just keep buffering.
+            if (!inFlight && !isManual && !(opts && opts.isRetry) && Date.now() < retryNotBefore) {
+                return;
+            }
             if (inFlight) {
                 // Queue the request instead of dropping. The current call's
                 // finally-block will re-fire after it returns. We only track
@@ -338,14 +463,24 @@ module.exports = function (RED) {
             }
 
             inFlight = true;
+            // Set once the batch has been taken out of the buffer, so a
+            // retryable failure can put it back.
+            let samples = null;
             // The try MUST start before prompt building: an exception anywhere
             // past this point would otherwise leave inFlight stuck at true and
             // reject the (un-awaited) fire() promise.
             try {
-                const samples = buffer.slice();
+                // Resolve (and possibly reject) the endpoint BEFORE draining the
+                // buffer, so a refused msg.apiUrl does not cost the batch.
+                const overrideApiUrl = resolveApiUrl(originalMsg);
+
+                samples = buffer.slice();
                 buffer.length = 0;
                 droppedSinceLastFire = 0;
+                stateDirty = true;
+                clearRetryTimer();
                 setStatus({ kind: "calling" });
+                const promptSamples = samples;
 
                 // Build the prompt variables. Both modes fill {sensor}, {unit},
                 // {count}; scalar mode adds {samples}+{stats}, record mode adds
@@ -353,29 +488,29 @@ module.exports = function (RED) {
                 let vars;
                 if (node.inputMode === "record") {
                     const cols = detectedColumns || [];
-                    const colStats = computePerColumnStats(samples, cols);
+                    const colStats = computePerColumnStats(promptSamples, cols);
                     vars = {
                         sensor: node.sensorName || "(unnamed)",
                         unit: node.unit || "",
-                        count: samples.length,
+                        count: promptSamples.length,
                         columns: cols.join(", "),
-                        records: providers.formatRecordsTable(samples, cols, node.maxSamplesInPrompt),
+                        records: providers.formatRecordsTable(promptSamples, cols, node.maxSamplesInPrompt),
                         stats: providers.formatPerColumnStats(colStats),
                         // {samples} kept available so a custom prompt template
                         // written for scalar mode still substitutes meaningfully.
-                        samples: providers.formatRecordsTable(samples, cols, node.maxSamplesInPrompt)
+                        samples: providers.formatRecordsTable(promptSamples, cols, node.maxSamplesInPrompt)
                     };
                 } else {
-                    const stat = computeStatsBlock(samples);
+                    const stat = computeStatsBlock(promptSamples);
                     vars = {
                         sensor: node.sensorName || "(unnamed)",
                         unit: node.unit || "(unitless)",
-                        count: samples.length,
-                        samples: providers.formatSamplesList(samples, node.maxSamplesInPrompt),
+                        count: promptSamples.length,
+                        samples: providers.formatSamplesList(promptSamples, node.maxSamplesInPrompt),
                         stats: providers.formatStatsLine(stat),
                         // {records}/{columns} empty in scalar mode so a record-
                         // mode template won't blow up if accidentally used.
-                        records: providers.formatSamplesList(samples, node.maxSamplesInPrompt),
+                        records: providers.formatSamplesList(promptSamples, node.maxSamplesInPrompt),
                         columns: ""
                     };
                 }
@@ -395,10 +530,6 @@ module.exports = function (RED) {
                     overrideSystemPrompt =
                         (overrideSystemPrompt || "") + providers.buildJsonInstruction(node.outputSchema);
                 }
-                const overrideApiUrl =
-                    originalMsg && typeof originalMsg.apiUrl === "string" && originalMsg.apiUrl.length > 0
-                        ? originalMsg.apiUrl
-                        : node.apiUrl;
                 const overrideModel =
                     originalMsg && typeof originalMsg.model === "string" && originalMsg.model.length > 0
                         ? originalMsg.model
@@ -411,10 +542,34 @@ module.exports = function (RED) {
                     userPrompt: providers.fillTemplate(overrideUserPrompt, vars),
                     maxTokens: node.maxOutputTokens,
                     timeoutMs: node.timeoutMs,
-                    apiUrl: overrideApiUrl
+                    apiUrl: overrideApiUrl,
+                    signal: (abortController = new AbortController()).signal
                 });
 
                 if (closed) return;
+
+                // The call succeeded as far as the provider is concerned: the
+                // batch is consumed and the tokens are spent, whatever happens
+                // to the response below. Count them BEFORE parsing so a JSON
+                // failure still shows up in the lifetime totals.
+                samples = null;
+                consecutiveFailures = 0;
+                retryNotBefore = 0;
+                const usage = result.usage || {};
+                totalInputTokens += usage.inputTokens || 0;
+                totalOutputTokens += usage.outputTokens || 0;
+                callCount += 1;
+                stateDirty = true;
+                const truncated = result.truncated === true;
+                const truncationHint = truncated
+                    ? " (response was cut off at maxOutputTokens=" + node.maxOutputTokens + " — raise it)"
+                    : "";
+                if (typeof result.text !== "string" || result.text.length === 0) {
+                    node.warn(
+                        "llm-analyzer: provider returned an empty response" +
+                            (result.finishReason ? " (finish reason: " + result.finishReason + ")" : "")
+                    );
+                }
 
                 // Build the payload according to output mode. JSON-parse
                 // failures are an explicit error path so a downstream
@@ -424,13 +579,17 @@ module.exports = function (RED) {
                 if (node.outputMode === "json") {
                     const parsed = providers.extractJson(result.text);
                     if (!parsed.ok) {
-                        setStatus({ kind: "error", text: "json parse" });
+                        setStatus({ kind: "error", text: truncated ? "json truncated" : "json parse" });
                         const errMsg = Object.assign({}, originalMsg || {}, {
                             rawResponse: result.text,
                             usage: result.usage,
-                            model: result.model
+                            model: result.model,
+                            finishReason: result.finishReason || null
                         });
-                        node.error("llm-analyzer: " + parsed.reason + " — see msg.rawResponse", errMsg);
+                        node.error(
+                            "llm-analyzer: " + parsed.reason + truncationHint + " — see msg.rawResponse",
+                            errMsg
+                        );
                         return;
                     }
                     json = parsed.value;
@@ -456,13 +615,6 @@ module.exports = function (RED) {
                     }
                 }
 
-                // Update lifetime counters BEFORE emitting so the outgoing
-                // msg reflects the post-call total (consistent with what the
-                // status line will show).
-                totalInputTokens += result.usage.inputTokens || 0;
-                totalOutputTokens += result.usage.outputTokens || 0;
-                callCount += 1;
-
                 const out = {
                     payload,
                     usage: result.usage,
@@ -471,12 +623,14 @@ module.exports = function (RED) {
                         outputTokens: totalOutputTokens,
                         callCount
                     },
-                    samples,
+                    samples: promptSamples,
                     sensor: node.sensorName || null,
                     unit: node.unit || null,
                     model: result.model,
                     durationMs: result.durationMs
                 };
+                if (result.finishReason) out.finishReason = result.finishReason;
+                if (truncated) out.truncated = true;
                 if (node.outputMode === "json") {
                     // Always expose the parsed object + raw text so a
                     // downstream node can recover either if needed.
@@ -495,12 +649,39 @@ module.exports = function (RED) {
             } catch (err) {
                 if (closed) return;
                 const cls = (err && err.kind) || "error";
-                setStatus({ kind: "error", text: cls });
+                let suffix = "";
+                if (samples && providers.isRetryableError(err)) {
+                    // Transient failure: the batch goes back to the FRONT of
+                    // the buffer (still subject to maxBufferSize) and the next
+                    // attempt waits out a backoff instead of hammering a
+                    // provider that is already rate-limiting or down.
+                    const arrived = buffer.splice(0, buffer.length);
+                    for (const v of samples) buffer.push(v);
+                    for (const v of arrived) buffer.push(v);
+                    applyBufferCap();
+                    stateDirty = true;
+                    const delayMs = scheduleRetry(err);
+                    setStatus({ kind: "backoff", text: cls, delayMs });
+                    suffix =
+                        " — batch kept (" +
+                        samples.length +
+                        " samples), " +
+                        (node.triggerMode === "manual" ? "flush again to retry" : "retrying") +
+                        " in " +
+                        Math.ceil(delayMs / 1000) +
+                        "s";
+                } else {
+                    setStatus({ kind: "error", text: cls });
+                }
                 // Surface to a catch-node. Use the (msg, done) form so the
                 // catch-node can correlate to the upstream message.
-                node.error("llm-analyzer: " + (err && err.message ? err.message : String(err)), originalMsg || {});
+                node.error(
+                    "llm-analyzer: " + (err && err.message ? err.message : String(err)) + suffix,
+                    originalMsg || {}
+                );
             } finally {
                 inFlight = false;
+                abortController = null;
                 // Drain any trigger that arrived during the in-flight call.
                 // Defer through setImmediate so we don't grow the call stack
                 // on a hot loop, and so the operator's catch-node sees the
@@ -526,7 +707,9 @@ module.exports = function (RED) {
                 const added = ingest(msg.payload);
 
                 if (node.triggerMode === "batch") {
-                    setStatus({ kind: "buffering", target: node.batchSize });
+                    if (!inFlight && Date.now() >= retryNotBefore) {
+                        setStatus({ kind: "buffering", target: node.batchSize });
+                    }
                     if (buffer.length >= node.batchSize) {
                         // Capture the *triggering* msg and fire async.
                         fire(msg, send);
@@ -565,18 +748,38 @@ module.exports = function (RED) {
                 clearInterval(intervalHandle);
                 intervalHandle = null;
             }
-            // Persist final state before tearing down so a redeploy keeps
-            // the buffer and counters. Failures here are non-fatal — we'd
-            // rather close cleanly than block on disk I/O.
-            if (persistence && typeof persistence.saveNow === "function") {
+            if (persistTimer) {
+                clearInterval(persistTimer);
+                persistTimer = null;
+            }
+            clearRetryTimer();
+            // Don't leave a request running (for up to timeoutMs) after the
+            // node is gone; its result would be discarded anyway.
+            if (abortController) {
                 try {
-                    persistence.saveNow();
+                    abortController.abort();
                 } catch (_) {
                     /* ignore */
                 }
             }
-            buffer.length = 0;
-            if (typeof doneClose === "function") doneClose();
+            const finish = function () {
+                buffer.length = 0;
+                if (typeof doneClose === "function") doneClose();
+            };
+            // Persist final state before tearing down so a redeploy keeps
+            // the buffer and counters. persistence.close() snapshots the
+            // state synchronously, stops the manager's auto-save timer and
+            // WAITS for the write — without that wait the next instance loads
+            // before this one has saved. Failures are non-fatal: we'd rather
+            // close cleanly than block on disk I/O.
+            if (persistence && typeof persistence.close === "function") {
+                Promise.resolve()
+                    .then(() => persistence.close())
+                    .catch(() => {})
+                    .then(finish);
+            } else {
+                finish();
+            }
         });
     }
 
@@ -593,6 +796,9 @@ module.exports = function (RED) {
 function toFinite(v) {
     if (typeof v === "number") return Number.isFinite(v) ? v : null;
     if (typeof v === "string") {
+        // Lenient on purpose ("65 °C" → 65), but a date is not a reading:
+        // parseFloat("2024-05-01") would otherwise yield 2024.
+        if (isIsoDateLike(v)) return null;
         const n = parseFloat(v);
         return Number.isFinite(n) ? n : null;
     }

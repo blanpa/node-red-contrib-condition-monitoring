@@ -30,6 +30,14 @@ jobs:
       - name: Install (without optional ML runtimes)
         run: npm ci --omit=optional --no-audit --no-fund
 
+      # Jest 30 resolves modules through unrs-resolver, whose native binding is
+      # an *optional* dependency and therefore missing after --omit=optional. It
+      # installs itself on first use, but on Node 18 that first use still fails
+      # ("testRunner ... was not found") and only the next run works. Trigger
+      # the self-install here so the test step starts with the binding in place.
+      - name: Install the test resolver's native binding
+        run: node -e "try { require('unrs-resolver') } catch (e) { console.log('binding installed on first use') }"
+
       - name: Run unit tests
         run: npm test
 
@@ -45,6 +53,10 @@ jobs:
 
       - name: Install (without optional ML runtimes)
         run: npm ci --omit=optional --no-audit --no-fund
+
+      # See the test job: the resolver binding must be in place before jest runs.
+      - name: Install the test resolver's native binding
+        run: node -e "try { require('unrs-resolver') } catch (e) { console.log('binding installed on first use') }"
 
       - name: Run coverage
         run: npm run test:coverage
