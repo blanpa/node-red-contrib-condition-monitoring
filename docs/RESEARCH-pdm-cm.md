@@ -9,12 +9,16 @@
 
 **Method:** fan-out web search across 6 angles → 27 sources fetched → 129 candidate
 claims extracted → top 25 adversarially verified → 23 confirmed / 2 refuted → synthesized.
-Generated 2026-06-16.
+Generated 2026-06-16. **Revised 2026-10-09:** the four open questions below are answered
+in the follow-up review, and the statements that the follow-up pass found to be
+overstated (sections 2, 3c, 4c and the implications table) were corrected in place; the
+original wording is quoted in section 9 of the follow-up.
 
-**Companion document:** [RESEARCH-cm-pdm-landscape.md](RESEARCH-cm-pdm-landscape.md)
+**Companion documents:** [RESEARCH-cm-pdm-landscape.md](RESEARCH-cm-pdm-landscape.md)
 covers the wider landscape — standards (ISO 17359/13374/20816/13381), measurement
 techniques, market and adoption data, barriers, and a mapping of this toolkit's nodes onto
-the ISO 13374 blocks.
+the ISO 13374 blocks. [RESEARCH-pdm-cm-followup.md](RESEARCH-pdm-cm-followup.md)
+(October 2026) answers this review's open questions and covers its declared gaps.
 
 ---
 
@@ -29,10 +33,12 @@ GNNs emerging) and consistently beats classical statistical baselines, but the f
 acknowledged weaknesses are **inadequate uncertainty quantification, label scarcity, and
 poor cross-machine generalization**.
 
-For **anomaly detection**, the largest peer-reviewed benchmark (JMLR 2024) finds a
-**two-algorithm toolbox suffices** — Extended Isolation Forest for global anomalies, kNN
-for local — which directly validates an Isolation-Forest-plus-distance-based design like
-this toolkit's. The frontier is the **Industry 4.0 → 5.0 shift** (human-centricity,
+For **anomaly detection**, the largest peer-reviewed benchmark on *tabular* data (JMLR
+2024) finds a **two-algorithm toolbox suffices** — Extended Isolation Forest for global
+anomalies, kNN for local. On time-series benchmarks this does not replicate (follow-up
+review, section 3): sub-sequence PCA and windowed kNN lead, Isolation Forest sits
+mid-field, so what the benchmarks validate is this toolkit's PCA/SPE detector rather than
+its Isolation Forest. The frontier is the **Industry 4.0 → 5.0 shift** (human-centricity,
 sustainability, resilience over four enablers: ML, Digital Twins, IoT, Big Data),
 **LLM-based prognostics**, **physics-informed / Transformer** models, and **formalized
 concept-drift detection** for retraining.
@@ -72,10 +78,14 @@ and Robust Covariance** most effective on synthetic data, with Isolation Forest 
 leading on precision/recall balance.
 
 > **Direct implication for this toolkit.** The `isolation-forest-anomaly` +
-> `pca-anomaly`/Mahalanobis (distance-based) combination is well-aligned with the
-> empirical consensus. **Caveat:** the JMLR benchmark is on **tabular** data, *not*
-> vibration/time-series (CWRU, FEMTO, MFPT) — rankings may not transfer directly to
-> spectral vibration features. See [open question 2](#open-questions).
+> `pca-anomaly`/Mahalanobis (distance-based) combination covers both global and local
+> anomalies. **Caveat, confirmed in October 2026:** the JMLR benchmark is on **tabular**
+> data, and its ranking does *not* transfer to time series: on TSB-AD (NeurIPS 2024)
+> Isolation Forest scores VUS-PR 0.30 (univariate) / 0.20 (multivariate) and Extended
+> Isolation Forest 0.21 against sub-sequence PCA 0.42, PCA 0.31 and windowed kNN
+> 0.44 / 0.35; on Paderborn real-damage features OC-SVM (ROC-AUC 0.73) beats Isolation
+> Forest (0.63). The part that holds up is the PCA/SPE detector — see
+> [open question 2](#open-questions) and the follow-up review, section 3.
 
 *Sources:* JMLR v25/23-0570 (2024); ScienceDirect S2468227624003284 (2024).
 
@@ -107,6 +117,11 @@ of DL-RUL accuracy. A high-quality HI yielded RMSE as low as 2.67 flights in a w
 > **Implication for this toolkit.** Feature/HI engineering on the FFT/vibration features
 > (`signal-analyzer`) — scored by these three metrics — governs downstream
 > `trend-predictor` RUL accuracy. Worth adding HI-quality metrics as a feature-selection aid.
+> Note (October 2026): "trendability" has three incompatible definitions in the literature
+> (Coble 2009 derivative-sign spread, the MathWorks minimum pairwise correlation, and the
+> bearing literature's correlation with time), and the bearing-prognostics papers use
+> monotonicity, correlation-with-time and *robustness*; any implementation must state which
+> one it computes — formulas in the follow-up review, section 4.
 
 *Source:* PMC11174398 (Sensors 24(11):3454, 2024).
 
@@ -119,9 +134,14 @@ time-varying degradation. Proposed remedies: **multi-distribution fusion, ensemb
 Bayesian** approaches (e.g. Zhan et al., RESS 2024, integrate multiple candidate RUL
 predictions with learned weights). Much C-MAPSS literature remains deterministic point estimates.
 
-> **Implication for this toolkit.** The `trend-predictor` already exposes RUL **confidence
-> intervals** — this aligns with the literature's prescription. Exposing/visualizing those
-> bounds prominently is the right design, not a point estimate alone.
+> **Implication for this toolkit.** The `trend-predictor` exposes an RUL **band** — the
+> right design, not a point estimate alone. Qualified in October 2026: the band is a
+> delta-method confidence interval for the mean crossing time (z-based, omitting the
+> level–slope covariance, no process noise), not a calibrated prediction interval; the
+> Monte-Carlo check in `tools/sim` shows it under-covers (≈ 75–80 % at a nominal 90 %).
+> The literature's prescription is intervals with *verified coverage* (PICP against the
+> nominal level) and, for extrapolated crossings, Fieller-type intervals that become
+> unbounded when the slope is not significant — follow-up review, section 4.
 
 *Sources:* PMC11174398; ScienceDirect S0951832024004551 (RESS, 2024).
 
@@ -168,15 +188,26 @@ assumption**, taxonomized by:
 - **Temporal type:** abrupt / gradual / incremental / recurring (Gama et al. 2014).
 - **Scope:** **real drift** (conditional p(y|x) change) vs **virtual/data drift** (marginal p(x) change).
 
-Unsupervised detectors fall into **two-sample** (KS test, MMD), **meta-statistic** (ADWIN,
-ShapeDD), and **block-based** (DAWIDD, KCpD) strategies, following a four-stage scheme
-(acquisition → descriptor → dissimilarity → normalization).
+Unsupervised detectors fall into **two-sample** (KS test, MMD; the survey also counts
+loss-based and virtual-classifier detectors here), **meta-statistic** (ADWIN, ShapeDD),
+and **block-based** (DAWIDD, KCpD) strategies, following a four-stage scheme
+(acquisition → descriptor → dissimilarity → normalization). Without labels only
+*virtual* drift can ever be detected.
 
-> **Implication for this toolkit (directly actionable).** This is the science behind the
-> [open backlog item](../README.md#roadmap) on drift monitoring. The CUSUM `drift`
-> parameter in `anomaly-detector` is *process drift in the signal*, **not** distribution
-> drift. A genuine drift monitor should run **two-sample tests (KS / MMD) on feature
-> distributions** (live window vs training baseline) to trigger ONNX/TFJS model refresh.
+> **Implication for this toolkit (directly actionable, corrected October 2026).** This is
+> the science behind the [open backlog item](../README.md#roadmap) on drift monitoring.
+> The CUSUM `drift` parameter in `anomaly-detector` is *process drift in the signal*,
+> **not** distribution drift — and the CM literature itself uses "drift" for the incipient
+> fault, so a toolkit drift monitor must define the term. The earlier recommendation here
+> ("run KS/MMD two-sample tests on feature distributions to trigger model refresh") is
+> withdrawn: the cited survey itself prefers meta-statistic and block-based detectors,
+> warns that feature-wise tests in high dimension produce false alarms and that loss-based
+> detection should be avoided when monitoring for anomalies; KS/MMD assume i.i.d. samples,
+> which CM streams violate; and a degradation also shifts the feature distribution, so an
+> automatic refresh on a drift alarm would learn the damage in. The evidenced design runs
+> a context-change detector (speed, load, recipe, sensor swap) *before* the fault detector,
+> treats a drift alarm as a request for human confirmation, and prefers periodic
+> retraining over reactive triggers — follow-up review, section 7.
 
 *Source:* Frontiers in AI 2024, doi 10.3389/frai.2024.1330257.
 
@@ -198,10 +229,10 @@ than replaces I4.0.
 
 | Research finding | Relevance to `node-red-contrib-condition-monitoring` |
 | --- | --- |
-| EIF (global) + kNN (local) two-algo toolbox suffices | Validates `isolation-forest-anomaly` + `pca-anomaly`/Mahalanobis. Consider a kNN/local-density detector to cover *local* anomalies. |
-| HI quality (monotonicity/trendability/prognosability) drives RUL | Add HI-quality scoring to `signal-analyzer` feature output as a selection aid for `trend-predictor`. |
-| UQ is the field's weakness; expose confidence, not point estimates | `trend-predictor` already emits RUL confidence bounds — keep/surface them. |
-| Concept drift needs KS/MMD two-sample tests on feature distributions | Backlog drift-monitor item: implement distribution drift (not CUSUM signal drift) to gate retraining. |
+| EIF (global) + kNN (local) suffice on tabular data; on time series sub-sequence PCA and windowed kNN lead, IF is mid-field | Validates `pca-anomaly` (SPE) more than `isolation-forest-anomaly`. The detector worth adding is a **windowed kNN / Matrix-Profile distance** to a healthy bank, not a local-density (LOF) detector, which is the weakest classical option on time series. |
+| HI quality (monotonicity/trendability/prognosability, plus robustness) drives RUL | Add HI-quality scoring to `signal-analyzer` feature output as a selection aid for `trend-predictor`; state which trendability definition is used. |
+| UQ is the field's weakness; expose intervals with verified coverage, not point estimates | `trend-predictor` emits an RUL band — keep/surface it, and fix its calibration (covariance term, Fieller-type bound, coverage check) — follow-up review, section 4. |
+| Concept drift: meta-statistic/block-based detectors, context gating, no automatic refresh | Backlog drift-monitor item: detect distribution drift (not CUSUM signal drift) behind a context-change gate; a drift alarm asks for confirmation rather than triggering retraining. |
 | Deep learning dominates but needs labels; classical competitive in low-data | Keeping classical detectors (Z-score, IQR, IF, PCA) as defaults is sound for label-scarce edge deployments. |
 | LLMs for prognosis are proposal-stage, unreplicated | `llm-analyzer` for *alert triage/explanation* is defensible today; LLM-for-RUL is future/experimental. |
 
@@ -212,9 +243,9 @@ than replaces I4.0.
 1. **Preprint risk.** LLM-for-RUL (arXiv 2410.03134, 2501.07191) and the Transformer+wavelet MCSFormer (arXiv 2505.14897) are **arXiv preprints, not peer-reviewed**, reporting self-selected baselines on intra-condition splits — prone to leakage/cherry-picking. Two LLM super-claims were explicitly refuted (below).
 2. **Tabular ≠ vibration.** The strongest anomaly-detection evidence (JMLR 23-0570) is on **multivariate tabular** data, not vibration/time-series (CWRU, FEMTO, MFPT). Rankings may not transfer to spectral features. Its "largest comparison to date" is an author claim (contestable vs ADBench, NeurIPS 2022).
 3. **Synthetic rankings are dataset-specific** (Scientific African study).
-4. **Coverage gaps in the *verified* set.** The confirmed claims do **not** directly evidence: vibration signal-processing specifics (envelope/demodulation, cepstrum, EMD, bearing/gear fault frequencies), control charts (CUSUM, EWMA), Weibull/similarity-based RUL, several standards (ISO 13374/13379/10816/20816, MIMOSA OSA-CBM/OSA-EAI), TinyML/edge specifics, XAI, or self-supervised/domain-adaptation as standalone claims. These appear only contextually — treat as lower confidence than the explicit findings above. See open questions.
+4. **Coverage gaps in the *verified* set — closed in October 2026.** The confirmed claims of this review do **not** directly evidence: vibration signal-processing specifics (envelope/demodulation, cepstrum, EMD, bearing/gear fault frequencies), control charts (CUSUM, EWMA), Weibull/similarity-based RUL, several standards (ISO 13374/13379-1:2025/20816-3:2022 — ISO 10816-3 is withdrawn — MIMOSA OSA-CBM/OSA-EAI), TinyML/edge specifics, XAI, or self-supervised/domain-adaptation as standalone claims. Each of these is now covered, with its own confidence tags, in the follow-up review (sections 1, 2, 4, 6 and 7).
 5. **Fetch limitations.** Some MDPI/ScienceDirect URLs returned HTTP 403 and were verified via PMC mirrors or search snippets — text corroborated but not always from the canonical URL.
-6. **Concept-drift finding** rests on a single (strong, peer-reviewed) primary source.
+6. **Concept-drift finding** rested on a single (strong, peer-reviewed) primary source in June 2026; it is corroborated and extended by six further sources in the follow-up review, section 7 — which also withdraws the KS/MMD recommendation drawn from it (section 4c).
 
 ---
 
@@ -229,12 +260,12 @@ These were extracted from sources but **failed** adversarial verification — do
 
 ## Open questions
 
-These parts of the original question were **not** covered by verified claims and warrant a follow-up, targeted review:
+These parts of the original question were **not** covered by verified claims in June 2026. All four are answered in [RESEARCH-pdm-cm-followup.md](RESEARCH-pdm-cm-followup.md) (October 2026); the section numbers refer to that document, and its own "Open questions" section lists what remains open.
 
-1. 2023–2026 peer-reviewed consensus on the relative diagnostic value of **FFT vs envelope/demodulation vs cepstrum vs wavelet/EMD** for bearing/gear faults, and which **standards** (ISO 10816/20816 severity zones, ISO 13374/13379, MIMOSA OSA-CBM) the toolkit should conform to.
-2. Do the "EIF + kNN suffice" findings **replicate on vibration/time-series** benchmarks (CWRU, PRONOSTIA/FEMTO, MFPT, PHM challenges), and how do PCA/Mahalanobis and One-Class SVM rank there?
-3. Documented **evaluation/leakage pitfalls** and recommended metrics (RMSE vs PHM scoring asymmetry, run-to-failure splitting) for C-MAPSS and bearing RUL — how should an edge toolkit validate trend/RUL models to avoid optimistic intra-condition results?
-4. Maturity/reliability of **LLMs for actual maintenance decisions** beyond proposal-stage preprints (independent replication?), and recommended **edge/TinyML deployment patterns** (ONNX/TFJS quantization, on-device inference) for the DL and drift-detection methods.
+1. 2023–2026 peer-reviewed consensus on the relative diagnostic value of **FFT vs envelope/demodulation vs cepstrum vs wavelet/EMD** for bearing/gear faults — **answered, section 1** (envelope analysis with resonance-band selection and cepstral pre-whitening first; no independent evidence favours wavelet/EMD/VMD over it on non-CWRU data; order tracking for variable speed) — and which **standards** (ISO 20816-3:2022 severity zones, ISO 13374/13379, MIMOSA OSA-CBM) the toolkit should conform to — **answered, section 2**.
+2. Do the "EIF + kNN suffice" findings **replicate on vibration/time-series** benchmarks, and how do PCA/Mahalanobis and One-Class SVM rank there? — **answered, section 3**: they do not replicate; PCA/SPE-type and OC-SVM rank at or above Isolation Forest, EIF does not.
+3. Documented **evaluation/leakage pitfalls** and recommended metrics for C-MAPSS and bearing RUL, and how an edge toolkit should validate trend/RUL models — **answered, section 4** (unit-wise splits, RUL-cap and scoring conventions, Saxena metrics, PICP coverage checks, Fieller-type crossing-time intervals).
+4. Maturity/reliability of **LLMs for actual maintenance decisions** — **answered, section 5**: no independent replication of any LLM-for-maintenance result exists as of October 2026; the defensible use is a decision-support draft grounded in tool outputs — and recommended **edge/TinyML deployment patterns** — **answered, section 6**.
 
 ---
 
@@ -257,7 +288,7 @@ These parts of the original question were **not** covered by verified claims and
 - VTT — MIMOSA for condition-based maintenance — https://cris.vtt.fi/en/publications/mimosa-for-condition-based-maintenance/
 - C-MAPSS ML-RUL challenges review — https://www.researchgate.net/publication/353119926
 - arXiv 2509.22267, 2407.14625, 2401.07871 — benchmark/foundation-model work
-- Springer s11431-025-3072-9; MDPI Applied Sciences 16(5):2493 — frontier/digital-twin
+- Springer s11431-025-3072-9 (Gao et al. 2025, TinyML bearing diagnosis on an ESP32-S3 — not a digital-twin paper); MDPI Applied Sciences 16(5):2493 — frontier/digital-twin
 
 **Frontier preprints (NOT peer-reviewed — cite with care):**
 

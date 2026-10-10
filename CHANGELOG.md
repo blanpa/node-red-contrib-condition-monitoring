@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 📚 Documentation
+
+- **`docs/RESEARCH-pdm-cm-followup.md`** (October 2026): answers the four
+  open questions of the June methods review and its declared coverage gaps —
+  which vibration technique for which fault (envelope analysis with
+  resonance-band selection and cepstral pre-whitening first; order tracking
+  for variable speed), the standards a CM toolkit can realistically conform to
+  (ISO 13374 / OSA-CBM vocabulary, ISO 20816-3:2022 zones, ISO 13381-1:2025
+  prognosis fields, IDTA 02048), how simple detectors rank on time-series and
+  vibration benchmarks, RUL evaluation pitfalls and interval calibration, the
+  state of LLM agents for maintenance decisions, edge deployment patterns, and
+  drift / domain-shift / explainability — each claim with a confidence and a
+  verification tag, plus a consolidated errata table for the two existing
+  documents.
+- **`docs/RESEARCH-cm-pdm-landscape.md` and `docs/RESEARCH-pdm-cm.md` corrected
+  in place** after a claim-by-claim verification: the benefit table had
+  credited Deloitte with ranges it never published (Deloitte: 5–10 % cost,
+  10–20 % uptime, 20–50 % planning time), three market-report rows were under
+  the wrong vendor, ISO 13379-1 and ISO 20816 part lists were out of date, the
+  OSA-CBM / ISO 13374 relationship was reversed, the TinyML figures merged two
+  papers, the EU AI Act dates predated the 2026 Digital Omnibus, CWRU has 4–5
+  fault sizes, the Azure PdM data has 1 000 machines, and the methods review's
+  KS/MMD drift recommendation contradicted its own source. The `trend-predictor`
+  band is now described as what it is (a delta-method interval that
+  under-covers) and the Isolation-Forest "validation" is qualified to the
+  PCA/SPE detector. README links the new document.
+
 ## [0.4.0] - 2026-10-05 - Code-review pass over all nodes
 
 A minor release rather than a patch: several nodes now produce different (the

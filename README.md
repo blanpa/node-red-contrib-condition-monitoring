@@ -250,8 +250,12 @@ the same vocabulary (MIMOSA OSA-CBM, most CM software):
 | **AG** | Advisory Generation | `llm-analyzer`, your CMMS integration |
 
 Background, standards and the research behind these choices:
-[docs/RESEARCH-cm-pdm-landscape.md](docs/RESEARCH-cm-pdm-landscape.md) (landscape) and
-[docs/RESEARCH-pdm-cm.md](docs/RESEARCH-pdm-cm.md) (methods literature).
+[docs/RESEARCH-cm-pdm-landscape.md](docs/RESEARCH-cm-pdm-landscape.md) (landscape),
+[docs/RESEARCH-pdm-cm.md](docs/RESEARCH-pdm-cm.md) (methods literature) and
+[docs/RESEARCH-pdm-cm-followup.md](docs/RESEARCH-pdm-cm-followup.md) (October 2026
+follow-up: diagnostics techniques, standards conformance, anomaly and RUL
+benchmarks, LLM agents, edge deployment, drift — and a verification of the
+other two documents).
 
 ### Core Analysis Nodes
 
