@@ -12,7 +12,7 @@
 #
 # Node-RED selects this backend by setting CM_INFERENCE_URL (see docker-compose).
 
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 LABEL maintainer="Node-RED Condition Monitoring"
 LABEL description="Remote inference sidecar (TFLite / Keras / scikit-learn)"
