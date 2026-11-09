@@ -105,7 +105,7 @@
     "ml-matrix": "^6.12.1",
     "ml-pca": "^4.1.1",
     "pngjs": "^7.0.0",
-    "simple-statistics": "^7.8.9"
+    "simple-statistics": "^8.0.0"
   },
   "optionalDependencies": {
     "@aws-sdk/client-s3": "^3.1021.0",
