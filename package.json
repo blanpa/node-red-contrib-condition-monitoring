@@ -23,7 +23,7 @@
     "prepublishOnly": "npm run lint && npm run format:check"
   },
   "node-red": {
-    "version": ">=2.0.0",
+    "version": ">=3.0.0",
     "nodes": {
       "anomaly-detector": "nodes/anomaly-detector.js",
       "isolation-forest-anomaly": "nodes/isolation-forest-anomaly.js",
@@ -105,8 +105,7 @@
     "ml-isolation-forest": "^0.1.0",
     "ml-matrix": "^6.12.1",
     "ml-pca": "^4.1.1",
-    "pngjs": "^7.0.0",
-    "simple-statistics": "^8.0.0"
+    "pngjs": "^7.0.0"
   },
   "optionalDependencies": {
     "@aws-sdk/client-s3": "^3.1021.0",

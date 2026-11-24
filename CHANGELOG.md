@@ -45,8 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker on the CI runner; 1.31.1 passes the ONNX smoke test and the full
   suite on Node 18, 20 and 22. A plain `npm install` already resolved to the
   newest 1.x, so this is the version users were getting.
-- `Dockerfile` / `Dockerfile.gpu`: `simple-statistics` pin follows
-  `package.json` (7.8.9 → 8.0.0).
+- **`simple-statistics` removed.** No node has required it for several
+  releases; the statistics live in `nodes/utils/statistics.js`. One install
+  less, and the package is back under the Node-RED scorecard's dependency
+  limit.
+- **Declared Node-RED minimum raised from 2.0.0 to 3.0.0**
+  (`node-red.version`). The package has required Node.js 18 since 0.3.x,
+  which Node-RED 2.x does not support; 3.1 and 4.1 are the versions the nodes
+  are loaded on.
 
 ## [0.4.1] - 2026-11-24 - Second hardening pass; first npm release of the 0.4 line
 

@@ -42,8 +42,7 @@ RUN npm install \
         ml-isolation-forest@0.1.0 \
         ml-matrix@6.15.1 \
         ml-pca@4.1.1 \
-        pngjs@7.0.0 \
-        simple-statistics@8.0.0
+        pngjs@7.0.0
 
 # Copy the condition-monitoring module
 COPY --chown=node-red:node-red . /data/node_modules/node-red-contrib-condition-monitoring/
