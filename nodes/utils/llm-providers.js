@@ -258,6 +258,19 @@ async function callAnthropic(args) {
     if (!parsed || !Array.isArray(parsed.content)) {
         throw new LlmHttpError("Anthropic response missing content[]", { kind: "shape" });
     }
+    // A refusal comes back as HTTP 200 with no text. Passing that through as
+    // an empty payload hides what happened; it is an error of its own class
+    // (not retryable: the same prompt would be refused again).
+    if (parsed.stop_reason === "refusal") {
+        const detail =
+            parsed.stop_details && typeof parsed.stop_details === "object"
+                ? [parsed.stop_details.category, parsed.stop_details.explanation].filter(Boolean).join(": ")
+                : "";
+        throw new LlmHttpError(
+            "Anthropic refused the request (stop_reason: refusal" + (detail ? "; " + detail : "") + ")",
+            { kind: "refusal" }
+        );
+    }
     const text = parsed.content
         .filter((c) => c && c.type === "text" && typeof c.text === "string")
         .map((c) => c.text)
@@ -567,14 +580,48 @@ function formatRecordsTable(records, columns, maxRows) {
     const offset = Math.max(0, records.length - cap);
     const used = records.slice(offset);
     const head = records.length > cap ? "(showing last " + cap + " of " + records.length + ")\n" : "";
+    // Lookup by the raw key, display the sanitised name.
+    const names = columns.map(sanitizeColumnName);
     const lines = used.map((r, idx) => {
-        const parts = columns.map((c) => {
+        const parts = columns.map((c, i) => {
             const v = r && r[c];
-            return c + "=" + _fmt6(v);
+            return names[i] + "=" + _fmt6(v);
         });
         return "t=" + (offset + idx + 1) + " " + parts.join(" ");
     });
     return head + lines.join("\n");
+}
+
+// Longest column name written into a prompt.
+const MAX_COLUMN_NAME_LENGTH = 64;
+// C0/C1 control characters plus the Unicode line/paragraph separators —
+// anything that could start a new "line" inside the prompt.
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+/**
+ * Make a record key safe to paste into a prompt: control characters and
+ * newlines are removed, runs of whitespace collapse to one space, the result
+ * is trimmed and capped at 64 characters. Keys come from the payload — an
+ * upstream sender controls them, the operator does not.
+ */
+function sanitizeColumnName(name) {
+    const text = String(name).replace(CONTROL_CHARS_RE, "").replace(/\s+/g, " ").trim();
+    return text.length > MAX_COLUMN_NAME_LENGTH ? text.slice(0, MAX_COLUMN_NAME_LENGTH) : text;
+}
+
+/**
+ * True when a key can be used as a column as-is: no control characters, not
+ * empty once trimmed, within the length cap. Auto-detection drops keys that
+ * fail this (they are not sensor names); explicit allowlists are the
+ * operator's own text and are only sanitised for display.
+ */
+function isAcceptableColumnName(name) {
+    if (typeof name !== "string") return false;
+    CONTROL_CHARS_RE.lastIndex = 0;
+    if (CONTROL_CHARS_RE.test(name)) return false;
+    const trimmed = name.trim();
+    return trimmed.length > 0 && trimmed.length <= MAX_COLUMN_NAME_LENGTH;
 }
 
 /**
@@ -592,8 +639,9 @@ function formatPerColumnStats(colStats) {
     if (!colStats || typeof colStats !== "object") return "";
     const cols = Object.keys(colStats);
     if (cols.length === 0) return "(no columns)";
-    const labelWidth = Math.min(20, Math.max(...cols.map((c) => c.length)) + 1);
-    const lines = cols.map((col) => {
+    const names = cols.map(sanitizeColumnName);
+    const labelWidth = Math.min(20, Math.max(...names.map((c) => c.length)) + 1);
+    const lines = cols.map((col, i) => {
         const s = colStats[col] || {};
         const parts = [
             "n=" + (Number.isFinite(s.count) ? s.count : "0"),
@@ -602,7 +650,7 @@ function formatPerColumnStats(colStats) {
             "min=" + _fmt4(s.min),
             "max=" + _fmt4(s.max)
         ];
-        return "  " + (col + ":").padEnd(labelWidth + 1) + parts.join(" ");
+        return "  " + (names[i] + ":").padEnd(labelWidth + 1) + parts.join(" ");
     });
     return lines.join("\n");
 }
@@ -635,6 +683,11 @@ const DEFAULT_SKIP_FIELDS = new Set(["timestamp", "time", "ts", "_ts", "epoch", 
  * Common timestamp/identifier names (`timestamp`, `time`, `id`, …) are
  * skipped by default so a SCADA snapshot doesn't accidentally include an
  * epoch number as a "sensor".
+ *
+ * Keys that could not be written into a prompt as they are — control
+ * characters or newlines, empty, longer than 64 characters — are skipped
+ * too: the detected names are pasted into every prompt for the node's
+ * lifetime, and they come from whoever sends the payload.
  */
 function detectNumericColumns(record, opts) {
     if (!record || typeof record !== "object" || Array.isArray(record)) return [];
@@ -642,6 +695,7 @@ function detectNumericColumns(record, opts) {
     const extraSkip = opts && Array.isArray(opts.skip) ? new Set(opts.skip) : null;
     const cols = [];
     for (const [k, v] of Object.entries(record)) {
+        if (!isAcceptableColumnName(k)) continue;
         const lower = k.toLowerCase();
         if (skipDefault && DEFAULT_SKIP_FIELDS.has(lower)) continue;
         if (extraSkip && extraSkip.has(k)) continue;
@@ -813,6 +867,9 @@ module.exports = {
     formatPerColumnStats,
     parseCsvList,
     detectNumericColumns,
+    sanitizeColumnName,
+    isAcceptableColumnName,
+    MAX_COLUMN_NAME_LENGTH,
     fillTemplate,
     extractJson,
     getNestedField,

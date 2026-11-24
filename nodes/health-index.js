@@ -74,11 +74,59 @@ module.exports = function (RED) {
             }
         }
 
+        /**
+         * Per-sensor failure direction from the "sensor directions" JSON:
+         * `{"pressure": "falling"}`. "rising" (the default) is the historical
+         * assumption — a rising value is the one that degrades — "falling"
+         * marks pressure, efficiency, a health index: there a decreasing trend
+         * is the adverse one. Anything else is ignored with a warning.
+         */
+        function parseDirections(raw) {
+            const directions = new Map();
+            if (raw === undefined || raw === null || raw === "") return directions;
+            let source = raw;
+            if (typeof source === "string") {
+                try {
+                    source = JSON.parse(source);
+                } catch (e) {
+                    node.warn('Invalid sensor directions configuration (expected JSON like {"pressure":"falling"})');
+                    return directions;
+                }
+            }
+            if (typeof source !== "object" || source === null || Array.isArray(source)) {
+                node.warn("Invalid sensor directions configuration (expected an object)");
+                return directions;
+            }
+            const rejected = [];
+            Object.keys(source).forEach(function (name) {
+                const dir = normaliseDirection(source[name]);
+                if (dir) directions.set(name, dir);
+                else rejected.push(name);
+            });
+            if (rejected.length > 0) {
+                node.warn("Ignoring sensor directions that are not 'rising' or 'falling': " + rejected.join(", "));
+            }
+            return directions;
+        }
+
+        function normaliseDirection(raw) {
+            if (typeof raw !== "string") return null;
+            const d = raw.trim().toLowerCase();
+            return d === "rising" || d === "falling" ? d : null;
+        }
+
+        const sensorDirections = parseDirections(config.sensorDirections);
+
         let aggregationMethod = config.aggregationMethod || "weighted";
         if (!AGGREGATION_METHODS.includes(aggregationMethod)) {
             node.warn("Unknown aggregation method '" + aggregationMethod + "', using 'weighted'");
             aggregationMethod = "weighted";
         }
+        // How long the last score of a configured sensor that is missing from
+        // the payload is held (ms). 0 = off: a missing sensor simply does not
+        // count, as before — but it is reported in msg.missingSensors, because
+        // a faulted sensor going offline otherwise makes the asset "healthier".
+        const staleAfterMs = clampInt(config.staleAfterMs, 0, 1e12, 0);
         const outputScale = config.outputScale || "0-100";
         const outputTopic = config.outputTopic || "";
         const debug = config.debug === true;
@@ -175,7 +223,11 @@ module.exports = function (RED) {
                     values: Array.isArray(entry.values) ? entry.values.filter(Number.isFinite) : [],
                     anomalyCount: Number.isFinite(entry.anomalyCount) ? entry.anomalyCount : 0,
                     totalCount: Number.isFinite(entry.totalCount) ? entry.totalCount : 0,
-                    lastUpdate: entry.lastUpdate || Date.now()
+                    lastUpdate: entry.lastUpdate || Date.now(),
+                    lastScore: Number.isFinite(entry.lastScore) ? entry.lastScore : null,
+                    lastReliabilityFactor: Number.isFinite(entry.lastReliabilityFactor)
+                        ? entry.lastReliabilityFactor
+                        : 1
                 });
             });
         }
@@ -188,6 +240,12 @@ module.exports = function (RED) {
             stateKey: "healthIndexState",
             saveInterval: 30000,
             debug: debug,
+            // The blob shape has not changed since the unversioned (pre-0.4.1)
+            // writes (onStateLoaded handles the v1/v2 group layout itself), so
+            // those are adopted as they are.
+            migrate: function (state, fromVersion) {
+                return fromVersion === 0 ? state : null;
+            },
             onStateLoaded: function (state) {
                 // v2 stores one entry per group; v1 stored a single flat history,
                 // which restores into the default (ungrouped) bucket.
@@ -457,12 +515,31 @@ module.exports = function (RED) {
 
                 const state = getGroupState(resolveGroupKey(msg));
 
+                // Configured sensors (weight > 0) the payload does not carry at all.
+                // Entries that are present but unusable are in skippedSensors.
+                const missingSensors = [];
+                activeSensorWeights.forEach(function (weight, name) {
+                    if (weight > 0 && !sensorData.has(name) && skippedSensors.indexOf(name) < 0) {
+                        missingSensors.push(name);
+                    }
+                });
+                if (missingSensors.length > 0) {
+                    warnOnce(
+                        "Configured sensor(s) missing from the payload: " +
+                            missingSensors.join(", ") +
+                            (staleAfterMs > 0
+                                ? " (last score held for " + staleAfterMs + " ms, see msg.heldSensors)"
+                                : " (not counted; set 'Hold missing sensor' to keep the last score for a while)")
+                    );
+                }
+
                 // Calculate health index (using active config from msg.config or node defaults)
                 const healthResult = calculateHealthIndex(
                     state,
                     sensorData,
                     activeSensorWeights,
-                    activeAggregationMethod
+                    activeAggregationMethod,
+                    missingSensors
                 );
 
                 // No sensor contributed (empty payload, only unusable entries, or
@@ -534,6 +611,10 @@ module.exports = function (RED) {
                 };
                 if (skippedSensors.length > 0) {
                     outputMsg.skippedSensors = skippedSensors;
+                }
+                if (missingSensors.length > 0) {
+                    outputMsg.missingSensors = missingSensors;
+                    outputMsg.heldSensors = healthResult.heldSensors;
                 }
 
                 // Set topic if configured
@@ -655,7 +736,9 @@ module.exports = function (RED) {
                     values: [],
                     anomalyCount: 0,
                     totalCount: 0,
-                    lastUpdate: Date.now()
+                    lastUpdate: Date.now(),
+                    lastScore: null,
+                    lastReliabilityFactor: 1
                 };
                 state.sensorReliability.set(sensorName, reliability);
             }
@@ -680,12 +763,20 @@ module.exports = function (RED) {
                 }
             }
 
-            // Factor 1: Reduce weight for sensors with very high variance (noisy)
+            // Factor 1: Reduce weight for sensors with very high variance (noisy).
+            // The coefficient of variation (σ / |mean|) only describes a sensor
+            // whose level is away from zero. For a zero-mean indicator — a
+            // residual, a ΔT, a z-score fed as the value — it is unbounded, and
+            // it floored a perfectly healthy signal at the 0.5 minimum. The
+            // factor is therefore only applied when the mean is distinguishable
+            // from zero (|mean| > 2 standard errors, σ/√n).
             if (reliability.values.length >= 10) {
-                const mean = reliability.values.reduce((a, b) => a + b, 0) / reliability.values.length;
-                const variance =
-                    reliability.values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / reliability.values.length;
-                const cv = mean !== 0 ? Math.sqrt(variance) / Math.abs(mean) : 0;
+                const count = reliability.values.length;
+                const mean = reliability.values.reduce((a, b) => a + b, 0) / count;
+                const variance = reliability.values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / count;
+                const sd = Math.sqrt(variance);
+                const meanIsNonZero = Math.abs(mean) > (2 * sd) / Math.sqrt(count);
+                const cv = meanIsNonZero ? sd / Math.abs(mean) : 0;
 
                 // High coefficient of variation (>0.5) reduces reliability
                 if (cv > 0.5) {
@@ -701,6 +792,7 @@ module.exports = function (RED) {
 
             // Clamp reliability factor
             reliabilityFactor = Math.max(0.1, Math.min(1.0, reliabilityFactor));
+            reliability.lastReliabilityFactor = reliabilityFactor;
 
             return {
                 effectiveWeight: baseWeight * reliabilityFactor,
@@ -709,18 +801,32 @@ module.exports = function (RED) {
             };
         }
 
+        // Failure direction of a sensor: the record's own `direction` (or
+        // `failureDirection`, as trend-predictor names it), then the node's
+        // sensor-directions setting, then "rising".
+        function sensorDirection(sensorName, sensorInfo) {
+            return (
+                normaliseDirection(sensorInfo.direction) ||
+                normaliseDirection(sensorInfo.failureDirection) ||
+                sensorDirections.get(sensorName) ||
+                "rising"
+            );
+        }
+
         /**
          * @param {Object} state - group state (carries the reliability records)
          * @param {Map<string, Object>} sensorData - normalised sensor records
          * @param {Map<string, number>} weights - validated base weights
          * @param {string} method - one of AGGREGATION_METHODS
+         * @param {string[]} [missingSensors] - configured sensors absent from the payload
          * @returns {Object} result; `index` is null when no sensor contributed
          */
-        function calculateHealthIndex(state, sensorData, weights, method) {
+        function calculateHealthIndex(state, sensorData, weights, method, missingSensors) {
             const sensorScores = {};
             const contributingFactors = [];
             const dynamicWeights = {};
             const baseWeights = {};
+            const heldSensors = [];
 
             // Calculate individual sensor health scores
             sensorData.forEach(function (sensorInfo, sensorName) {
@@ -772,12 +878,20 @@ module.exports = function (RED) {
                     });
                 }
 
-                // Check trend (if available)
-                if (sensorInfo.trend === "increasing" && sensorInfo.slope > 0) {
+                // Check trend (if available): the adverse direction depends on
+                // the sensor — rising for vibration or temperature, falling for
+                // pressure, efficiency or a health index.
+                const direction = sensorDirection(sensorName, sensorInfo);
+                const slope = numericField(sensorInfo.slope);
+                const adverseTrend =
+                    direction === "falling"
+                        ? sensorInfo.trend === "decreasing" && slope < 0
+                        : sensorInfo.trend === "increasing" && slope > 0;
+                if (adverseTrend) {
                     score -= 10;
                     contributingFactors.push({
                         sensor: sensorName,
-                        reason: "increasing trend",
+                        reason: direction === "falling" ? "decreasing trend" : "increasing trend",
                         impact: -10
                     });
                 }
@@ -807,7 +921,36 @@ module.exports = function (RED) {
                 const baseWeight = weights.has(sensorName) ? weights.get(sensorName) : 1.0;
                 baseWeights[sensorName] = baseWeight;
                 dynamicWeights[sensorName] = calculateDynamicWeight(state, sensorName, sensorInfo, baseWeight);
+                state.sensorReliability.get(sensorName).lastScore = score;
             });
+
+            // A configured sensor missing from this payload keeps its last score
+            // while that score is younger than staleAfterMs (0 = never). It is
+            // aggregated with its last weight and listed in heldSensors; once
+            // stale it drops out as before.
+            if (staleAfterMs > 0 && Array.isArray(missingSensors)) {
+                const now = Date.now();
+                missingSensors.forEach(function (sensorName) {
+                    const record = state.sensorReliability.get(sensorName);
+                    if (!record || !Number.isFinite(record.lastScore)) return;
+                    if (now - record.lastUpdate >= staleAfterMs) return;
+                    const baseWeight = weights.get(sensorName);
+                    sensorScores[sensorName] = record.lastScore;
+                    baseWeights[sensorName] = baseWeight;
+                    dynamicWeights[sensorName] = {
+                        effectiveWeight: baseWeight * record.lastReliabilityFactor,
+                        reliabilityFactor: record.lastReliabilityFactor,
+                        anomalyRate: record.totalCount > 0 ? record.anomalyCount / record.totalCount : 0,
+                        held: true
+                    };
+                    heldSensors.push(sensorName);
+                    contributingFactors.push({
+                        sensor: sensorName,
+                        reason: "missing from payload, last score held (" + (now - record.lastUpdate) + " ms old)",
+                        impact: 0
+                    });
+                });
+            }
 
             // Aggregate scores. Sensors with base weight 0 are excluded from
             // every method — that is what a zero weight asks for.
@@ -881,7 +1024,8 @@ module.exports = function (RED) {
                 sensorScores: sensorScores,
                 dynamicWeights: dynamicWeights,
                 worstSensor: worstSensor,
-                contributingFactors: contributingFactors
+                contributingFactors: contributingFactors,
+                heldSensors: heldSensors
             };
         }
     }

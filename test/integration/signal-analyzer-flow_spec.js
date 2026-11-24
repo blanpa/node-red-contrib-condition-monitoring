@@ -18,6 +18,9 @@ describe("integration: signal-analyzer FFT flow", () => {
     const CAP = "sig-cap";
     const GROUPED = "sig-grouped";
     const GROUPED_CAP = "sig-grouped-cap";
+    const VIB = "sig-vibration";
+    const VIB_NORMAL_CAP = "sig-vibration-normal-cap";
+    const VIB_ALARM_CAP = "sig-vibration-alarm-cap";
 
     beforeAll(async () => {
         harness = await startRed();
@@ -49,7 +52,21 @@ describe("integration: signal-analyzer FFT flow", () => {
                 maxGroups: 10,
                 wires: [[GROUPED_CAP], []]
             },
-            captureNode(GROUPED_CAP, "per-topic capture")
+            captureNode(GROUPED_CAP, "per-topic capture"),
+            {
+                id: VIB,
+                type: "signal-analyzer",
+                name: "vibration analyzer",
+                mode: "vibration",
+                // windowSize left at its default: a frame is analysed whole regardless
+                samplingRate: 10000,
+                vibInputUnit: "m_s2",
+                iso10816Class: "group2_rigid",
+                outputTopic: "machine/vibration",
+                wires: [[VIB_NORMAL_CAP], [VIB_ALARM_CAP]]
+            },
+            captureNode(VIB_NORMAL_CAP, "vibration normal capture"),
+            captureNode(VIB_ALARM_CAP, "vibration alarm capture")
         ]);
         await harness.deploy(flow);
     }, 30000);
@@ -130,4 +147,39 @@ describe("integration: signal-analyzer FFT flow", () => {
             expect(Math.abs(result.dominantFrequency - dev.freq)).toBeLessThanOrEqual(8);
         }
     }, 60000);
+
+    /**
+     * End-to-end test for vibration mode on a waveform frame.
+     *
+     * A 4096-sample acceleration frame at 10 kHz carrying 1 m/s² at 25 Hz
+     * (1500 rpm imbalance) is 4.50 mm/s RMS velocity — ISO 20816-3 zone D for
+     * a group 2 machine on a rigid foundation. The frame must be analysed
+     * whole (the default window size of 256 used to cut it down and read
+     * 2.65 mm/s, zone B), the alarm must reach output 2, and the output topic
+     * must be applied. A quiet frame goes to output 1.
+     */
+    it("rates a 25 Hz acceleration frame as ISO zone D on the alarm output", async () => {
+        const fs = 10000;
+        const N = 4096;
+        const frame = Array.from({ length: N }, (_, i) => Math.sin((2 * Math.PI * 25 * i) / fs));
+        await harness.inject(VIB, { payload: frame, topic: "in" });
+
+        const alarm = await harness.collect(VIB_ALARM_CAP, 1, 5000);
+        expect(alarm.length).toBe(1);
+        const iso = alarm[0].payload.iso20816;
+        expect(iso.conversion).toBe("spectral-integration");
+        expect(Math.abs(iso.rmsVelocity - 4.5) / 4.5).toBeLessThan(0.05);
+        expect(iso.zone).toBe("D");
+        expect(iso.isAlarm).toBe(true);
+        expect(alarm[0].windowSize).toBe(N);
+        expect(alarm[0].topic).toBe("machine/vibration");
+        expect(alarm[0].payload.crestFactor).toBeCloseTo(Math.SQRT2, 1);
+
+        const quiet = frame.map((v) => v * 0.1);
+        await harness.inject(VIB, { payload: quiet, topic: "in" });
+        const normal = await harness.collect(VIB_NORMAL_CAP, 1, 5000);
+        expect(normal.length).toBe(1);
+        expect(normal[0].payload.iso20816.zone).toBe("A");
+        expect(normal[0].topic).toBe("machine/vibration");
+    }, 30000);
 });

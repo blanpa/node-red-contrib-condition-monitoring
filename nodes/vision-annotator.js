@@ -27,9 +27,13 @@ module.exports = function (RED) {
     }
 
     const { clampInt, clampFloat } = require("./utils/config-validator");
+    const imageGuard = require("./utils/image-guard");
 
     // Largest canvas side accepted from config (blank-canvas fallback).
     const MAX_CANVAS_SIDE = 8192;
+    // Largest background image accepted (pixels), checked against the PNG
+    // header before pngjs allocates for it (see utils/image-guard).
+    const MAX_IMAGE_PIXELS = imageGuard.DEFAULT_MAX_PIXELS;
     // Editor thumbnails are published at most this often per node; a burst in
     // between collapses to its latest frame.
     const PREVIEW_MIN_INTERVAL_MS = 200;
@@ -255,11 +259,22 @@ module.exports = function (RED) {
     // count the tensor never had.
     function requireElements(flat, count, what) {
         if (!Number.isFinite(count) || count < 0) {
-            throw new Error("Invalid " + what + " shape (needs a non-negative element count)");
+            throw shapeError("Invalid " + what + " shape (needs a non-negative element count)");
         }
         if (count > flat.length) {
-            throw new Error(what + " shape needs " + count + " values but the data has only " + flat.length);
+            throw shapeError(what + " shape needs " + count + " values but the data has only " + flat.length);
         }
+    }
+    function shapeError(message) {
+        const err = new Error(message);
+        err.statusText = "shape mismatch";
+        return err;
+    }
+    // Status line text for a failure: the error's short class when it has
+    // one, otherwise the message truncated the way utils/error-handler does.
+    function statusTextFor(err) {
+        const text = (err && (err.statusText || err.message)) || "error";
+        return text.length > 25 ? text.substring(0, 22) + "..." : text;
     }
     function getProp(msg, path) {
         if (!path) return undefined;
@@ -359,6 +374,10 @@ module.exports = function (RED) {
     function baseCanvas(msg, imageProperty, w, h) {
         const buf = getProp(msg, imageProperty);
         if (PNG && buf && Buffer.isBuffer(buf)) {
+            // An oversized header is an error for the whole frame, not a
+            // silent fall-back to the blank canvas: the operator must learn
+            // that the background image was refused.
+            if (imageGuard.isPng(buf)) imageGuard.assertPngDimensions(buf, { maxPixels: MAX_IMAGE_PIXELS });
             try {
                 const png = PNG.sync.read(buf);
                 return new Canvas(png.width, png.height, new Uint8Array(png.data));
@@ -439,7 +458,12 @@ module.exports = function (RED) {
         node.previewWidth = clampInt(config.previewWidth, 16, 4096, 200);
         node.zoomWidth = clampInt(config.zoomWidth, 16, 4096, 500);
 
-        const color = (cls) => node.palette[((cls % node.palette.length) + node.palette.length) % node.palette.length];
+        // A non-finite class index would read palette[NaN] → undefined and
+        // fail the frame with a TypeError; map it to the first colour instead.
+        const color = (cls) => {
+            const c = Number.isFinite(cls) ? cls : 0;
+            return node.palette[((c % node.palette.length) + node.palette.length) % node.palette.length];
+        };
         const labelOf = (cls) => (node.classLabels[cls] !== undefined ? node.classLabels[cls] : String(cls));
         const flatOf = (msg) => deepFlatten(getProp(msg, node.inputProperty));
         const shapeOf = (msg) => {
@@ -506,21 +530,43 @@ module.exports = function (RED) {
                 N = Math.floor(flat.length / 6);
             }
             requireElements(flat, N * A, "boxes");
+            let badClass = 0;
             for (let i = 0; i < N; i++) {
                 const o = i * A,
                     score = A > 4 ? flat[o + 4] : 1;
                 if (!(score >= node.scoreThreshold)) continue;
                 if (!allFinite(flat[o], flat[o + 1], flat[o + 2], flat[o + 3])) continue;
+                const cls = A > 5 ? Math.round(flat[o + 5]) : 0;
+                if (!Number.isFinite(cls)) {
+                    badClass++;
+                    continue;
+                }
                 boxes.push({
                     x1: flat[o] * sx,
                     y1: flat[o + 1] * sy,
                     x2: flat[o + 2] * sx,
                     y2: flat[o + 3] * sy,
                     score,
-                    class: A > 5 ? Math.round(flat[o + 5]) : 0
+                    class: cls
                 });
             }
+            warnBadClass(badClass, "box");
             return boxes;
+        }
+        // One warning per frame for detections whose class index is not a
+        // number (NaN / Infinity in the model output); the box is skipped,
+        // the rest of the frame still renders.
+        function warnBadClass(count, what) {
+            if (count > 0) {
+                node.warn(
+                    "vision-annotator: skipped " +
+                        count +
+                        " " +
+                        what +
+                        (count > 1 ? "es" : "") +
+                        " with a non-finite class index"
+                );
+            }
         }
         function renderBoxes(msg) {
             const canvas = baseCanvas(msg, node.imageProperty, node.canvasWidth, node.canvasHeight);
@@ -573,6 +619,7 @@ module.exports = function (RED) {
             const sx = node.normalizedCoords ? canvas.width : 1,
                 sy = node.normalizedCoords ? canvas.height : 1;
             const out = [];
+            let badClass = 0;
             for (let i = 0; i < N; i++) {
                 const o = i * A,
                     cx = flat[o] * sx,
@@ -583,6 +630,10 @@ module.exports = function (RED) {
                 const score = A > 5 ? flat[o + 5] : 1,
                     cls = A > 6 ? Math.round(flat[o + 6]) : 0;
                 if (!(score >= node.scoreThreshold) || !allFinite(cx, cy, w, h, ang)) continue;
+                if (!Number.isFinite(cls)) {
+                    badClass++;
+                    continue;
+                }
                 const cos = Math.cos(ang),
                     sin = Math.sin(ang);
                 const corners = [
@@ -620,6 +671,7 @@ module.exports = function (RED) {
                     corners: corners.map((p) => [Math.round(p[0]), Math.round(p[1])])
                 });
             }
+            warnBadClass(badClass, "obb box");
             return {
                 canvas,
                 annotations: {
@@ -1167,7 +1219,7 @@ module.exports = function (RED) {
                 send(msg);
                 done();
             } catch (err) {
-                node.status({ fill: "red", shape: "dot", text: err.message });
+                node.status({ fill: "red", shape: "dot", text: statusTextFor(err) });
                 done(err);
             }
         });

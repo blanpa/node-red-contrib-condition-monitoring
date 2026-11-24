@@ -55,6 +55,7 @@ describe("ml-inference admin routes", () => {
     let server;
     let port;
     const savedMetadata = [];
+    const deletedMetadata = [];
     const realSpawn = childProcess.spawn;
 
     function sidecarOf(modelPath) {
@@ -90,7 +91,10 @@ describe("ml-inference admin routes", () => {
                 fs.writeFileSync(sidecarOf(p), JSON.stringify(metadata));
                 return true;
             },
-            mlflowApiRequest: async () => ({}),
+            deleteModelMetadata: (p) => {
+                deletedMetadata.push(p);
+                fs.rmSync(sidecarOf(p), { force: true });
+            },
             loadTensorFlowJS: () => null,
             loadONNXRuntime: () => null,
             getMaxBridge: () => ({ getStatus: async () => ({}) }),
@@ -106,6 +110,7 @@ describe("ml-inference admin routes", () => {
     afterEach(() => {
         jest.restoreAllMocks();
         savedMetadata.length = 0;
+        deletedMetadata.length = 0;
     });
 
     afterAll((done) => {
@@ -190,9 +195,14 @@ describe("ml-inference admin routes", () => {
             });
             expect(res.status).toBe(200);
             expect(res.json.name).toBe("iforest.pkl");
-            expect(fs.readFileSync(res.json.path).equals(body)).toBe(true);
+            // Store-relative, like the listing (the editor writes it into modelPath).
+            expect(res.json.path).toBe("iforest.pkl");
+            expect(res.text).not.toContain(tmpRoot);
+            expect(fs.readFileSync(path.join(modelsDir, res.json.path)).equals(body)).toBe(true);
             expect(res.json.metadata.type).toBe("sklearn");
             expect(res.json.metadata.format).toBe("sklearn");
+            // ...while the stored metadata still records where the file went.
+            expect(savedMetadata[0].metadata.path).toBe(path.join(modelsDir, "iforest.pkl"));
         });
 
         it("accepts TF.js parts one by one into a model directory, beyond the JSON body limit", async () => {
@@ -221,7 +231,8 @@ describe("ml-inference admin routes", () => {
                 body: modelJson
             });
             expect(jsonRes.status).toBe(200);
-            expect(jsonRes.json.dir).toBe(path.join(modelsDir, dir));
+            expect(jsonRes.json.dir).toBe(dir);
+            expect(jsonRes.json.path).toBe(path.join(dir, "model.json"));
             expect(jsonRes.json.metadata.type).toBe("tfjs");
             expect(fs.statSync(path.join(modelsDir, dir, "group1-shard1of1.bin")).size).toBe(shard.length);
             expect(fs.readFileSync(path.join(modelsDir, dir, "model.json")).equals(modelJson)).toBe(true);
@@ -239,7 +250,8 @@ describe("ml-inference admin routes", () => {
                 body
             });
             expect(res.status).toBe(200);
-            expect(res.json.path).toBe(path.join(modelsDir, "escaped", "w.bin"));
+            expect(res.json.path).toBe(path.join("escaped", "w.bin"));
+            expect(fs.existsSync(path.join(modelsDir, "escaped", "w.bin"))).toBe(true);
             expect(fs.existsSync(path.join(tmpRoot, "escaped"))).toBe(false);
         });
     });
@@ -261,13 +273,64 @@ describe("ml-inference admin routes", () => {
             expect(Object.keys(byName).some((n) => /_metadata\.json$/.test(n))).toBe(false);
         });
 
-        it("deletes the metadata sidecar together with the model", async () => {
+        it("names models relative to the store and discloses no server path", async () => {
+            const res = await request(port, "GET", "/ml-inference/models");
+            expect(Object.keys(res.json)).toEqual(["models"]);
+            expect(res.text).not.toContain(tmpRoot);
+            for (const m of res.json.models) {
+                expect(m.path).toBe(m.name);
+                expect(path.isAbsolute(m.path)).toBe(false);
+            }
+            // The metadata the listing shows comes from the injected helper.
+            const iforest = res.json.models.find((m) => m.name === "iforest.pkl");
+            expect(iforest.metadata.type).toBe("sklearn");
+            expect(iforest.version).toBe("1.0.0");
+        });
+
+        it("deletes the metadata together with the model, through the injected helper", async () => {
             const modelPath = path.join(modelsDir, "iforest.pkl");
             expect(fs.existsSync(sidecarOf(modelPath))).toBe(true);
             const res = await request(port, "DELETE", "/ml-inference/models/iforest.pkl");
             expect(res.status).toBe(200);
             expect(fs.existsSync(modelPath)).toBe(false);
             expect(fs.existsSync(sidecarOf(modelPath))).toBe(false);
+            expect(deletedMetadata).toEqual([modelPath]);
+        });
+
+        it("deletes a TF.js model directory with the metadata keyed by its model.json", async () => {
+            const dir = path.join(modelsDir, "tfjs_model_test");
+            const res = await request(port, "DELETE", "/ml-inference/models/tfjs_model_test");
+            expect(res.status).toBe(200);
+            expect(fs.existsSync(dir)).toBe(false);
+            expect(deletedMetadata).toEqual([path.join(dir, "model.json"), dir]);
+        });
+    });
+
+    describe("removed routes", () => {
+        // The MLflow registry proxy fetched a caller-supplied URL with a
+        // caller-supplied bearer token under READ permission (SSRF); the
+        // versions route only echoed what the listing already returns. The
+        // editor called neither. Neither may come back quietly.
+        it("GET /ml-inference/registries/mlflow/models is not registered", async () => {
+            const res = await request(
+                port,
+                "GET",
+                "/ml-inference/registries/mlflow/models?registryUri=" + encodeURIComponent("http://127.0.0.1:1"),
+                { headers: { "x-mlflow-token": "t" } }
+            );
+            expect(res.status).toBe(404);
+        });
+
+        it("GET /ml-inference/models/:name/versions is not registered", async () => {
+            const res = await request(port, "GET", "/ml-inference/models/net.keras/versions");
+            expect(res.status).toBe(404);
+        });
+
+        it("the admin module registers no outbound-request route and no registry URL check", () => {
+            const src = fs.readFileSync(path.join(__dirname, "..", "nodes", "ml-inference-admin.js"), "utf8");
+            // Comments may (and do) explain why the routes are gone; code may not have them.
+            const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+            expect(code).not.toMatch(/assertRegistryUrl|mlflowApiRequest|registries\/mlflow|:name\/versions/);
         });
     });
 });

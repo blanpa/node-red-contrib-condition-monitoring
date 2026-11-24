@@ -144,13 +144,47 @@ module.exports = function createModelDownloader(deps) {
      * Compute the SHA-256 hash of a file, returning a lower-case hex digest.
      */
     function sha256OfFile(filePath) {
-        return new Promise((resolve, reject) => {
-            const hash = crypto.createHash("sha256");
-            const stream = fs.createReadStream(filePath);
-            stream.on("data", (chunk) => hash.update(chunk));
-            stream.on("end", () => resolve(hash.digest("hex")));
-            stream.on("error", reject);
-        });
+        return sha256OfFiles([filePath]);
+    }
+
+    /**
+     * SHA-256 over the concatenated contents of `filePaths`, in that order —
+     * the digest `cat a b c | sha256sum` prints. Used for the TF.js pin, which
+     * spans model.json and every weight shard.
+     */
+    function sha256OfFiles(filePaths) {
+        const hash = crypto.createHash("sha256");
+        return filePaths
+            .reduce(
+                (chain, filePath) =>
+                    chain.then(
+                        () =>
+                            new Promise((resolve, reject) => {
+                                const stream = fs.createReadStream(filePath);
+                                stream.on("data", (chunk) => hash.update(chunk));
+                                stream.on("end", resolve);
+                                stream.on("error", reject);
+                            })
+                    ),
+                Promise.resolve()
+            )
+            .then(() => hash.digest("hex"));
+    }
+
+    /** Validate an optional pin; returns the normalised digest or null. */
+    function normaliseSha256(expectedSha256) {
+        if (!expectedSha256) return null;
+        const want = String(expectedSha256).trim().toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(want)) {
+            throw new Error("expectedSha256 must be a 64-char hex SHA-256 digest");
+        }
+        return want;
+    }
+
+    function shaMismatch(what, want, got) {
+        const err = new Error(`SHA-256 mismatch for ${what}: expected ${want}, got ${got}`);
+        err.code = "ESHAMISMATCH";
+        return err;
     }
 
     // A download that makes no progress for this long is abandoned. This is an
@@ -263,13 +297,7 @@ module.exports = function createModelDownloader(deps) {
     async function downloadFile(url, authType, authToken, targetPath, expectedSha256, redirectsLeft) {
         if (redirectsLeft === undefined) redirectsLeft = 5;
 
-        let want = null;
-        if (expectedSha256) {
-            want = String(expectedSha256).trim().toLowerCase();
-            if (!/^[0-9a-f]{64}$/.test(want)) {
-                throw new Error("expectedSha256 must be a 64-char hex SHA-256 digest");
-            }
-        }
+        const want = normaliseSha256(expectedSha256);
 
         const tmpPath = targetPath + "." + process.pid + "-" + ++downloadCounter + ".part";
         try {
@@ -278,9 +306,7 @@ module.exports = function createModelDownloader(deps) {
             if (want) {
                 const got = await sha256OfFile(tmpPath);
                 if (got !== want) {
-                    const err = new Error(`SHA-256 mismatch for ${url}: expected ${want}, got ${got}`);
-                    err.code = "ESHAMISMATCH";
-                    throw err;
+                    throw shaMismatch(url, want, got);
                 }
             }
 
@@ -300,11 +326,27 @@ module.exports = function createModelDownloader(deps) {
      * credentials — so authenticated / integrity-pinned / Hub models have to be
      * mirrored locally first.
      *
-     * `expectedSha256` covers model.json (which names the shards).
+     * Integrity pin. A TF.js manifest carries no shard digests, so a pin over
+     * model.json alone would leave the weights swappable. For a TF.js model
+     * `expectedSha256` is therefore defined as
+     *
+     *     SHA-256( model.json bytes + shard_1 bytes + ... + shard_n bytes )
+     *
+     * i.e. the digest of the concatenated file contents, model.json first and
+     * then every shard in `weightsManifest` order (groups in array order, each
+     * group's `paths` in array order), exactly as served. Compute it with
+     * `cat model.json <shards in manifest order> | sha256sum`. On a mismatch
+     * nothing is kept and the error carries code ESHAMISMATCH.
+     *
+     * Everything is downloaded into a staging directory next to the target and
+     * only swapped into place once complete (and verified), so a failed,
+     * stalled or tampered download never replaces a previously cached model.
      *
      * @returns {Promise<string>} local path of the downloaded model.json
      */
     async function downloadTfjsModel(modelJsonUrl, authType, authToken, expectedSha256, targetDir) {
+        const want = normaliseSha256(expectedSha256);
+
         const dir =
             targetDir ||
             path.join(
@@ -313,37 +355,60 @@ module.exports = function createModelDownloader(deps) {
                 "tfjs",
                 crypto.createHash("sha256").update(modelJsonUrl).digest("hex").slice(0, 16)
             );
-        fs.mkdirSync(dir, { recursive: true });
+        const staging = dir + "." + process.pid + "-" + ++downloadCounter + ".part";
+        fs.rmSync(staging, { recursive: true, force: true });
+        fs.mkdirSync(staging, { recursive: true });
 
-        const modelJsonPath = path.join(dir, "model.json");
-        await downloadFile(modelJsonUrl, authType, authToken, modelJsonPath, expectedSha256);
-
-        let manifest;
         try {
-            manifest = JSON.parse(fs.readFileSync(modelJsonPath, "utf8")).weightsManifest;
-        } catch (e) {
-            throw new Error("Downloaded model.json is not valid JSON: " + modelJsonUrl);
-        }
+            const modelJsonPath = path.join(staging, "model.json");
+            await downloadFile(modelJsonUrl, authType, authToken, modelJsonPath);
 
-        const origin = new URL(modelJsonUrl).origin;
-        for (const group of Array.isArray(manifest) ? manifest : []) {
-            for (const shard of Array.isArray(group && group.paths) ? group.paths : []) {
-                const shardUrl = new URL(String(shard), modelJsonUrl);
-                // The manifest is remote input: a shard name must not climb
-                // out of the model's directory.
-                const shardPath = assertPath(path.resolve(dir, String(shard)), { allowedBases: [dir] });
-                fs.mkdirSync(path.dirname(shardPath), { recursive: true });
-                const sameOrigin = shardUrl.origin === origin;
-                await downloadFile(
-                    shardUrl.toString(),
-                    sameOrigin ? authType : null,
-                    sameOrigin ? authToken : null,
-                    shardPath
-                );
+            let manifest;
+            try {
+                manifest = JSON.parse(fs.readFileSync(modelJsonPath, "utf8")).weightsManifest;
+            } catch (e) {
+                throw new Error("Downloaded model.json is not valid JSON: " + modelJsonUrl);
             }
+
+            // Files in pin order: model.json, then the shards as the manifest lists them.
+            const files = [modelJsonPath];
+            const origin = new URL(modelJsonUrl).origin;
+            for (const group of Array.isArray(manifest) ? manifest : []) {
+                for (const shard of Array.isArray(group && group.paths) ? group.paths : []) {
+                    const shardUrl = new URL(String(shard), modelJsonUrl);
+                    // The manifest is remote input: a shard name must not climb
+                    // out of the model's directory.
+                    const shardPath = assertPath(path.resolve(staging, String(shard)), { allowedBases: [staging] });
+                    fs.mkdirSync(path.dirname(shardPath), { recursive: true });
+                    const sameOrigin = shardUrl.origin === origin;
+                    await downloadFile(
+                        shardUrl.toString(),
+                        sameOrigin ? authType : null,
+                        sameOrigin ? authToken : null,
+                        shardPath
+                    );
+                    files.push(shardPath);
+                }
+            }
+
+            if (want) {
+                const got = await sha256OfFiles(files);
+                if (got !== want) {
+                    throw shaMismatch(modelJsonUrl + " (model.json + " + (files.length - 1) + " shard(s))", want, got);
+                }
+            }
+
+            // Complete and verified: swap it in. A previously cached copy is
+            // replaced only now, never by a partial download.
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.mkdirSync(path.dirname(dir), { recursive: true });
+            fs.renameSync(staging, dir);
+        } catch (err) {
+            fs.rmSync(staging, { recursive: true, force: true });
+            throw err;
         }
 
-        return modelJsonPath;
+        return path.join(dir, "model.json");
     }
 
     // Extension a downloaded registry artifact is cached under, per model type.
@@ -386,9 +451,11 @@ module.exports = function createModelDownloader(deps) {
      * extension the loaders understand, and return the new path.
      *
      * With an explicit model type the extension follows the type; with "auto"
-     * it is sniffed from the content. A pickle is never selected automatically:
-     * unpickling runs code, so the operator has to opt in by choosing the
-     * scikit-learn type.
+     * it is sniffed from the content. Two formats are never selected
+     * automatically, because loading them can run code shipped inside the
+     * file: a pickle (unpickling executes), and a legacy Keras HDF5 model (a
+     * Lambda layer deserialises marshalled Python bytecode on load). The
+     * operator has to opt in by choosing the scikit-learn / Keras type.
      */
     function finalizeDownloadedModel(downloadedPath, configuredType) {
         const sniffed = sniffModelExtension(downloadedPath);
@@ -401,6 +468,12 @@ module.exports = function createModelDownloader(deps) {
             unlinkQuietly(downloadedPath);
             throw new Error(
                 "Downloaded model looks like a Python pickle. Set the model type to scikit-learn explicitly to load it."
+            );
+        } else if (sniffed === ".h5") {
+            unlinkQuietly(downloadedPath);
+            throw new Error(
+                "Downloaded model looks like a legacy Keras HDF5 (.h5) file, which can run code on load. " +
+                    "Set the model type to Keras explicitly to load it."
             );
         } else {
             ext = sniffed;
@@ -419,6 +492,7 @@ module.exports = function createModelDownloader(deps) {
         downloadFromCustomRegistry: downloadFromCustomRegistry,
         sniffModelExtension: sniffModelExtension,
         finalizeDownloadedModel: finalizeDownloadedModel,
-        sha256OfFile: sha256OfFile
+        sha256OfFile: sha256OfFile,
+        sha256OfFiles: sha256OfFiles
     };
 };

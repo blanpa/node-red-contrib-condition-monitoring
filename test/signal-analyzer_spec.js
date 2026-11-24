@@ -680,9 +680,10 @@ describe("signal-analyzer Node", function () {
             ];
             helper.load(signalAnalyzerNode, flow, function () {
                 const n1 = helper.getNode("n1");
-                const n2 = helper.getNode("n2");
+                const n3 = helper.getNode("n3");
 
-                n2.on("input", function (msg) {
+                // Zone D is an alarm, so the result arrives on output 2 (anomaly)
+                n3.on("input", function (msg) {
                     // Very high RMS should be Zone D
                     if (msg.payload.rms > 7.1) {
                         // Class 2 Zone D threshold

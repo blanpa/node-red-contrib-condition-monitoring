@@ -43,7 +43,7 @@ describe("MaxBridgeManager", () => {
                 raw += chunk;
             });
             req.on("end", () => {
-                if (hits) hits.push({ method: req.method, url: req.url, body: raw });
+                if (hits) hits.push({ method: req.method, url: req.url, body: raw, headers: req.headers });
                 res.writeHead(statusCode, { "Content-Type": "application/json" });
                 res.end(typeof body === "string" ? body : JSON.stringify(body));
             });
@@ -191,6 +191,60 @@ describe("MaxBridgeManager", () => {
             manager.stopHealthCheck();
         });
 
+        it("does not retry /predict on a timeout (the server is still running it)", async () => {
+            let hits = 0;
+            const { port } = await startServer((req) => {
+                hits++;
+                req.resume();
+                /* never reply */
+            });
+            const manager = makeManager(port, { requestTimeout: 120, retryAttempts: 3, retryDelay: 5 });
+
+            const err = await manager.predict("m1", [1, 2, 3]).catch((e) => e);
+            expect(err.message).toBe("Request timeout");
+            expect(err.code).toBe("EREQUESTTIMEOUT");
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            expect(hits).toBe(1);
+        });
+
+        it("does not retry /predict on a 5xx (the model failed, not the transport)", async () => {
+            const hits = [];
+            const { port } = await startServer(jsonResponder(500, { error: "model blew up" }, hits));
+            const manager = makeManager(port, { retryAttempts: 3, retryDelay: 5 });
+
+            await expect(manager.predict("m1", [1])).rejects.toThrow("model blew up");
+            expect(hits.length).toBe(1);
+        });
+
+        it("does not retry /load or /batch_predict on a 5xx either", async () => {
+            const hits = [];
+            const { port } = await startServer(jsonResponder(503, { error: "loading failed" }, hits));
+            const manager = makeManager(port, { retryAttempts: 3, retryDelay: 5 });
+
+            await expect(manager.loadModel("/models/m.onnx", "m1")).rejects.toThrow("loading failed");
+            await expect(manager.batchPredict("m1", [[1], [2]])).rejects.toThrow("loading failed");
+            expect(hits.map((h) => h.url)).toEqual(["/load", "/batch_predict"]);
+        });
+
+        it("still retries /predict after a refused connection (the server never saw it)", async () => {
+            const manager = makeManager(await closedPort(), { retryAttempts: 3, retryDelay: 5 });
+            await expect(manager.predict("m1", [1])).rejects.toThrow(/ECONNREFUSED/);
+            // Every attempt is reported to the stats, one per retry.
+            expect(manager.getStats().failedRequests).toBe(3);
+        });
+
+        it("does not retry GET /status on a timeout", async () => {
+            let hits = 0;
+            const { port } = await startServer((req) => {
+                hits++;
+                req.resume();
+            });
+            const manager = makeManager(port, { requestTimeout: 120, retryAttempts: 3, retryDelay: 5 });
+            await expect(manager.getStatus()).rejects.toThrow("Request timeout");
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            expect(hits).toBe(1);
+        });
+
         it("succeeds when a retry attempt gets a good response", async () => {
             let calls = 0;
             const { port } = await startServer((req, res) => {
@@ -312,6 +366,52 @@ describe("MaxBridgeManager", () => {
             expect(event).toEqual({ modelId: "m1" });
             expect(hits[0].url).toBe("/unload");
             expect(JSON.parse(hits[0].body)).toEqual({ model_id: "m1" });
+        });
+    });
+
+    describe("authentication header", () => {
+        const ORIGINAL = process.env.MAX_BRIDGE_TOKEN;
+
+        afterEach(() => {
+            if (ORIGINAL === undefined) delete process.env.MAX_BRIDGE_TOKEN;
+            else process.env.MAX_BRIDGE_TOKEN = ORIGINAL;
+        });
+
+        it("sends Authorization: Bearer on every request when MAX_BRIDGE_TOKEN is set", async () => {
+            process.env.MAX_BRIDGE_TOKEN = "max-s3cret";
+            const hits = [];
+            const { port } = await startServer(jsonResponder(200, { status: "healthy", success: true }, hits));
+            const manager = makeManager(port);
+
+            await manager.checkHealth();
+            await manager.getStatus();
+            await manager.predict("m1", [1]);
+            expect(hits.map((h) => h.headers.authorization)).toEqual([
+                "Bearer max-s3cret",
+                "Bearer max-s3cret",
+                "Bearer max-s3cret"
+            ]);
+        });
+
+        it("sends no Authorization header when the variable is unset", async () => {
+            delete process.env.MAX_BRIDGE_TOKEN;
+            const hits = [];
+            const { port } = await startServer(jsonResponder(200, { status: "healthy" }, hits));
+            const manager = makeManager(port);
+
+            await manager.checkHealth();
+            expect(hits[0].headers.authorization).toBeUndefined();
+        });
+
+        it("lets an explicit authToken option override the environment", async () => {
+            process.env.MAX_BRIDGE_TOKEN = "from-env";
+            const hits = [];
+            const { port } = await startServer(jsonResponder(200, { status: "healthy" }, hits));
+
+            await makeManager(port, { authToken: "from-options" }).checkHealth();
+            await makeManager(port, { authToken: "" }).checkHealth();
+            expect(hits[0].headers.authorization).toBe("Bearer from-options");
+            expect(hits[1].headers.authorization).toBeUndefined();
         });
     });
 

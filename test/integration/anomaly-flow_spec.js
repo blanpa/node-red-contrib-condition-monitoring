@@ -107,4 +107,25 @@ describe("integration: anomaly-detector Z-Score flow", () => {
         const out = await harness.collect(NORMAL_CAP, 1, 1500);
         expect(out[0].topic).toBe("machine-A/temp");
     });
+
+    it("gives a multi-sensor message the same envelope as a single value", async () => {
+        harness.reset(NORMAL_CAP);
+        harness.reset(ANOMALY_CAP);
+
+        // The multi-sensor output used to drop everything but its own fields:
+        // no topic unless msg.topic was set, no passthrough, no timestamp.
+        await harness.inject(DETECTOR, {
+            payload: { temp: 50, press: 1.2 },
+            topic: "machine-A/multi",
+            deviceId: "A"
+        });
+        const out = await harness.collect(NORMAL_CAP, 1, 1500);
+        expect(out[0].inputFormat).toBe("multi-sensor");
+        expect(out[0].topic).toBe("machine-A/multi");
+        expect(out[0].deviceId).toBe("A");
+        expect(typeof out[0].timestamp).toBe("number");
+        expect(out[0].hysteresis).toEqual({ enabled: false, applied: false });
+        expect(out[0].sensorCount).toBe(2);
+        expect(out[0].payload.temp.value).toBe(50);
+    });
 });

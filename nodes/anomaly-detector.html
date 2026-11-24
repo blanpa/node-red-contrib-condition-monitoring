@@ -56,7 +56,12 @@
             // WebSocket
             websocketEnabled: { value: false },
             websocketPort: { value: 1881 },
-            websocketTopic: { value: "anomaly-detector" }
+            websocketTopic: { value: "anomaly-detector" },
+            // Comma-separated Origin allowlist; the auth token is a credential (below)
+            websocketAllowedOrigins: { value: "" }
+        },
+        credentials: {
+            websocketAuthToken: { type: "password" }
         },
         inputs: 1,
         outputs: 2,
@@ -609,10 +614,39 @@
                 </div>
             </div>
 
+            <div class="cm-config-grid" style="margin-top: 12px;">
+                <div class="cm-config-item">
+                    <label for="node-input-websocketAuthToken">
+                        <i class="fa fa-key"></i> Auth Token
+                    </label>
+                    <input type="password" id="node-input-websocketAuthToken" placeholder="empty = no authentication" autocomplete="off">
+                    <div class="cm-help-text">
+                        Shared secret every client must present (<code>?token=…</code> or the
+                        <code>Sec-WebSocket-Protocol</code> header). Stored as a Node-RED credential:
+                        encrypted, never part of a flow export. Without one, anyone who can reach the
+                        port can read the results.
+                    </div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-websocketAllowedOrigins">
+                        <i class="fa fa-globe"></i> Allowed Origins
+                    </label>
+                    <input type="text" id="node-input-websocketAllowedOrigins" placeholder="empty = any origin, e.g. https://dash.example.com, http://localhost:3000">
+                    <div class="cm-help-text">
+                        Comma-separated browser <code>Origin</code> values allowed to connect. When set,
+                        a connection without an <code>Origin</code> header (a non-browser client) is
+                        refused too.
+                    </div>
+                </div>
+            </div>
+
             <div class="cm-info-box" style="margin-top: 12px;">
                 <i class="fa fa-code"></i>
-                <b>Connect:</b> <code>ws://localhost:1881/ws/condition-monitoring</code><br>
-                <b>Subscribe:</b> <code>{"type": "subscribe", "topics": ["anomaly-detector"]}</code>
+                <b>Connect:</b> <code>ws://localhost:1881/ws/condition-monitoring?token=…</code><br>
+                <b>Subscribe:</b> <code>{"type": "subscribe", "topics": ["anomaly-detector"]}</code><br>
+                <b>Note:</b> all nodes on one port share one server; the first deployed node's token, origins and
+                port apply to all of them. A redeploy restarts the server with the new settings.
             </div>
         </div>
     </div>
@@ -670,25 +704,38 @@ msg.payload = {
   "vibration": 2.3
 };</pre></dd>
         
-        <dt>msg.reset <span class="property-type">boolean</span></dt>
-        <dd>Set to <code>true</code> to clear the internal buffer and reset state</dd>
-        
-        <dt>msg.timestamp <span class="property-type">number</span></dt>
-        <dd>Optional timestamp in milliseconds (uses Date.now() if not provided)</dd>
-        
+        <dt>msg.reset <span class="property-type">boolean | "all"</span></dt>
+        <dd>Set to <code>true</code> to clear the internal buffer and reset state (the active regime / group);
+        <code>"all"</code> clears every regime and group</dd>
+
         <dt>msg.config <span class="property-type">object</span></dt>
-        <dd>Optional runtime configuration override. Allows dynamic adjustment of detection parameters per message:
+        <dd>Optional runtime configuration override. Allows dynamic adjustment of detection parameters per message
+        (streaming, multi-sensor and batch mode alike). Every key is optional and falls back to the node setting;
+        a malformed value (not a number, a non-positive threshold, an unknown method) is ignored with a warning
+        instead of disabling the check:
         <pre>msg.config = {
-  method: "zscore",        // Override detection method
-  zscoreThreshold: 2.5,    // Override Z-score threshold
-  zscoreWarning: 1.8,      // Override warning threshold
-  iqrMultiplier: 1.5,      // Override IQR multiplier
-  minThreshold: 10,        // Override min threshold
-  maxThreshold: 100,       // Override max threshold
+  method: "zscore",        // zscore | iqr | threshold | percentile | ema | cusum | moving-average
+  zscoreThreshold: 2.5,    // Z-score critical / warning (σ)
+  zscoreWarning: 1.8,
+  iqrMultiplier: 1.5,      // IQR critical / warning multiplier
+  iqrWarningMultiplier: 1.2,
+  minThreshold: 10,        // Fixed threshold limits
+  maxThreshold: 100,
+  lowerPercentile: 5,      // Percentile bounds (0-100)
+  upperPercentile: 95,
+  emaThreshold: 2.0,       // EMA critical / warning
+  emaWarning: 1.5,
+  cusumThreshold: 5.0,     // CUSUM critical / warning / drift
+  cusumWarning: 3.5,
+  cusumDrift: 0.5,
+  maThreshold: 2.0,        // Moving average critical / warning
+  maWarning: 1.5,
   hysteresisEnabled: false,// Enable/disable hysteresis
   consecutiveCount: 5      // Override consecutive count
 };</pre>
-        <b>Use cases:</b> Adaptive thresholds based on time of day, operating mode, or external conditions.</dd>
+        <b>Use cases:</b> Adaptive thresholds based on time of day, operating mode, or external conditions.
+        In batch mode the older <code>msg.method</code> and <code>msg.threshold</code> aliases are still honoured
+        (after <code>msg.config</code>).</dd>
     </dl>
     
     <h3>Multi-Sensor Mode</h3>
@@ -698,7 +745,9 @@ msg.payload = {
         <li>Applies <b>separate hysteresis</b> state per sensor</li>
         <li>Outputs a combined result with per-sensor details</li>
     </ul>
-    <p><b>Multi-sensor output:</b></p>
+    <p><b>Multi-sensor output:</b> (the same envelope as the single-value output — the output topic,
+    <code>timestamp</code>, <code>hysteresis</code> and every other property of the incoming message are
+    carried along)</p>
     <pre>{
   "payload": {
     "temperature": { "value": 65.2, "isAnomaly": false, "severity": "normal" },
@@ -707,7 +756,9 @@ msg.payload = {
   "isAnomaly": true,
   "anomalySensors": ["pressure"],
   "sensorCount": 2,
-  "inputFormat": "multi-sensor"
+  "inputFormat": "multi-sensor",
+  "hysteresis": { "enabled": true, "applied": false },
+  "timestamp": 1704067200000
 }</pre>
     
     <h3>Outputs</h3>
@@ -862,9 +913,19 @@ msg.payload = [
     <h3>WebSocket Real-Time Dashboard</h3>
     <p>Enable WebSocket to broadcast detection results to external dashboards in real-time.</p>
 
+    <h4>Authentication</h4>
+    <p>Set an <b>Auth Token</b> (a Node-RED credential: encrypted at rest, never part of a flow export)
+    unless the port is only reachable locally. Clients present it as <code>?token=…</code> in the URL or
+    as the <code>Sec-WebSocket-Protocol</code> header; a connection without the right token is closed with
+    code <code>4401</code>. <b>Allowed Origins</b> is a comma-separated allowlist of browser
+    <code>Origin</code> values (cross-site WebSocket hijacking protection); when it is set, a client that
+    sends no <code>Origin</code> header at all is refused as well. All nodes publishing to one port share
+    one server configured by the first node deployed; a redeploy stops and restarts it with the new
+    settings. A client that stops reading its messages is skipped and, if it stays behind, disconnected.</p>
+
     <h4>Connection</h4>
     <pre>// JavaScript client example
-const ws = new WebSocket('ws://localhost:1881/ws/condition-monitoring');
+const ws = new WebSocket('ws://localhost:1881/ws/condition-monitoring?token=YOUR_TOKEN');
 
 ws.onopen = () => {
   // Subscribe to specific topics

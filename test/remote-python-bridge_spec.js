@@ -17,7 +17,7 @@ function startFakeServer(handlers) {
             req.on("data", (c) => (body += c));
             req.on("end", () => {
                 const parsed = body ? JSON.parse(body) : {};
-                calls.push({ method: req.method, path: req.url, body: parsed });
+                calls.push({ method: req.method, path: req.url, body: parsed, headers: req.headers });
                 const key = `${req.method} ${req.url}`;
                 const handler = handlers[key];
                 if (!handler) {
@@ -161,17 +161,61 @@ describe("RemotePythonBridge", () => {
             }
         });
 
-        it("retries a 5xx and succeeds on a later attempt", async () => {
+        it("retries a 5xx on GET /status and succeeds on a later attempt", async () => {
             fake = await startFakeServer({
-                "POST /load": (_body, callNo) =>
+                "GET /status": (_body, callNo) =>
                     callNo < 2
                         ? { status: 500, payload: { success: false, error: "transient" } }
-                        : { payload: { success: true, model_id: "m1", model_type: "keras" } }
+                        : { payload: { status: "running", loaded_models: ["m1"] } }
             });
             const bridge = new RemotePythonBridge({ serverUrl: fake.url, retryAttempts: 3, retryDelay: 1 });
-            const res = await bridge.loadModel("/data/models/m.keras", "m1");
-            expect(res.model_type).toBe("keras");
+            const status = await bridge.getStatus();
+            expect(status.loaded_models).toEqual(["m1"]);
             expect(fake.calls.length).toBe(2);
+        });
+
+        it("does not retry /load or /predict on a 5xx (the model failed, not the transport)", async () => {
+            fake = await startFakeServer({
+                "POST /load": () => ({ status: 500, payload: { success: false, error: "RuntimeError: bad model" } }),
+                "POST /predict": () => ({ status: 500, payload: { success: false, error: "ValueError: shape" } })
+            });
+            const bridge = new RemotePythonBridge({ serverUrl: fake.url, retryAttempts: 3, retryDelay: 1 });
+            await expect(bridge.loadModel("/data/models/m.keras", "m1")).rejects.toThrow("bad model");
+            await expect(bridge.predict("m1", [1, 2])).rejects.toThrow("shape");
+            expect(fake.calls.map((c) => c.path)).toEqual(["/load", "/predict"]);
+        });
+
+        it("does not retry /predict on a timeout (the sidecar is still running it)", async () => {
+            let hits = 0;
+            const server = http.createServer((req) => {
+                hits++;
+                req.resume();
+                /* never reply */
+            });
+            await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+            try {
+                const bridge = new RemotePythonBridge({
+                    serverUrl: `http://127.0.0.1:${server.address().port}`,
+                    requestTimeout: 120,
+                    retryAttempts: 3,
+                    retryDelay: 1
+                });
+                const err = await bridge.predict("m1", [1]).catch((e) => e);
+                expect(err.message).toBe("Request timeout: POST /predict");
+                expect(err.code).toBe("EREQUESTTIMEOUT");
+                await new Promise((resolve) => setTimeout(resolve, 100));
+                expect(hits).toBe(1);
+            } finally {
+                if (server.closeAllConnections) server.closeAllConnections();
+                await close(server);
+            }
+        });
+
+        it("still retries /predict after a refused connection (the server never saw it)", async () => {
+            const bridge = new RemotePythonBridge({ serverUrl: "http://127.0.0.1:1", retryAttempts: 3, retryDelay: 1 });
+            await expect(bridge.predict("m1", [1])).rejects.toThrow(/ECONNREFUSED/);
+            // One failure is recorded per attempt.
+            expect(bridge.getStats().errors).toBe(3);
         });
 
         it("getStatus passes through the server payload", async () => {
@@ -181,6 +225,55 @@ describe("RemotePythonBridge", () => {
             const bridge = new RemotePythonBridge({ serverUrl: fake.url });
             const status = await bridge.getStatus();
             expect(status.loaded_models).toEqual(["m1"]);
+        });
+    });
+
+    describe("authentication header", () => {
+        const ORIGINAL = process.env.CM_INFERENCE_TOKEN;
+        let fake;
+
+        afterEach(async () => {
+            if (ORIGINAL === undefined) delete process.env.CM_INFERENCE_TOKEN;
+            else process.env.CM_INFERENCE_TOKEN = ORIGINAL;
+            if (fake) await close(fake.server);
+            fake = null;
+        });
+
+        const handlers = () => ({
+            "GET /health": () => ({ payload: { status: "healthy", models_loaded: 0 } }),
+            "POST /load": (body) => ({ payload: { success: true, model_id: body.model_id } }),
+            "POST /predict": () => ({ payload: { success: true, prediction: [1] } })
+        });
+
+        it("sends Authorization: Bearer on every request when CM_INFERENCE_TOKEN is set", async () => {
+            process.env.CM_INFERENCE_TOKEN = "s3cret";
+            fake = await startFakeServer(handlers());
+            const bridge = new RemotePythonBridge({ serverUrl: fake.url });
+            await bridge.start();
+            await bridge.loadModel("/data/models/m.pkl", "m1");
+            await bridge.predict("m1", [1]);
+            expect(fake.calls.map((c) => c.headers.authorization)).toEqual([
+                "Bearer s3cret",
+                "Bearer s3cret",
+                "Bearer s3cret"
+            ]);
+        });
+
+        it("sends no Authorization header when the variable is unset", async () => {
+            delete process.env.CM_INFERENCE_TOKEN;
+            fake = await startFakeServer(handlers());
+            const bridge = new RemotePythonBridge({ serverUrl: fake.url });
+            await bridge.start();
+            expect(fake.calls[0].headers.authorization).toBeUndefined();
+        });
+
+        it("lets an explicit authToken option override the environment", async () => {
+            process.env.CM_INFERENCE_TOKEN = "from-env";
+            fake = await startFakeServer(handlers());
+            await new RemotePythonBridge({ serverUrl: fake.url, authToken: "from-options" }).start();
+            await new RemotePythonBridge({ serverUrl: fake.url, authToken: "" }).start();
+            expect(fake.calls[0].headers.authorization).toBe("Bearer from-options");
+            expect(fake.calls[1].headers.authorization).toBeUndefined();
         });
     });
 

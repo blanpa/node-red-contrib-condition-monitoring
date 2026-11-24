@@ -49,18 +49,33 @@ function expectConsistentPca(msg, expected) {
     expect(pca.explainedVariance).toBeLessThanOrEqual(1 + 1e-12);
 }
 
-/** Contributions are sorted, capped and expressed as shares of the residual. */
+/**
+ * Contributions are sorted, capped and expressed as shares — per statistic:
+ * the list explains T² or SPE (or both, when both exceeded their limit), and
+ * the primary statistic's list comes first and names topContributor.
+ */
 function expectConsistentContributions(msg, maxShown) {
     expect(msg.sensorNames).toContain(msg.topContributor);
+    expect(["t2", "spe"]).toContain(msg.contributionStatistic);
     if (!msg.contributions) return;
-    expect(msg.contributions.length).toBeLessThanOrEqual(maxShown);
     expect(msg.contributions[0].sensor).toBe(msg.topContributor);
-    msg.contributions.forEach(function (c, i) {
-        expect(msg.sensorNames).toContain(c.sensor);
-        expect(c.normalizedContribution).toBeGreaterThanOrEqual(0);
-        expect(c.normalizedContribution).toBeLessThanOrEqual(1 + 1e-12);
-        expect(c.percentContribution).toBe((c.normalizedContribution * 100).toFixed(1) + "%");
-        if (i > 0) expect(c.contribution).toBeLessThanOrEqual(msg.contributions[i - 1].contribution);
+    expect(msg.contributions[0].statistic).toBe(msg.contributionStatistic);
+
+    const byStatistic = {};
+    msg.contributions.forEach(function (c) {
+        expect(["t2", "spe"]).toContain(c.statistic);
+        (byStatistic[c.statistic] = byStatistic[c.statistic] || []).push(c);
+    });
+    Object.keys(byStatistic).forEach(function (statistic) {
+        const list = byStatistic[statistic];
+        expect(list.length).toBeLessThanOrEqual(maxShown);
+        list.forEach(function (c, i) {
+            expect(msg.sensorNames).toContain(c.sensor);
+            expect(c.normalizedContribution).toBeGreaterThanOrEqual(0);
+            expect(c.normalizedContribution).toBeLessThanOrEqual(1 + 1e-12);
+            expect(c.percentContribution).toBe((c.normalizedContribution * 100).toFixed(1) + "%");
+            if (i > 0) expect(c.contribution).toBeLessThanOrEqual(list[i - 1].contribution);
+        });
     });
 }
 

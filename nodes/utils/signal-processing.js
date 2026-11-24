@@ -95,6 +95,12 @@ function applyWindow(signal, windowType) {
  * Uses fft.js (Radix-4 Cooley-Tukey algorithm) when available for
  * O(n log n) performance. Falls back to naive DFT O(n²) otherwise.
  *
+ * Magnitudes are |X_k| / L with L the number of samples actually
+ * transformed (at most fftSize), not the zero-padded transform length N: a
+ * non-power-of-two size is padded to the next power of two, and dividing
+ * by N would scale every amplitude down by L/N. Frequencies follow the
+ * padded length (bin width = samplingRate / N).
+ *
  * @param {number[]} signal - Time-domain signal values
  * @param {number} fftSize - FFT size (will be rounded up to nearest power of 2)
  * @param {number} samplingRate - Sampling rate in Hz
@@ -117,6 +123,8 @@ function performFFT(signal, fftSize, samplingRate, windowType) {
 
     // Apply window function
     const windowedSignal = applyWindow(signal.slice(0, Math.min(signal.length, n)), windowType || "hann");
+    // Normalisation length: the samples that carry signal, not the padding
+    const L = Math.max(1, windowedSignal.length);
 
     // Pad to FFT size
     const paddedSignal = new Array(n);
@@ -144,7 +152,7 @@ function performFFT(signal, fftSize, samplingRate, windowType) {
         for (let k = 0; k < n / 2; k++) {
             const re = complexOutput[2 * k];
             const im = complexOutput[2 * k + 1];
-            magnitudes[k] = Math.sqrt(re * re + im * im) / n;
+            magnitudes[k] = Math.sqrt(re * re + im * im) / L;
             frequencies[k] = (k * samplingRate) / n;
         }
     } else {
@@ -163,7 +171,7 @@ function performFFT(signal, fftSize, samplingRate, windowType) {
                 sumImag += paddedSignal[t] * Math.sin(angle);
             }
 
-            magnitudes[k] = Math.sqrt(sumReal * sumReal + sumImag * sumImag) / n;
+            magnitudes[k] = Math.sqrt(sumReal * sumReal + sumImag * sumImag) / L;
             frequencies[k] = (k * samplingRate) / n;
         }
     }
@@ -383,6 +391,8 @@ function detectPeriodicity(acf) {
 // Peak Detection. `minHeight` null = automatic: a positive peak must
 // exceed mean + 2σ of the window, a negative one fall below mean − 2σ.
 // A given height h means >= h for positive and <= −h for negative peaks.
+// A peak needs a neighbour on both sides, so the last sample of the window
+// can never be one: a peak is confirmed by the sample that follows it.
 function detectPeaks(data, times, minHeight, minDistance, peakType) {
     const peaks = [];
     let upper = minHeight;

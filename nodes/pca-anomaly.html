@@ -248,7 +248,9 @@
     <h3>Inputs</h3>
     <dl class="message-properties">
         <dt>payload <span class="property-type">object | array</span></dt>
-        <dd>Multi-sensor data as object <code>{sensor1: value, sensor2: value, ...}</code> or array <code>[value1, value2, ...]</code></dd>
+        <dd>Multi-sensor data as object <code>{sensor1: value, sensor2: value, ...}</code> or array <code>[value1, value2, ...]</code>.
+        Object fields that are not numbers or purely numeric strings — text, <code>"123abc"</code>, ISO timestamps —
+        are not sensors: they are skipped and listed in <code>msg.skippedValues</code>.</dd>
         <dt class="optional">reset <span class="property-type">boolean</span></dt>
         <dd>Set to <code>true</code> to reset the model and retrain</dd>
     </dl>
@@ -259,6 +261,10 @@
             <dl class="message-properties">
                 <dt>payload <span class="property-type">object</span></dt>
                 <dd>Original sensor values (no anomaly detected)</dd>
+                <dt>severity <span class="property-type">string</span></dt>
+                <dd><code>"warmup"</code> while the model is still training: <code>isAnomaly</code> is
+                <code>false</code>, <code>bufferSize</code> / <code>minRequired</code> report the progress and there
+                is no <code>pca</code> block yet.</dd>
             </dl>
         </li>
         <li>Anomaly
@@ -269,6 +275,11 @@
                 <dd>PCA statistics: scores, T², SPE, thresholds, explained variance</dd>
                 <dt>contributions <span class="property-type">array</span></dt>
                 <dd>Sensor contributions to anomaly, sorted by importance</dd>
+                <dt>contributionStatistic <span class="property-type">string</span></dt>
+                <dd><code>"t2"</code> or <code>"spe"</code>: the statistic the contributions and
+                <code>topContributor</code> explain. Every entry carries the same <code>statistic</code> field; when
+                both statistics exceed their limits, <code>contributions</code> holds both lists, the one further
+                over its limit first.</dd>
             </dl>
         </li>
     </ol>
@@ -312,7 +323,10 @@
     </ul>
 
     <h3>Contribution Analysis</h3>
-    <p>When an anomaly is detected, PCA identifies which sensors contribute most:</p>
+    <p>When an anomaly is detected, PCA identifies which sensors contribute most. A T&sup2; anomaly is broken
+    down into the per-sensor terms of T&sup2; (Westerhuis / Kourti), an SPE anomaly into the reconstruction
+    residuals; <code>contributionStatistic</code> says which. Ranking SPE residuals for a T&sup2;-only anomaly
+    would report rounding noise as the root cause.</p>
     <ul>
         <li><b>Min. Contribution</b>: Only show sensors with contribution above this threshold (0.1 = 10%)</li>
         <li><b>Top Contributors</b>: Maximum number of sensors to include in output</li>

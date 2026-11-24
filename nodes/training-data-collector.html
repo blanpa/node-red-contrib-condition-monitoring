@@ -705,7 +705,8 @@
         <dt class="optional">severity <span class="property-type">number</span></dt>
         <dd>Severity score (0-1) for anomaly/fault data.</dd>
         <dt class="optional">action <span class="property-type">string</span></dt>
-        <dd>Control action: "export", "clear", "stats", "pause", "resume", "resetRul".</dd>
+        <dd>Control action: "export", "clear", "stats", "pause", "resume", "resetRul". A message with any other
+            <code>action</code> value is ignored with a warning (it is not collected as a sample).</dd>
     </dl>
     
     <h3>Outputs</h3>

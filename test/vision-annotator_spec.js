@@ -1,7 +1,16 @@
 const helper = require("node-red-node-test-helper");
 const vaNode = require("../nodes/vision-annotator.js");
+const { PNG } = require("pngjs");
 
 helper.init(require.resolve("node-red"));
+
+// A real 1x1 PNG whose IHDR is patched to claim w x h (see image-preprocess_spec).
+function pngClaiming(w, h) {
+    const buf = PNG.sync.write(new PNG({ width: 1, height: 1 }));
+    buf.writeUInt32BE(w, 16);
+    buf.writeUInt32BE(h, 20);
+    return buf;
+}
 
 function run(config, msg, check, done) {
     const flow = [
@@ -219,6 +228,71 @@ describe("vision-annotator hardening", function () {
             },
             done
         );
+    });
+
+    it("shows a short class in the status and the full text in the error", function (done) {
+        const flow = [{ id: "n1", type: "vision-annotator", mode: "boxes", wires: [[]] }];
+        helper.load(vaNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const statuses = [];
+            n1.status = (s) => statuses.push(s);
+            n1.error = function (err) {
+                try {
+                    expect(String(err.message || err)).toMatch(
+                        /boxes shape needs 6000000000 values but the data has only 6/
+                    );
+                    expect(statuses[statuses.length - 1]).toMatchObject({ fill: "red", text: "shape mismatch" });
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            };
+            n1.receive({ prediction: [[10, 10, 50, 50, 0.9, 1]], mlInference: { outputShape: [1, 1000000000, 6] } });
+        });
+    });
+
+    it("refuses a background PNG whose header claims 20000x20000 instead of decoding it", function (done) {
+        const before = process.memoryUsage().arrayBuffers;
+        runErr(
+            { mode: "boxes" },
+            { prediction: [[10, 10, 50, 50, 0.9, 1]], image: pngClaiming(20000, 20000) },
+            function (err) {
+                expect(String(err.message || err)).toMatch(/image too large: 20000x20000/);
+                expect(process.memoryUsage().arrayBuffers - before).toBeLessThan(16 * 1024 * 1024);
+            },
+            done
+        );
+    });
+
+    it("skips a box with a non-finite class index with a warning instead of failing the frame", function (done) {
+        const flow = [
+            { id: "n1", type: "vision-annotator", mode: "boxes", scoreThreshold: 0.3, wires: [["n2"]] },
+            { id: "n2", type: "helper" }
+        ];
+        helper.load(vaNode, flow, function () {
+            const n1 = helper.getNode("n1"),
+                n2 = helper.getNode("n2");
+            const warnings = [];
+            n1.warn = (w) => warnings.push(String(w));
+            n1.error = (e) => done(new Error("frame failed: " + (e.message || e)));
+            n2.on("input", function (m) {
+                try {
+                    expect(m.annotations.count).toBe(1);
+                    expect(m.annotations.boxes[0]).toMatchObject({ x1: 10, y1: 10, x2: 50, y2: 50, class: 1 });
+                    expect(warnings).toEqual([expect.stringMatching(/skipped 2 boxes with a non-finite class index/)]);
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            });
+            n1.receive({
+                prediction: [
+                    [0, 0, 20, 20, 0.9, NaN],
+                    [5, 5, 25, 25, 0.9, Infinity],
+                    [10, 10, 50, 50, 0.9, 1]
+                ]
+            });
+        });
     });
 
     it("clamps nonsensical config instead of failing every message", function (done) {

@@ -135,10 +135,21 @@ module.exports = function (RED) {
         this.websocketTopic = config.websocketTopic || "anomaly-detector";
         // Optional auth: shared token + allowed origins. Recommended for any
         // deployment where the WS port is reachable from outside `localhost`.
-        this.websocketAuthToken =
-            typeof config.websocketAuthToken === "string" && config.websocketAuthToken.length > 0
-                ? config.websocketAuthToken
-                : null;
+        // The token is a Node-RED credential (encrypted, never part of a flow
+        // export). A token in the plain config still works for flows written
+        // before the credential existed, but travels with the flow file.
+        const credentialToken =
+            node.credentials && typeof node.credentials.websocketAuthToken === "string"
+                ? node.credentials.websocketAuthToken.trim()
+                : "";
+        const inlineToken = typeof config.websocketAuthToken === "string" ? config.websocketAuthToken.trim() : "";
+        if (inlineToken && !credentialToken && this.websocketEnabled) {
+            node.warn(
+                "websocketAuthToken is set in the node config, which stores it in plain text in flows.json " +
+                    "and in every flow export. Move it to the WebSocket panel's credential field."
+            );
+        }
+        this.websocketAuthToken = credentialToken || inlineToken || null;
         this.websocketAllowedOrigins = (function parseOrigins(raw) {
             if (!raw) return null;
             if (Array.isArray(raw)) return raw.filter((s) => typeof s === "string" && s.length > 0);
@@ -224,6 +235,7 @@ module.exports = function (RED) {
             "consecutiveAnomalies",
             "consecutiveNormals",
             "sensorBuffers",
+            "sensorMoments",
             "sensorStates",
             "sensorEma",
             "sensorCusum"
@@ -249,6 +261,7 @@ module.exports = function (RED) {
                 consecutiveAnomalies: 0,
                 consecutiveNormals: 0,
                 sensorBuffers: Object.create(null),
+                sensorMoments: Object.create(null),
                 sensorStates: Object.create(null),
                 sensorEma: Object.create(null),
                 sensorCusum: Object.create(null)
@@ -334,11 +347,25 @@ module.exports = function (RED) {
             stateKey: "anomalyDetectorState",
             saveInterval: 30000,
             debug: node.debugEnabled,
+            // The blob shape has not changed since the unversioned (pre-0.4.1)
+            // writes, so those are adopted as they are.
+            migrate: function (state, fromVersion) {
+                return fromVersion === 0 ? state : null;
+            },
             onStateLoaded: function (state) {
                 if (state.dataBuffer && Array.isArray(state.dataBuffer)) {
                     node.dataBuffer = state.dataBuffer;
                     resyncWindow();
                 }
+                // The learned EMA / CUSUM state of the active baseline. Without
+                // it the status would claim a restore while the detector
+                // silently re-initialises: the first sample after a redeploy
+                // becomes the new EMA and a jump against the old one is scored
+                // "normal".
+                if (state.ema !== undefined) node.ema = state.ema;
+                if (Number.isFinite(state.cusumPos)) node.cusumPos = state.cusumPos;
+                if (Number.isFinite(state.cusumNeg)) node.cusumNeg = state.cusumNeg;
+                if (state.initialized !== undefined) node.initialized = state.initialized === true;
                 // The flat keys above describe the state that was active when
                 // it was saved; the parked ones come back alongside it.
                 if (node.regimeProperty || node.groupBy) {
@@ -445,6 +472,9 @@ module.exports = function (RED) {
                         "Set a token (and allowed origins) unless the port is only reachable locally."
                 );
             }
+            // Acquire the shared manager; released again in close. The last
+            // node to release stops the server, so a redeploy with a changed
+            // token / port / origin list comes up with the new settings.
             node.wsManager = WebSocketManager.getWebSocketManager({
                 port: node.websocketPort,
                 authToken: node.websocketAuthToken,
@@ -465,6 +495,15 @@ module.exports = function (RED) {
                 },
                 authFailed: function (info) {
                     node.warn("WebSocket auth failed from " + (info.ip || "unknown"));
+                },
+                clientDropped: function (info) {
+                    node.warn(
+                        "WebSocket client " +
+                            info.clientId +
+                            " dropped: not reading its messages (" +
+                            info.skippedMessages +
+                            " broadcasts skipped)"
+                    );
                 }
             };
             Object.keys(node.wsListeners).forEach(function (evt) {
@@ -544,11 +583,6 @@ module.exports = function (RED) {
             };
         }
 
-        // IQR method (uses node defaults)
-        function detectIQR(value, values) {
-            return detectIQRWithConfig(value, values, node.iqrMultiplier, node.iqrWarningMultiplier);
-        }
-
         // IQR method with configurable multiplier (for msg.config override)
         function detectIQRWithConfig(value, values, multiplier, warningMult) {
             // Bounds and quartiles come from the shared util (no duplicated quantile logic).
@@ -593,11 +627,6 @@ module.exports = function (RED) {
                           ? "warning: " + value.toFixed(2)
                           : "Q1=" + quartiles.q1.toFixed(1) + " Q3=" + quartiles.q3.toFixed(1)
             };
-        }
-
-        // Threshold method (uses node defaults)
-        function detectThreshold(value) {
-            return detectThresholdWithConfig(value, node.minThreshold, node.maxThreshold);
         }
 
         // Threshold method with configurable thresholds (for msg.config override)
@@ -650,11 +679,12 @@ module.exports = function (RED) {
             };
         }
 
-        // Percentile method
-        function detectPercentile(value, values) {
+        // Percentile method. `cfg` carries the percentiles in use (node
+        // settings with any msg.config override applied, see resolveActiveConfig).
+        function detectPercentile(value, values, cfg) {
             const sorted = values.slice().sort((a, b) => a - b);
-            const lowerBound = calculatePercentile(sorted, node.lowerPercentile);
-            const upperBound = calculatePercentile(sorted, node.upperPercentile);
+            const lowerBound = calculatePercentile(sorted, cfg.lowerPercentile);
+            const upperBound = calculatePercentile(sorted, cfg.upperPercentile);
 
             const isAnomaly = value < lowerBound || value > upperBound;
 
@@ -662,19 +692,19 @@ module.exports = function (RED) {
                 isAnomaly: isAnomaly,
                 severity: isAnomaly ? "critical" : "normal",
                 details: {
-                    lowerPercentile: node.lowerPercentile,
-                    upperPercentile: node.upperPercentile,
+                    lowerPercentile: cfg.lowerPercentile,
+                    upperPercentile: cfg.upperPercentile,
                     lowerBound: lowerBound,
                     upperBound: upperBound
                 },
                 statusText: isAnomaly
                     ? "ANOMALY: " + value.toFixed(2)
-                    : "P" + node.lowerPercentile + "-P" + node.upperPercentile
+                    : "P" + cfg.lowerPercentile + "-P" + cfg.upperPercentile
             };
         }
 
-        // EMA method
-        function detectEMA(value, values, moments) {
+        // EMA method. Thresholds come from `cfg` (see detectPercentile).
+        function detectEMA(value, values, moments, cfg) {
             if (!node.initialized) {
                 node.ema = value;
                 node.initialized = true;
@@ -694,19 +724,19 @@ module.exports = function (RED) {
             let isAnomaly = false;
 
             if (node.emaMethod === "stddev") {
-                if (deviationFactor > node.emaThreshold) {
+                if (deviationFactor > cfg.emaThreshold) {
                     severity = "critical";
                     isAnomaly = true;
-                } else if (deviationFactor > node.emaWarning) {
+                } else if (deviationFactor > cfg.emaWarning) {
                     severity = "warning";
                     isAnomaly = true;
                 }
             } else {
                 const deviationPercent = previousEma === 0 ? 0 : (deviation / Math.abs(previousEma)) * 100;
-                if (deviationPercent > node.emaThreshold) {
+                if (deviationPercent > cfg.emaThreshold) {
                     severity = "critical";
                     isAnomaly = true;
-                } else if (deviationPercent > node.emaWarning) {
+                } else if (deviationPercent > cfg.emaWarning) {
                     severity = "warning";
                     isAnomaly = true;
                 }
@@ -730,8 +760,8 @@ module.exports = function (RED) {
             };
         }
 
-        // CUSUM method
-        function detectCUSUM(value, values, moments) {
+        // CUSUM method. Drift and thresholds come from `cfg` (see detectPercentile).
+        function detectCUSUM(value, values, moments, cfg) {
             const target =
                 node.cusumTarget !== null ? node.cusumTarget : moments ? moments.mean : calculateMean(values);
 
@@ -741,21 +771,21 @@ module.exports = function (RED) {
                 const stdDev = moments ? moments.stdDev : calculateStdDev(values, calculateMean(values));
                 deviation = sigmaDeviation(value, target, stdDev);
             }
-            node.cusumPos = Math.max(0, node.cusumPos + deviation - node.cusumDrift);
-            node.cusumNeg = Math.max(0, node.cusumNeg - deviation - node.cusumDrift);
+            node.cusumPos = Math.max(0, node.cusumPos + deviation - cfg.cusumDrift);
+            node.cusumNeg = Math.max(0, node.cusumNeg - deviation - cfg.cusumDrift);
 
             const maxCusum = Math.max(node.cusumPos, node.cusumNeg);
 
             let severity = "normal";
             let isAnomaly = false;
 
-            if (maxCusum > node.cusumThreshold) {
+            if (maxCusum > cfg.cusumThreshold) {
                 severity = "critical";
                 isAnomaly = true;
                 // Reset after detection
                 node.cusumPos = 0;
                 node.cusumNeg = 0;
-            } else if (maxCusum > node.cusumWarning) {
+            } else if (maxCusum > cfg.cusumWarning) {
                 severity = "warning";
                 isAnomaly = true;
             }
@@ -768,7 +798,7 @@ module.exports = function (RED) {
                     cusumPos: node.cusumPos,
                     cusumNeg: node.cusumNeg,
                     cusumMax: maxCusum,
-                    drift: node.cusumDrift,
+                    drift: cfg.cusumDrift,
                     mode: node.cusumMode
                 },
                 statusText:
@@ -780,8 +810,8 @@ module.exports = function (RED) {
             };
         }
 
-        // Moving Average method
-        function detectMovingAverage(value, values, moments) {
+        // Moving Average method. Thresholds come from `cfg` (see detectPercentile).
+        function detectMovingAverage(value, values, moments, cfg) {
             const movingAverage = moments ? moments.mean : calculateMean(values);
             const stdDev = moments ? moments.stdDev : calculateStdDev(values, movingAverage);
             const deviation = Math.abs(value - movingAverage);
@@ -791,19 +821,19 @@ module.exports = function (RED) {
             let isAnomaly = false;
 
             if (node.maMethod === "stddev") {
-                if (deviationFactor > node.maThreshold) {
+                if (deviationFactor > cfg.maThreshold) {
                     severity = "critical";
                     isAnomaly = true;
-                } else if (deviationFactor > node.maWarning) {
+                } else if (deviationFactor > cfg.maWarning) {
                     severity = "warning";
                     isAnomaly = true;
                 }
             } else {
                 const deviationPercent = movingAverage === 0 ? 0 : (deviation / Math.abs(movingAverage)) * 100;
-                if (deviationPercent > node.maThreshold) {
+                if (deviationPercent > cfg.maThreshold) {
                     severity = "critical";
                     isAnomaly = true;
-                } else if (deviationPercent > node.maWarning) {
+                } else if (deviationPercent > cfg.maWarning) {
                     severity = "warning";
                     isAnomaly = true;
                 }
@@ -830,10 +860,47 @@ module.exports = function (RED) {
         // Initialize multi-sensor buffers
         // (prototype-less: sensor names come straight from the payload, and a
         // sensor called "constructor" must not resolve to an inherited member)
+        //
+        //   sensorBuffers — the sliding window of each sensor (bare numbers)
+        //   sensorMoments — its Welford accumulator + removal count, kept in
+        //     lockstep the way windowValues/running are for the single value;
+        //     see pushSensorWindow().
         node.sensorBuffers = Object.create(null);
+        node.sensorMoments = Object.create(null);
         node.sensorStates = Object.create(null);
         node.sensorEma = Object.create(null);
         node.sensorCusum = Object.create(null);
+
+        /**
+         * Append a sample to one sensor's window, evicting the oldest once it
+         * is full. Same scheme as pushWindow(): O(1) moments, rebuilt from the
+         * window once per full turnover so the reverse update cannot drift.
+         */
+        function pushSensorWindow(sensorName, value) {
+            const buffer = node.sensorBuffers[sensorName];
+            const moments = node.sensorMoments[sensorName];
+            buffer.push(value);
+            moments.running.push(value);
+
+            if (buffer.length > node.windowSize) {
+                const dropped = buffer.shift();
+                moments.running.remove(dropped);
+                moments.removals++;
+                if (moments.removals >= node.windowSize) {
+                    moments.running.reset();
+                    moments.removals = 0;
+                    for (let i = 0; i < buffer.length; i++) {
+                        moments.running.push(buffer[i]);
+                    }
+                }
+            }
+        }
+
+        /** Mean/σ of one sensor's live window, straight from its accumulator. */
+        function sensorMoments(sensorName) {
+            const running = node.sensorMoments[sensorName].running;
+            return { mean: running.mean(), stdDev: running.stdDev(), n: running.count() };
+        }
 
         /**
          * Hysteresis shared by the single-value and the per-sensor path.
@@ -878,15 +945,19 @@ module.exports = function (RED) {
          * Process multi-sensor JSON input for anomaly detection
          * @param {Object} msg - The incoming message
          * @param {Object} sensorData - Object with sensor names as keys and values
+         * @param {Function} send
+         * @param {Object} active - the resolved configuration (see resolveActiveConfig)
          */
         function processMultiSensorInput(msg, sensorData, send, active) {
             const results = {};
             let anyAnomaly = false;
+            let anyHysteresisApplied = false;
             let worstSeverity = "normal";
             const anomalySensors = [];
             const skippedSensors = [];
 
             const sensorNames = Object.keys(sensorData);
+            const minRequired = active.method === "iqr" ? 4 : 2;
 
             sensorNames.forEach(function (sensorName) {
                 const rawValue = sensorData[sensorName];
@@ -908,6 +979,7 @@ module.exports = function (RED) {
                         return;
                     }
                     node.sensorBuffers[sensorName] = [];
+                    node.sensorMoments[sensorName] = { running: new stats.RunningStats(), removals: 0 };
                     node.sensorStates[sensorName] = {
                         lastAnomalyState: false,
                         consecutiveAnomalies: 0,
@@ -919,28 +991,23 @@ module.exports = function (RED) {
 
                 // The window the sample is scored against: everything before it
                 // (or, while the baseline is shorter than MIN_BASELINE, the
-                // window it is part of — see the single-value path).
+                // window it is part of) — the same rule, and the same O(1)
+                // moments, as the single-value path. The detectors never
+                // modify `values`, so the live window is handed over as is.
                 const buffer = node.sensorBuffers[sensorName];
-                const minRequired = active.method === "iqr" ? 4 : 2;
-                const scoreWithin = buffer.length < Math.min(node.windowSize, MIN_BASELINE);
-                let values = scoreWithin
-                    ? null
-                    : buffer.map(function (d) {
-                          return d.value;
-                      });
-
-                buffer.push({ timestamp: Date.now(), value: value });
-                if (buffer.length > node.windowSize) {
-                    buffer.shift();
-                }
-                if (scoreWithin) {
-                    values = buffer.map(function (d) {
-                        return d.value;
-                    });
+                let result = null;
+                if (buffer.length >= Math.min(node.windowSize, MIN_BASELINE)) {
+                    result = detectWith(active, value, buffer, sensorMoments(sensorName), sensorName);
+                    pushSensorWindow(sensorName, value);
+                } else {
+                    pushSensorWindow(sensorName, value);
+                    if (buffer.length >= minRequired) {
+                        result = detectWith(active, value, buffer, sensorMoments(sensorName), sensorName);
+                    }
                 }
 
                 // Minimum data check
-                if (values.length < minRequired) {
+                if (!result) {
                     results[sensorName] = {
                         value: value,
                         isAnomaly: false,
@@ -951,39 +1018,15 @@ module.exports = function (RED) {
                     return;
                 }
 
-                // Detect anomaly based on method (msg.config overrides apply
-                // to every sensor of the message, as in the single-value path)
-                let result;
-                switch (active.method) {
-                    case "iqr":
-                        result = detectIQRWithConfig(value, values, active.iqrMultiplier, active.iqrWarning);
-                        break;
-                    case "threshold":
-                        result = detectThresholdWithConfig(value, active.minThreshold, active.maxThreshold);
-                        break;
-                    case "percentile":
-                        result = detectPercentile(value, values);
-                        break;
-                    case "ema":
-                        // Use per-sensor EMA
-                        result = detectEMASensor(value, values, sensorName);
-                        break;
-                    case "cusum":
-                        result = detectCUSUMSensor(value, values, sensorName);
-                        break;
-                    case "moving-average":
-                        result = detectMovingAverage(value, values);
-                        break;
-                    case "zscore":
-                    default:
-                        result = detectZScoreWithConfig(value, values, active.zscoreThreshold, active.zscoreWarning);
-                }
-
                 // Per-sensor hysteresis — the same rules as the single-value path
+                const sensorState = node.sensorStates[sensorName];
                 let finalIsAnomaly = result.isAnomaly;
+                let hysteresisApplied = false;
                 if (active.hysteresisEnabled) {
-                    const h = applyHysteresis(node.sensorStates[sensorName], result.isAnomaly, active.consecutiveCount);
+                    const h = applyHysteresis(sensorState, result.isAnomaly, active.consecutiveCount);
                     finalIsAnomaly = h.isAnomaly;
+                    hysteresisApplied = h.applied;
+                    if (hysteresisApplied) anyHysteresisApplied = true;
                     if (finalIsAnomaly && !result.isAnomaly) {
                         result.severity = "warning"; // held by the exit deadband
                     }
@@ -998,6 +1041,13 @@ module.exports = function (RED) {
                     bufferSize: buffer.length,
                     details: result.details || {}
                 };
+                if (active.hysteresisEnabled) {
+                    results[sensorName].hysteresis = {
+                        applied: hysteresisApplied,
+                        consecutiveAnomalies: sensorState.consecutiveAnomalies,
+                        consecutiveNormals: sensorState.consecutiveNormals
+                    };
+                }
 
                 if (finalIsAnomaly) {
                     anyAnomaly = true;
@@ -1020,7 +1070,9 @@ module.exports = function (RED) {
                 return;
             }
 
-            // Build output message
+            // Build output message — the same envelope as the single-value
+            // output: output topic, timestamp, hysteresis block, and every
+            // inbound property that is not computed here rides along.
             const outMsg = {
                 payload: results,
                 isAnomaly: anyAnomaly,
@@ -1032,13 +1084,17 @@ module.exports = function (RED) {
                 method: active.method,
                 windowSize: node.windowSize,
                 inputFormat: "multi-sensor",
+                hysteresis: {
+                    enabled: active.hysteresisEnabled,
+                    applied: anyHysteresisApplied
+                },
+                timestamp: Date.now(),
                 _msgid: msg._msgid
             };
             if (node.regimeProperty) outMsg.regime = node.activeRegime;
             if (node.groupBy) outMsg.group = node.activeGroup;
-
-            // Copy original message properties
-            if (msg.topic) outMsg.topic = node.outputTopic || msg.topic;
+            if (node.outputTopic) outMsg.topic = node.outputTopic;
+            copyPassthrough(outMsg, msg, { preserveTopic: !node.outputTopic });
 
             // Update status
             if (anyAnomaly) {
@@ -1052,14 +1108,14 @@ module.exports = function (RED) {
                 node.status({
                     fill: "green",
                     shape: "dot",
-                    text: sensorNames.length + " sensors OK"
+                    text: validSensorCount + " sensors OK"
                 });
                 send([outMsg, null]);
             }
         }
 
         // EMA detection for specific sensor (isolated per-sensor state)
-        function detectEMASensor(value, values, sensorName) {
+        function detectEMASensor(value, values, sensorName, moments, cfg) {
             // Swap in per-sensor state before detection
             const savedEma = node.ema;
             const savedInitialized = node.initialized;
@@ -1071,7 +1127,7 @@ module.exports = function (RED) {
                 node.initialized = false;
             }
 
-            const result = detectEMA(value, values);
+            const result = detectEMA(value, values, moments, cfg);
 
             // Save per-sensor state and restore global
             node.sensorEma[sensorName] = node.ema;
@@ -1081,7 +1137,7 @@ module.exports = function (RED) {
         }
 
         // CUSUM detection for specific sensor (isolated per-sensor state)
-        function detectCUSUMSensor(value, values, sensorName) {
+        function detectCUSUMSensor(value, values, sensorName, moments, cfg) {
             // Swap in per-sensor state before detection
             const savedPos = node.cusumPos;
             const savedNeg = node.cusumNeg;
@@ -1093,13 +1149,50 @@ module.exports = function (RED) {
                 node.cusumNeg = 0;
             }
 
-            const result = detectCUSUM(value, values);
+            const result = detectCUSUM(value, values, moments, cfg);
 
             // Save per-sensor state and restore global
             node.sensorCusum[sensorName] = { pos: node.cusumPos, neg: node.cusumNeg };
             node.cusumPos = savedPos;
             node.cusumNeg = savedNeg;
             return result;
+        }
+
+        /**
+         * Score one sample with the resolved configuration — the one dispatch
+         * shared by the single-value, multi-sensor and batch paths.
+         *
+         * @param {Object} active - see resolveActiveConfig
+         * @param {number} value
+         * @param {number[]} values - the window the sample is judged against
+         * @param {{mean:number, stdDev:number, n:number}} [moments] - its
+         *        mean/σ when already known (the streaming accumulators); the
+         *        moment-based detectors fall back to the O(n) computation
+         * @param {string} [sensorName] - selects the per-sensor EMA / CUSUM
+         *        state in multi-sensor mode
+         */
+        function detectWith(active, value, values, moments, sensorName) {
+            switch (active.method) {
+                case "iqr":
+                    return detectIQRWithConfig(value, values, active.iqrMultiplier, active.iqrWarning);
+                case "threshold":
+                    return detectThresholdWithConfig(value, active.minThreshold, active.maxThreshold);
+                case "percentile":
+                    return detectPercentile(value, values, active);
+                case "ema":
+                    return sensorName === undefined
+                        ? detectEMA(value, values, moments, active)
+                        : detectEMASensor(value, values, sensorName, moments, active);
+                case "cusum":
+                    return sensorName === undefined
+                        ? detectCUSUM(value, values, moments, active)
+                        : detectCUSUMSensor(value, values, sensorName, moments, active);
+                case "moving-average":
+                    return detectMovingAverage(value, values, moments, active);
+                case "zscore":
+                default:
+                    return detectZScoreWithConfig(value, values, active.zscoreThreshold, active.zscoreWarning, moments);
+            }
         }
 
         // ==========================================
@@ -1269,15 +1362,114 @@ module.exports = function (RED) {
         }
 
         // ==========================================
+        // PER-MESSAGE CONFIGURATION (msg.config)
+        // ==========================================
+
+        const KNOWN_METHODS = ["zscore", "iqr", "threshold", "percentile", "ema", "cusum", "moving-average"];
+        // Unknown msg.config.method values already reported (one warning each,
+        // not one per message).
+        const warnedMethods = new Set();
+
+        function resolveMethod(requested) {
+            if (requested === undefined || requested === null || requested === "") return node.method;
+            if (KNOWN_METHODS.indexOf(requested) !== -1) return requested;
+            const key = String(requested);
+            if (!warnedMethods.has(key)) {
+                warnedMethods.add(key);
+                node.warn(
+                    'msg.config.method "' +
+                        key +
+                        '" is not a detection method (' +
+                        KNOWN_METHODS.join(", ") +
+                        '); using "' +
+                        node.method +
+                        '"'
+                );
+            }
+            return node.method;
+        }
+
+        // A percentile override must stay a percentile.
+        function percentileOr(raw, fallback) {
+            return Math.min(100, Math.max(0, finiteOr(raw, fallback)));
+        }
+
+        /**
+         * The settings this message is scored with: the node configuration
+         * with the message's `msg.config` overrides applied. A malformed
+         * override (NaN, a non-positive threshold, an unknown method) keeps
+         * the configured value instead of silently disabling the check.
+         *
+         * In batch mode the older per-message aliases `msg.method` and
+         * `msg.threshold` are still honoured, after `msg.config`. They stay
+         * batch-only: a streaming message that came out of another detector
+         * carries a `method` property of its own.
+         *
+         * @param {Object} msg
+         * @param {boolean} [batch=false]
+         */
+        function resolveActiveConfig(msg, batch) {
+            const cfg = msg.config && typeof msg.config === "object" ? msg.config : {};
+            const hasCfgMethod = cfg.method !== undefined && cfg.method !== null && cfg.method !== "";
+            const method = resolveMethod(hasCfgMethod ? cfg.method : batch ? msg.method : undefined);
+
+            // The legacy alias set only a critical z threshold; its warning
+            // band sat at 67 % of it.
+            const legacyThreshold = batch ? positiveOr(msg.threshold, null) : null;
+            let zscoreThreshold = positiveOr(
+                cfg.zscoreThreshold,
+                legacyThreshold !== null ? legacyThreshold : node.zscoreThreshold
+            );
+            let zscoreWarning = positiveOr(
+                cfg.zscoreWarning,
+                legacyThreshold !== null ? legacyThreshold * 0.67 : node.zscoreWarning
+            );
+            // Apply adaptive threshold adjustment
+            zscoreThreshold = getAdaptiveThreshold(zscoreThreshold);
+            zscoreWarning = getAdaptiveThreshold(zscoreWarning);
+
+            const iqrMultiplier = positiveOr(cfg.iqrMultiplier, node.iqrMultiplier);
+            // Overriding only the critical multiplier drops the configured
+            // warning multiplier (it may no longer lie inside the new band).
+            const iqrWarning =
+                cfg.iqrMultiplier !== undefined
+                    ? positiveOr(cfg.iqrWarningMultiplier, 0)
+                    : positiveOr(cfg.iqrWarningMultiplier, node.iqrWarningMultiplier);
+
+            return {
+                method: method,
+                zscoreThreshold: zscoreThreshold,
+                zscoreWarning: zscoreWarning,
+                iqrMultiplier: iqrMultiplier,
+                iqrWarning: iqrWarning,
+                minThreshold: finiteOr(cfg.minThreshold, node.minThreshold),
+                maxThreshold: finiteOr(cfg.maxThreshold, node.maxThreshold),
+                lowerPercentile: percentileOr(cfg.lowerPercentile, node.lowerPercentile),
+                upperPercentile: percentileOr(cfg.upperPercentile, node.upperPercentile),
+                emaThreshold: positiveOr(cfg.emaThreshold, node.emaThreshold),
+                emaWarning: positiveOr(cfg.emaWarning, node.emaWarning),
+                cusumThreshold: positiveOr(cfg.cusumThreshold, node.cusumThreshold),
+                cusumWarning: positiveOr(cfg.cusumWarning, node.cusumWarning),
+                cusumDrift: Math.max(0, finiteOr(cfg.cusumDrift, node.cusumDrift)),
+                maThreshold: positiveOr(cfg.maThreshold, node.maThreshold),
+                maWarning: positiveOr(cfg.maWarning, node.maWarning),
+                hysteresisEnabled:
+                    cfg.hysteresisEnabled !== undefined ? cfg.hysteresisEnabled === true : node.hysteresisEnabled,
+                consecutiveCount: Math.max(1, Math.floor(positiveOr(cfg.consecutiveCount, node.consecutiveCount)))
+            };
+        }
+
+        // ==========================================
         // BATCH PROCESSING - Historical Data Analysis
         // ==========================================
 
         /**
          * Process a batch of historical values
          * @param {Array} values - Array of values or {timestamp, value} objects
+         * @param {Object} active - the resolved configuration (see resolveActiveConfig)
          * @returns {Object} Batch analysis results
          */
-        function processBatch(values, method, threshold) {
+        function processBatch(values, active) {
             if (!Array.isArray(values)) {
                 throw new Error("batch mode expects msg.payload to be an array");
             }
@@ -1290,13 +1482,14 @@ module.exports = function (RED) {
             // Only the stateless detectors can replay a batch; the stateful
             // ones (ema, cusum) are scored as z-score, and the result says so.
             const BATCH_METHODS = ["zscore", "iqr", "threshold", "percentile", "moving-average"];
-            const requested = method || node.method;
+            const requested = active.method;
             const effectiveMethod = BATCH_METHODS.indexOf(requested) !== -1 ? requested : "zscore";
+            const batchConfig =
+                effectiveMethod === requested ? active : Object.assign({}, active, { method: effectiveMethod });
 
             // Sliding window of the values *before* the one being scored
             const window = [];
             const minRequired = effectiveMethod === "iqr" ? 4 : 2;
-            const activeThreshold = getAdaptiveThreshold(positiveOr(threshold, node.zscoreThreshold));
 
             let count = 0;
             let sum = 0;
@@ -1333,23 +1526,7 @@ module.exports = function (RED) {
                         severity: "warmup"
                     });
                 } else {
-                    let result;
-                    switch (effectiveMethod) {
-                        case "iqr":
-                            result = detectIQR(value, window);
-                            break;
-                        case "threshold":
-                            result = detectThreshold(value);
-                            break;
-                        case "percentile":
-                            result = detectPercentile(value, window);
-                            break;
-                        case "moving-average":
-                            result = detectMovingAverage(value, window);
-                            break;
-                        default:
-                            result = detectZScoreWithConfig(value, window, activeThreshold, activeThreshold * 0.67);
-                    }
+                    const result = detectWith(batchConfig, value, window);
 
                     results.push({
                         index: i,
@@ -1481,8 +1658,10 @@ module.exports = function (RED) {
                         msg.payload.length > 1 &&
                         typeof msg.payload[0] !== "object")
                 ) {
-                    // Array of raw numbers for batch processing
-                    const batchResult = processBatch(msg.payload, msg.method || node.method, msg.threshold);
+                    // Array of raw numbers for batch processing, scored with
+                    // the same resolved configuration as the streaming paths
+                    // (plus the legacy msg.method / msg.threshold aliases).
+                    const batchResult = processBatch(msg.payload, resolveActiveConfig(msg, true));
 
                     const batchMsg = {
                         payload: batchResult,
@@ -1520,66 +1699,29 @@ module.exports = function (RED) {
                     return;
                 }
 
-                // Select the baseline for this message's operating point.
-                switchRegime(msg);
-
-                // Dynamic configuration via msg.config
-                // Allows runtime override of node settings
-                const cfg = msg.config && typeof msg.config === "object" ? msg.config : {};
-                const activeMethod = cfg.method || node.method;
-                // A malformed override (NaN, non-positive where that is
-                // meaningless) keeps the configured value instead of silently
-                // disabling the check.
-                let activeZscoreThreshold = positiveOr(cfg.zscoreThreshold, node.zscoreThreshold);
-                let activeZscoreWarning = positiveOr(cfg.zscoreWarning, node.zscoreWarning);
-                const activeIqrMultiplier = positiveOr(cfg.iqrMultiplier, node.iqrMultiplier);
-                // Overriding only the critical multiplier drops the configured
-                // warning multiplier (it may no longer lie inside the new band).
-                const activeIqrWarning =
-                    cfg.iqrMultiplier !== undefined
-                        ? positiveOr(cfg.iqrWarningMultiplier, 0)
-                        : positiveOr(cfg.iqrWarningMultiplier, node.iqrWarningMultiplier);
-                const activeMinThreshold = finiteOr(cfg.minThreshold, node.minThreshold);
-                const activeMaxThreshold = finiteOr(cfg.maxThreshold, node.maxThreshold);
-                const activeHysteresisEnabled =
-                    cfg.hysteresisEnabled !== undefined ? cfg.hysteresisEnabled === true : node.hysteresisEnabled;
-                const activeConsecutiveCount = Math.max(
-                    1,
-                    Math.floor(positiveOr(cfg.consecutiveCount, node.consecutiveCount))
-                );
-
-                // Apply adaptive threshold adjustment
-                activeZscoreThreshold = getAdaptiveThreshold(activeZscoreThreshold);
-                activeZscoreWarning = getAdaptiveThreshold(activeZscoreWarning);
-
-                // What the multi-sensor path scores with (same overrides)
-                const activeConfig = {
-                    method: activeMethod,
-                    zscoreThreshold: activeZscoreThreshold,
-                    zscoreWarning: activeZscoreWarning,
-                    iqrMultiplier: activeIqrMultiplier,
-                    iqrWarning: activeIqrWarning,
-                    minThreshold: activeMinThreshold,
-                    maxThreshold: activeMaxThreshold,
-                    hysteresisEnabled: activeHysteresisEnabled,
-                    consecutiveCount: activeConsecutiveCount
-                };
+                // Dynamic configuration via msg.config: the node settings with
+                // this message's overrides applied (every method's thresholds).
+                const active = resolveActiveConfig(msg);
 
                 // msg.reset === "all" clears every regime; msg.reset === true
                 // clears the active one (which is the only one when no
                 // regime property is configured).
                 if (msg.reset === "all") {
                     resetAllRegimes();
-                    node.status({ fill: "blue", shape: "ring", text: activeMethod + " - reset (all regimes)" });
+                    node.status({ fill: "blue", shape: "ring", text: active.method + " - reset (all regimes)" });
                     done();
                     return;
                 }
 
                 // Reset function
                 if (msg.reset === true) {
+                    // The baseline of this message's operating point is the one
+                    // being cleared.
+                    switchRegime(msg);
                     node.dataBuffer = [];
                     resyncWindow();
                     node.sensorBuffers = Object.create(null); // For multi-sensor mode
+                    node.sensorMoments = Object.create(null);
                     node.sensorStates = Object.create(null); // Hysteresis states per sensor
                     node.sensorEma = Object.create(null);
                     node.sensorCusum = Object.create(null);
@@ -1604,15 +1746,21 @@ module.exports = function (RED) {
                         };
                     }
 
-                    node.status({ fill: "blue", shape: "ring", text: activeMethod + " - reset" });
+                    node.status({ fill: "blue", shape: "ring", text: active.method + " - reset" });
                     done();
                     return;
                 }
 
+                // The baseline for a message's operating point is selected only
+                // once its payload has passed validation: a rejected payload
+                // carrying a fresh regime / group value must not create a state
+                // (and evict a real baseline from the LRU map) on its way out.
+
                 // Check if payload is JSON object or array (multi-sensor mode)
                 if (typeof msg.payload === "object" && msg.payload !== null && !Array.isArray(msg.payload)) {
                     // JSON object input: { "sensor1": 25.5, "sensor2": 30.2, ... }
-                    processMultiSensorInput(msg, msg.payload, send, activeConfig);
+                    switchRegime(msg);
+                    processMultiSensorInput(msg, msg.payload, send, active);
                     done();
                     return;
                 } else if (Array.isArray(msg.payload) && msg.payload.length > 0 && typeof msg.payload[0] === "object") {
@@ -1623,7 +1771,8 @@ module.exports = function (RED) {
                             sensorData[item.name] = item.value;
                         }
                     });
-                    processMultiSensorInput(msg, sensorData, send, activeConfig);
+                    switchRegime(msg);
+                    processMultiSensorInput(msg, sensorData, send, active);
                     done();
                     return;
                 }
@@ -1654,42 +1803,20 @@ module.exports = function (RED) {
                     return;
                 }
 
+                // Select the baseline for this message's operating point.
+                switchRegime(msg);
+
                 // The sample is scored against the window as it stood *before*
-                // it arrived (once that window is long enough, see MIN_BASELINE). Scoring it against a window that already contains it
-                // lets an outlier inflate its own baseline: the z-score is then
-                // capped at sqrt(n − 1), so a small window could never reach a
-                // critical threshold however extreme the value.
-                const minRequired = activeMethod === "iqr" ? 4 : 2;
-                const score = function (values, moments) {
-                    // Detect anomaly based on method (use active config from msg.config or node defaults)
-                    switch (activeMethod) {
-                        case "iqr":
-                            return detectIQRWithConfig(value, values, activeIqrMultiplier, activeIqrWarning);
-                        case "threshold":
-                            return detectThresholdWithConfig(value, activeMinThreshold, activeMaxThreshold);
-                        case "percentile":
-                            return detectPercentile(value, values);
-                        case "ema":
-                            return detectEMA(value, values, moments);
-                        case "cusum":
-                            return detectCUSUM(value, values, moments);
-                        case "moving-average":
-                            return detectMovingAverage(value, values, moments);
-                        case "zscore":
-                        default:
-                            return detectZScoreWithConfig(
-                                value,
-                                values,
-                                activeZscoreThreshold,
-                                activeZscoreWarning,
-                                moments
-                            );
-                    }
-                };
+                // it arrived (once that window is long enough, see MIN_BASELINE).
+                // Scoring it against a window that already contains it lets an
+                // outlier inflate its own baseline: the z-score is then capped
+                // at sqrt(n − 1), so a small window could never reach a critical
+                // threshold however extreme the value.
+                const minRequired = active.method === "iqr" ? 4 : 2;
 
                 let result = null;
                 if (node.windowValues.length >= Math.min(node.windowSize, MIN_BASELINE)) {
-                    result = score(node.windowValues, liveMoments());
+                    result = detectWith(active, value, node.windowValues, liveMoments());
                     pushWindow(value);
                 } else {
                     // Add to buffer
@@ -1697,7 +1824,7 @@ module.exports = function (RED) {
                     // Baseline still too short (see MIN_BASELINE): score the
                     // sample within the window it is part of.
                     if (node.windowValues.length >= minRequired) {
-                        result = score(node.windowValues, liveMoments());
+                        result = detectWith(active, value, node.windowValues, liveMoments());
                     }
                 }
 
@@ -1722,15 +1849,15 @@ module.exports = function (RED) {
                 let finalIsAnomaly = result.isAnomaly;
                 let hysteresisApplied = false;
 
-                if (activeHysteresisEnabled) {
+                if (active.hysteresisEnabled) {
                     // `node` itself carries the counters of the active regime
-                    const h = applyHysteresis(node, result.isAnomaly, activeConsecutiveCount);
+                    const h = applyHysteresis(node, result.isAnomaly, active.consecutiveCount);
                     finalIsAnomaly = h.isAnomaly;
                     hysteresisApplied = h.applied;
                 }
 
                 debugLog(
-                    activeMethod +
+                    active.method +
                         ": value=" +
                         value +
                         ", rawAnomaly=" +
@@ -1757,11 +1884,11 @@ module.exports = function (RED) {
                     isAnomaly: finalIsAnomaly,
                     rawAnomaly: result.isAnomaly,
                     severity: result.severity,
-                    method: activeMethod,
+                    method: active.method,
                     bufferSize: node.dataBuffer.length,
                     windowSize: node.windowSize,
                     hysteresis: {
-                        enabled: activeHysteresisEnabled,
+                        enabled: active.hysteresisEnabled,
                         applied: hysteresisApplied,
                         consecutiveAnomalies: node.consecutiveAnomalies,
                         consecutiveNormals: node.consecutiveNormals
@@ -1774,7 +1901,7 @@ module.exports = function (RED) {
                 // Add adaptive threshold info
                 if (node.adaptiveEnabled) {
                     outputMsg.adaptive = getAdaptiveStats();
-                    outputMsg.adaptive.adjustedThreshold = activeZscoreThreshold;
+                    outputMsg.adaptive.adjustedThreshold = active.zscoreThreshold;
                 }
 
                 // Broadcast via WebSocket for real-time dashboards
@@ -1784,7 +1911,7 @@ module.exports = function (RED) {
                         value: value,
                         isAnomaly: finalIsAnomaly,
                         severity: result.severity,
-                        method: activeMethod,
+                        method: active.method,
                         details: result.details,
                         timestamp: outputMsg.timestamp
                     });
@@ -1825,13 +1952,22 @@ module.exports = function (RED) {
                 await persistence.close();
             }
 
-            // Note: Don't shutdown global WebSocket manager here as other nodes may use it
-            // The manager has its own cleanup via Node-RED lifecycle
-            if (node.wsManager && node.wsListeners) {
-                Object.keys(node.wsListeners).forEach(function (evt) {
-                    node.wsManager.removeListener(evt, node.wsListeners[evt]);
-                });
-                node.wsListeners = null;
+            // Hand the shared WebSocket manager back. Other nodes may still
+            // hold it; the last release stops the server, and that is awaited
+            // so the replacement node (same port) starts against a closed one.
+            if (node.wsManager) {
+                if (node.wsListeners) {
+                    Object.keys(node.wsListeners).forEach(function (evt) {
+                        node.wsManager.removeListener(evt, node.wsListeners[evt]);
+                    });
+                    node.wsListeners = null;
+                }
+                node.wsManager = null;
+                try {
+                    await WebSocketManager.releaseWebSocketManager();
+                } catch (err) {
+                    node.warn("Error stopping WebSocket server: " + err.message);
+                }
             }
 
             node.dataBuffer = [];
@@ -1849,5 +1985,9 @@ module.exports = function (RED) {
         });
     }
 
-    RED.nodes.registerType("anomaly-detector", AnomalyDetectorNode);
+    RED.nodes.registerType("anomaly-detector", AnomalyDetectorNode, {
+        credentials: {
+            websocketAuthToken: { type: "password" }
+        }
+    });
 };

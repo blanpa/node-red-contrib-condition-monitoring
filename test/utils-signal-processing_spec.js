@@ -49,6 +49,21 @@ describe("signal-processing", function () {
         expect(frequencies[1]).toBeCloseTo(1000 / 128, 9);
     });
 
+    it("performFFT keeps 'a sine of amplitude A reads A' for a non-power-of-two size", function () {
+        // 600 samples padded to 1024: normalising by the padded length read
+        // 0.585 for an amplitude of 1. 125 Hz at 1 kHz is 75 whole cycles in
+        // 600 samples and sits on bin 128 of the 1024-point transform.
+        const signal = sine(600, 1000, [[125, 1]]);
+        const rect = dsp.performFFT(signal, 600, 1000, "rectangular");
+        expect(rect.frequencies[128]).toBe(125);
+        expect(rect.magnitudes[128] * dsp.amplitudeScale("rectangular")).toBeCloseTo(1, 9);
+        const hann = dsp.performFFT(signal, 600, 1000, "hann");
+        expect(hann.magnitudes[128] * dsp.amplitudeScale("hann")).toBeCloseTo(1, 2);
+        // A power-of-two size (no padding) is unchanged
+        const full = dsp.performFFT(sine(1024, 1000, [[125, 1]]), 1024, 1000, "rectangular");
+        expect(full.magnitudes[128] * dsp.amplitudeScale("rectangular")).toBeCloseTo(1, 9);
+    });
+
     it("findSpectralPeaks returns local maxima above the relative threshold, strongest first", function () {
         const freqs = [0, 1, 2, 3, 4, 5, 6];
         const mags = [0, 1, 0, 0.4, 0, 0.05, 0];

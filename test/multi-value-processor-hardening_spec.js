@@ -82,8 +82,10 @@ describe("multi-value-processor hardening", function () {
 
         it("handles value names that collide with Object.prototype members", function () {
             const stub = build({ mode: "analyze" });
-            feed(stub, { payload: JSON.parse('{"constructor":1,"toString":2,"__proto__":3}') });
-            const msg = output(feed(stub, { payload: JSON.parse('{"constructor":1,"toString":2,"__proto__":3}') }));
+            let msg;
+            for (let i = 0; i < 10; i++) {
+                msg = output(feed(stub, { payload: JSON.parse('{"constructor":1,"toString":2,"__proto__":3}') }));
+            }
 
             expect(stub.errors).toEqual([]);
             expect(
@@ -168,7 +170,7 @@ describe("multi-value-processor hardening", function () {
                 let critical = 0;
                 for (let i = 0; i < 1500; i++) {
                     const r = output(feed(stub, { payload: noise(rng, 3) })).payload[0];
-                    if (r.severity !== undefined) {
+                    if (r.mahalanobisDistance !== undefined) {
                         scored++;
                         if (r.severity === "critical") critical++;
                     }
@@ -377,37 +379,45 @@ describe("multi-value-processor hardening", function () {
     });
     describe("analyze: streaming z-score", function () {
         // The z-score is read from a running accumulator instead of a pass over
-        // the window. It must agree with the reference definition
-        // (stats.calculateZScore over the window) on every sample.
+        // the window (a ring buffer), and a sample is scored against the window
+        // as it stood BEFORE it arrived — once that holds min(windowSize, 10) − 1
+        // values. It must agree with the reference definition (population
+        // mean / std-dev over that window) on every sample.
         function expectMatchesReference(windowSize, values, relTol) {
             const stub = build({ mode: "analyze", windowSize: windowSize });
+            const minHistory = Math.max(2, Math.min(windowSize, 10) - 1);
             const window = [];
             let compared = 0;
 
             values.forEach(function (value) {
-                window.push(value);
-                if (window.length > windowSize) window.shift();
-
                 const res = feed(stub, { payload: [value] });
                 const result = output(res).payload[0];
-                if (window.length < 2) {
+
+                if (window.length < minHistory) {
+                    expect(res.out1).toBeDefined();
                     expect(result.zScore).toBeUndefined();
-                    return;
+                    expect(result.isAnomaly).toBe(false);
+                    expect(result.severity).toBe("warmup");
+                    expect(result.bufferSize).toBe(window.length);
+                    expect(result.minRequired).toBe(minHistory);
+                } else {
+                    const mean = stats.calculateMean(window);
+                    const stdDev = stats.calculateStdDev(window, mean);
+                    const zScore = (value - mean) / stdDev; // the series never go flat
+                    const scale = Math.max(1, Math.abs(mean));
+                    expect(Math.abs(result.mean - mean)).toBeLessThanOrEqual(relTol * scale);
+                    expect(Math.abs(result.stdDev - stdDev)).toBeLessThanOrEqual(relTol * Math.max(stdDev, 1e-12));
+                    expect(Math.abs(result.zScore - zScore)).toBeLessThanOrEqual(
+                        relTol * Math.max(1, Math.abs(zScore))
+                    );
+                    // Same routing decision
+                    expect(result.isAnomaly).toBe(Math.abs(zScore) > 3);
+                    expect(Boolean(res.out2)).toBe(Math.abs(zScore) > 3);
+                    compared++;
                 }
 
-                const reference = stats.calculateZScore(value, window);
-                const scale = Math.max(1, Math.abs(reference.mean));
-                expect(Math.abs(result.mean - reference.mean)).toBeLessThanOrEqual(relTol * scale);
-                expect(Math.abs(result.stdDev - reference.stdDev)).toBeLessThanOrEqual(
-                    relTol * Math.max(reference.stdDev, 1e-12)
-                );
-                expect(Math.abs(result.zScore - reference.zScore)).toBeLessThanOrEqual(
-                    relTol * Math.max(1, Math.abs(reference.zScore))
-                );
-                // Same routing decision
-                expect(result.isAnomaly).toBe(Math.abs(reference.zScore) > 3);
-                expect(Boolean(res.out2)).toBe(Math.abs(reference.zScore) > 3);
-                compared++;
+                window.push(value);
+                if (window.length > windowSize) window.shift();
             });
             return compared;
         }
@@ -419,7 +429,89 @@ describe("multi-value-processor hardening", function () {
                 values.push(20 + rng.gauss() + (i % 97 === 96 ? 15 : 0));
             }
 
-            expect(expectMatchesReference(50, values, 1e-9)).toBe(2999);
+            expect(expectMatchesReference(50, values, 1e-9)).toBe(2991);
+        });
+
+        it("flags an outlier that a window of 4 could never flag when scored within the window", function () {
+            // Within its own window |z| is capped at sqrt(n − 1) = 1.73
+            const flat = build({ mode: "analyze", anomalyMethod: "zscore", windowSize: 4, threshold: 3 });
+            let res;
+            [10, 10, 10, 1000].forEach(function (v) {
+                res = feed(flat, { payload: [v] });
+            });
+            expect(res.out2).toBeDefined();
+            expect(res.out2.payload[0].isAnomaly).toBe(true);
+            expect(res.out2.payload[0].mean).toBe(10);
+            expect(res.out2.payload[0].stdDev).toBe(0);
+            expect(res.out2.payload[0].zScore).toBeGreaterThan(3);
+            expect(Number.isFinite(res.out2.payload[0].zScore)).toBe(true);
+
+            const noisy = build({ mode: "analyze", anomalyMethod: "zscore", windowSize: 4, threshold: 3 });
+            [10, 11, 10, 1000].forEach(function (v) {
+                res = feed(noisy, { payload: [v] });
+            });
+            expect(res.out2).toBeDefined();
+            expect(res.out2.payload[0].zScore).toBeCloseTo((1000 - 31 / 3) / stats.calculateStdDev([10, 11, 10]), 6);
+        });
+
+        it("flags 1000 after nine values near 10 (window 10, threshold 3)", function () {
+            // Scored within a window of 10 this came out at exactly z = 3.000
+            const stub = build({ mode: "analyze", anomalyMethod: "zscore", windowSize: 10, threshold: 3 });
+            const rng = seededRandom(3);
+            let res;
+            for (let i = 0; i < 9; i++) res = feed(stub, { payload: [10 + 0.01 * rng.gauss()] });
+            // The 9th sample still warms up (8 values before it); the 10th is
+            // the first one scored — against the nine before it
+            expect(res.out1.payload[0].severity).toBe("warmup");
+            expect(res.out1.payload[0].bufferSize).toBe(8);
+
+            res = feed(stub, { payload: [1000] });
+            expect(res.out2).toBeDefined();
+            expect(res.out2.payload[0].zScore).toBeGreaterThan(1000);
+            expect(res.out2.hasAnomaly).toBe(true);
+            expect(res.out2.anomalyCount).toBe(1);
+        });
+
+        it("scores IQR against the window before the sample too", function () {
+            const stub = build({ mode: "analyze", anomalyMethod: "iqr", windowSize: 10 });
+            const baseline = [10, 10, 11, 10, 9, 10, 11, 10, 9];
+            let res;
+            baseline.forEach(function (v) {
+                res = feed(stub, { payload: [v] });
+            });
+            expect(res.out1.payload[0].severity).toBe("warmup");
+            expect(res.out1.payload[0].minRequired).toBe(9);
+
+            res = feed(stub, { payload: [50] });
+            const quartiles = stats.calculateQuartiles(baseline);
+            expect(res.out2).toBeDefined();
+            expect(res.out2.payload[0].q1).toBe(quartiles.q1);
+            expect(res.out2.payload[0].q3).toBe(quartiles.q3);
+            expect(res.out2.payload[0].isAnomaly).toBe(true);
+        });
+
+        it("reports the warm-up phase per value instead of a bare result", function () {
+            const stub = build({ mode: "analyze", windowSize: 100 });
+            const first = feed(stub, { payload: { temp: 20, pressure: 4 } });
+
+            expect(first.out1).toBeDefined();
+            expect(first.out1.hasAnomaly).toBe(false);
+            expect(first.out1.payload[0]).toEqual({
+                valueName: "temp",
+                value: 20,
+                isAnomaly: false,
+                severity: "warmup",
+                bufferSize: 0,
+                minRequired: 9
+            });
+            expect(stub.statuses[stub.statuses.length - 1].text).toBe("warm-up 0/9");
+
+            // A value seen for the first time warms up while the others are scored
+            for (let i = 0; i < 9; i++) feed(stub, { payload: { temp: 20, pressure: 4 } });
+            const mixed = output(feed(stub, { payload: { temp: 20, pressure: 4, flow: 1 } }));
+            expect(mixed.payload[0].zScore).toBe(0);
+            expect(mixed.payload[2].severity).toBe("warmup");
+            expect(stub.statuses[stub.statuses.length - 1].text).toBe("3 values ok");
         });
 
         it("matches the reference through level shifts", function () {
@@ -469,9 +561,7 @@ describe("multi-value-processor hardening", function () {
 
             const state = stub.node.groups.get("");
             ["a", "b"].forEach(function (name) {
-                const window = state.dataBuffers[name].map(function (d) {
-                    return d.value;
-                });
+                const window = state.dataBuffers[name].toArray();
                 expect(window.length).toBe(25);
                 expect(state.moments[name].running.count()).toBe(25);
                 expect(state.moments[name].running.mean()).toBeCloseTo(stats.calculateMean(window), 10);
@@ -533,33 +623,43 @@ describe("multi-value-processor hardening", function () {
         });
 
         it("restores analyze buffers, with debug enabled, and scores the next sample against them", async function () {
+            const rng = seededRandom(24);
+            const samples = [];
+            for (let i = 0; i < 30; i++) samples.push(60 + 0.5 * rng.gauss());
+
             const first = build({ mode: "analyze", windowSize: 30, persistState: true }, {});
             await settle();
-            const rng = seededRandom(24);
-            for (let i = 0; i < 30; i++) feed(first, { payload: { temp: 60 + 0.5 * rng.gauss() } });
-            const reference = output(feed(first, { payload: { temp: 60.2 } })).payload[0];
+            samples.forEach(function (v) {
+                feed(first, { payload: { temp: v } });
+            });
             await closeNode(first.node);
 
             const saved = first.store.multiValueProcessorState;
             expect(saved.version).toBe(2);
-            expect(saved.groups[""].dataBuffers.temp.length).toBe(30);
+            // Windows are stored as plain numbers (no per-sample timestamps)
+            expect(saved.groups[""].dataBuffers.temp).toEqual(samples);
 
-            // Drop the last sample so the restarted node sees the same history
-            saved.groups[""].dataBuffers.temp.pop();
+            // The same history without a restart gives the reference score
+            const reference = build({ mode: "analyze", windowSize: 30 });
+            samples.forEach(function (v) {
+                feed(reference, { payload: { temp: v } });
+            });
+            const expected = output(feed(reference, { payload: { temp: 60.2 } })).payload[0];
+
             const second = build({ mode: "analyze", windowSize: 30, persistState: true, debug: true }, first.store);
             await settle();
 
             expect(second.warnings).toEqual([]);
-            expect(second.node.dataBuffers.temp.length).toBe(29);
+            expect(second.node.dataBuffers.temp.length).toBe(30);
             expect(
                 second.debugLines.some(function (l) {
-                    return l.indexOf("Restored 29 buffered samples") === 0;
+                    return l.indexOf("Restored 30 buffered samples") === 0;
                 })
             ).toBe(true);
 
             const res = feed(second, { payload: { temp: 60.2 } });
-            expect(output(res).payload[0].zScore).toBeCloseTo(reference.zScore, 9);
-            expect(output(res).payload[0].mean).toBeCloseTo(reference.mean, 9);
+            expect(output(res).payload[0].zScore).toBeCloseTo(expected.zScore, 9);
+            expect(output(res).payload[0].mean).toBeCloseTo(expected.mean, 9);
 
             // No relearning: a gross outlier is caught on the first message after it
             expect(feed(second, { payload: { temp: 90 } }).out2).toBeDefined();
@@ -639,17 +739,343 @@ describe("multi-value-processor hardening", function () {
             await settle();
 
             expect(stub.warnings).toEqual([]);
-            // Trimmed to the configured window, newest kept
-            expect(
-                stub.node.dataBuffers.ok.map(function (d) {
-                    return d.value;
-                })
-            ).toEqual([3, 4, 5, 6, 7]);
+            // Trimmed to the configured window, newest kept; the old
+            // `{timestamp, value}` layout is still read
+            expect(stub.node.dataBuffers.ok.toArray()).toEqual([3, 4, 5, 6, 7]);
             expect(stub.node.dataBuffers.bad).toBeUndefined();
             expect(stub.node.correlationBuffer1).toEqual([]); // unpaired buffers are dropped
             expect(stub.node.mahalanobisBuffer).toEqual([]);
 
             await closeNode(stub.node);
+        });
+    });
+
+    describe("input parsing (utils/sensor-value)", function () {
+        const warnedTimestamp = 'Ignoring non-numeric field(s) "timestamp" (text or timestamp, not a sensor value)';
+
+        it("does not monitor an ISO timestamp field as a sensor, and says so once", function () {
+            const stub = build({ mode: "analyze", windowSize: 10 });
+            let msg;
+            for (let i = 0; i < 3; i++) {
+                msg = output(feed(stub, { payload: { temp: 25 + i, timestamp: "2024-05-01T12:00:0" + i + "Z" } }));
+            }
+
+            expect(
+                msg.payload.map(function (r) {
+                    return r.valueName;
+                })
+            ).toEqual(["temp"]);
+            expect(msg.skippedValues).toEqual(["timestamp"]);
+            expect(Object.keys(stub.node.dataBuffers)).toEqual(["temp"]);
+            expect(stub.warnings).toEqual([warnedTimestamp]);
+        });
+
+        it("rejects text with a numeric prefix in arrays and objects", function () {
+            const stub = build({ mode: "analyze" });
+            const arr = output(feed(stub, { payload: [10, "123abc", "7"] }));
+            expect(
+                arr.payload.map(function (r) {
+                    return [r.valueName, r.value];
+                })
+            ).toEqual([
+                ["value0", 10],
+                ["value2", 7]
+            ]);
+            expect(arr.skippedValues).toEqual(["value1"]);
+
+            const obj = output(feed(stub, { payload: { a: "65 °C", b: 3, deviceId: "pump-7" } }));
+            expect(
+                obj.payload.map(function (r) {
+                    return r.valueName;
+                })
+            ).toEqual(["b"]);
+            expect(obj.skippedValues).toEqual(["a", "deviceId"]);
+            // Only the field that used to parse as a number is worth a warning
+            expect(stub.warnings).toEqual([
+                'Ignoring non-numeric field(s) "a" (text or timestamp, not a sensor value)'
+            ]);
+        });
+
+        it("applies the same rule in correlate, aggregate and split", function () {
+            const corr = build({ mode: "correlate", sensor1: "x", sensor2: "y" });
+            feed(corr, { payload: { x: "1abc", y: 2 } });
+            expect(corr.warnings).toEqual(["Missing or invalid sensor values: x, y"]);
+
+            const agg = build({ mode: "aggregate", aggregateMethod: "sum" });
+            expect(output(feed(agg, { payload: { a: 1, b: "2", ts: "2024-05-01", c: "3x" } })).payload).toBe(3);
+            expect(agg.warnings.length).toBe(1);
+
+            const split = build({ mode: "split", outputMode: "parallel" });
+            const res = feed(split, { payload: { a: 1, ts: "2024-05-01T00:00:00Z", b: "2" } });
+            expect(res.out1.payload).toEqual([1, 2]);
+            expect(res.out1.valueNames).toEqual(["a", "b"]);
+
+            const scalar = build({ mode: "split" });
+            expect(feed(scalar, { payload: "12abc" }).all).toEqual([]);
+            expect(scalar.errors).toEqual(["No valid numeric values found"]);
+            expect(feed(scalar, { payload: "12" }).all[0][0].payload).toBe(12);
+        });
+    });
+
+    describe("split: sequential clone", function () {
+        it("keeps the per-element message shape of earlier releases", function () {
+            const stub = build({ mode: "split", outputMode: "sequential" });
+            const meta = { site: "A", tags: [1, 2] };
+            const res = feed(stub, { payload: [5, 6], topic: "t", _msgid: "m1", meta: meta });
+
+            expect(res.all.length).toBe(2);
+            expect(res.all[0][0]).toEqual({
+                topic: "t",
+                _msgid: "m1",
+                meta: meta,
+                payload: 5,
+                valueIndex: 0,
+                valueName: "value0",
+                totalValues: 2
+            });
+            expect(res.all[1][0]).toEqual({
+                topic: "t",
+                _msgid: "m1",
+                meta: meta,
+                payload: 6,
+                valueIndex: 1,
+                valueName: "value1",
+                totalValues: 2
+            });
+            expect(res.all[1][1]).toBeNull();
+            // Cloned, not the inbound object
+            expect(res.all[0][0].meta).not.toBe(meta);
+
+            const bare = build({ mode: "split", outputMode: "sequential", preserveOriginal: false });
+            const r2 = feed(bare, { payload: { a: 1 }, topic: "t" });
+            expect(r2.all[0][0]).toEqual({ payload: 1, valueIndex: 0, valueName: "a", totalValues: 1 });
+        });
+
+        it("splits a 5000-element array in well under 50 ms with preserveOriginal", function () {
+            // Deep-cloning the whole message per element took ~400 ms here
+            const stub = build({ mode: "split", outputMode: "sequential", preserveOriginal: true });
+            const arr = Array.from({ length: 5000 }, function (_, i) {
+                return i;
+            });
+            feed(stub, { payload: [1, 2], topic: "warm" });
+
+            const t0 = process.hrtime.bigint();
+            const res = feed(stub, { payload: arr, topic: "x", meta: { site: "A" } });
+            const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+
+            expect(res.all.length).toBe(5000);
+            expect(res.all[4999][0].payload).toBe(4999);
+            expect(res.all[4999][0].valueIndex).toBe(4999);
+            expect(res.all[4999][0].totalValues).toBe(5000);
+            expect(res.all[4999][0].topic).toBe("x");
+            expect(res.all[4999][0].meta).toEqual({ site: "A" });
+            expect(ms).toBeLessThan(50);
+        });
+    });
+
+    describe("outputTopic", function () {
+        const topic = "alarms";
+
+        it("is applied in every mode, not only aggregate", function () {
+            const split = build({ mode: "split", outputMode: "sequential", outputTopic: topic });
+            expect(
+                feed(split, { payload: [1, 2], topic: "in" }).all.map(function (m) {
+                    return m[0].topic;
+                })
+            ).toEqual([topic, topic]);
+            const parallel = build({ mode: "split", outputMode: "parallel", outputTopic: topic });
+            expect(feed(parallel, { payload: [1, 2], topic: "in" }).out1.topic).toBe(topic);
+
+            const analyze = build({ mode: "analyze", windowSize: 10, outputTopic: topic });
+            let res;
+            for (let i = 0; i < 10; i++) res = feed(analyze, { payload: [10], topic: "in" });
+            expect(res.out1.topic).toBe(topic);
+            res = feed(analyze, { payload: [1000], topic: "in" });
+            expect(res.out2.topic).toBe(topic);
+
+            const corr = build({ mode: "correlate", sensor1: "x", sensor2: "y", outputTopic: topic });
+            expect(feed(corr, { payload: { x: 1, y: 1 }, topic: "in" }).out1.topic).toBe(topic); // warm-up
+            feed(corr, { payload: { x: 2, y: 2 }, topic: "in" });
+            expect(feed(corr, { payload: { x: 3, y: 3 }, topic: "in" }).out1.topic).toBe(topic); // result
+            const flat = build({ mode: "correlate", sensor1: "x", sensor2: "y", outputTopic: topic });
+            let r;
+            for (let i = 0; i < 3; i++) r = feed(flat, { payload: { x: 1, y: 1 }, topic: "in" });
+            expect(r.out1.reason).toMatch(/zero variance/); // undefined correlation
+            expect(r.out1.topic).toBe(topic);
+
+            const agg = build({ mode: "aggregate", outputTopic: topic });
+            expect(feed(agg, { payload: [1, 2], topic: "in" }).out1.topic).toBe(topic);
+        });
+
+        it("keeps the inbound topic when empty", function () {
+            const analyze = build({ mode: "analyze" });
+            expect(feed(analyze, { payload: [1], topic: "in" }).out1.topic).toBe("in");
+            const corr = build({ mode: "correlate", sensor1: "x", sensor2: "y" });
+            expect(feed(corr, { payload: { x: 1, y: 1 }, topic: "in" }).out1.topic).toBe("in");
+            const split = build({ mode: "split" });
+            expect(feed(split, { payload: [1], topic: "in" }).all[0][0].topic).toBe("in");
+        });
+    });
+
+    describe("correlate: warm-up", function () {
+        it("emits a result object for the first two messages instead of nothing", function () {
+            const stub = build({ mode: "correlate", sensor1: "x", sensor2: "y", windowSize: 20 });
+
+            const first = feed(stub, { payload: { x: 1, y: 2 }, topic: "t", deviceId: "d1" });
+            expect(first.out2).toBeUndefined();
+            expect(first.out1).toEqual({
+                payload: { x: 1, y: 2 },
+                correlation: null,
+                isAnomalous: false,
+                severity: "warmup",
+                bufferSize: 1,
+                minRequired: 3,
+                sensor1: "x",
+                sensor2: "y",
+                method: "pearson",
+                stats: { sensor1Mean: 1, sensor2Mean: 2, bufferSize: 1 },
+                topic: "t",
+                deviceId: "d1"
+            });
+            expect(stub.statuses[stub.statuses.length - 1].text).toBe("Buffering: 1/20");
+
+            const second = feed(stub, { payload: { x: 2, y: 4 } });
+            expect(second.out1.severity).toBe("warmup");
+            expect(second.out1.bufferSize).toBe(2);
+
+            const third = feed(stub, { payload: { x: 3, y: 6 } });
+            expect(third.out1.severity).toBeUndefined();
+            expect(third.out1.correlation).toBeCloseTo(1, 10);
+        });
+    });
+
+    describe("analyze: streaming covariance (Mahalanobis)", function () {
+        // Reference: two-pass sample covariance of the complete rows
+        function batchCovariance(buffer, names) {
+            const rows = [];
+            buffer.forEach(function (sample) {
+                const row = names.map(function (n) {
+                    return sample[n];
+                });
+                if (row.every(Number.isFinite)) rows.push(row);
+            });
+            const m = rows.length;
+            const p = names.length;
+            const means = new Array(p).fill(0);
+            rows.forEach(function (row) {
+                for (let i = 0; i < p; i++) means[i] += row[i] / m;
+            });
+            const cov = [];
+            for (let i = 0; i < p; i++) cov.push(new Array(p).fill(0));
+            rows.forEach(function (row) {
+                for (let i = 0; i < p; i++) {
+                    for (let j = 0; j < p; j++) cov[i][j] += ((row[i] - means[i]) * (row[j] - means[j])) / (m - 1);
+                }
+            });
+            return { count: m, means: means, covariance: cov };
+        }
+
+        function expectAccumulatorMatches(stub, names, relTol) {
+            const state = stub.node.groups.get("");
+            const acc = state.mahalanobisCov;
+            const ref = batchCovariance(state.mahalanobisBuffer, names);
+            expect(acc.names).toEqual(names);
+            expect(acc.running.count()).toBe(ref.count);
+            const cov = acc.running.covariance();
+            const means = acc.running.means();
+            for (let i = 0; i < names.length; i++) {
+                expect(Math.abs(means[i] - ref.means[i])).toBeLessThanOrEqual(
+                    relTol * Math.max(1, Math.abs(ref.means[i]))
+                );
+                for (let j = 0; j < names.length; j++) {
+                    expect(Math.abs(cov[i][j] - ref.covariance[i][j])).toBeLessThanOrEqual(
+                        relTol * Math.max(1, Math.abs(ref.covariance[i][j]))
+                    );
+                }
+            }
+        }
+
+        it("equals the batch covariance of the history to 1e-9 after every message, through turnovers and a level shift", function () {
+            const stub = build({ mode: "analyze", anomalyMethod: "mahalanobis", windowSize: 40 });
+            const rng = seededRandom(30);
+            let compared = 0;
+            for (let i = 0; i < 600; i++) {
+                const x = rng.gauss();
+                const shift = i >= 300 ? 50 : 0;
+                feed(stub, { payload: { a: x + shift, b: 2 * x + 0.1 * rng.gauss(), c: rng.gauss() } });
+                if (!stub.node.groups.get("").mahalanobisCov) continue; // not consulted before 10 samples
+                expectAccumulatorMatches(stub, ["a", "b", "c"], 1e-9);
+                compared++;
+            }
+            expect(compared).toBeGreaterThan(580);
+            expect(stub.errors).toEqual([]);
+        });
+
+        it("scores exactly as the batch formula did (distance and limits unchanged)", function () {
+            // The per-message numbers must not move: same seeded data as the
+            // Mahalanobis false-alarm test, compared against a node that is
+            // forced onto the exact path by a reset of the accumulator each time.
+            const streaming = build({ mode: "analyze", anomalyMethod: "mahalanobis", windowSize: 30 });
+            const exact = build({ mode: "analyze", anomalyMethod: "mahalanobis", windowSize: 30 });
+            const rng = seededRandom(32);
+            for (let i = 0; i < 300; i++) {
+                const payload = [rng.gauss(), 5 + 2 * rng.gauss(), -3 + rng.gauss()];
+                const a = output(feed(streaming, { payload: payload })).payload[0];
+                const state = exact.node.groups.get("");
+                if (state) state.mahalanobisCov = null; // rebuilt from the buffer: the two-pass result
+                const b = output(feed(exact, { payload: payload })).payload[0];
+                expect(a.severity).toBe(b.severity);
+                if (a.mahalanobisDistance !== undefined) {
+                    expect(a.mahalanobisDistance).toBeCloseTo(b.mahalanobisDistance, 9);
+                    expect(a.mahalanobisThreshold).toBe(b.mahalanobisThreshold);
+                }
+            }
+        });
+
+        it("falls back to the exact covariance when the spread is tiny next to the level", function () {
+            const stub = build({ mode: "analyze", anomalyMethod: "mahalanobis", windowSize: 20 });
+            const rng = seededRandom(31);
+            let distances = 0;
+            for (let i = 0; i < 60; i++) {
+                const r = output(feed(stub, { payload: [1e9 + 0.01 * rng.gauss(), 1e9 + 0.01 * rng.gauss()] }))
+                    .payload[0];
+                if (r.mahalanobisDistance !== undefined) {
+                    expect(Number.isFinite(r.mahalanobisDistance)).toBe(true);
+                    distances++;
+                }
+            }
+            expect(distances).toBe(50);
+            expect(stub.errors).toEqual([]);
+        });
+
+        it("starts a fresh accumulator after a reset and after a restore", async function () {
+            const stub = build(
+                { mode: "analyze", anomalyMethod: "mahalanobis", windowSize: 30, persistState: true },
+                {}
+            );
+            await settle();
+            const rng = seededRandom(33);
+            for (let i = 0; i < 25; i++) feed(stub, { payload: { a: rng.gauss(), b: rng.gauss() } });
+            expect(stub.node.groups.get("").mahalanobisCov.running.count()).toBe(25);
+
+            feed(stub, { reset: true });
+            expect(stub.node.groups.get("")).toBeUndefined();
+            for (let i = 0; i < 12; i++) feed(stub, { payload: { a: rng.gauss(), b: rng.gauss() } });
+            expectAccumulatorMatches(stub, ["a", "b"], 1e-9);
+            expect(stub.node.groups.get("").mahalanobisCov.running.count()).toBe(12);
+            await closeNode(stub.node);
+
+            const restored = build(
+                { mode: "analyze", anomalyMethod: "mahalanobis", windowSize: 30, persistState: true },
+                stub.store
+            );
+            await settle();
+            expect(restored.node.mahalanobisBuffer.length).toBe(12);
+            expect(restored.node.groups.get("").mahalanobisCov).toBeNull();
+            feed(restored, { payload: { a: 0, b: 0 } });
+            expectAccumulatorMatches(restored, ["a", "b"], 1e-9);
+            expect(restored.node.groups.get("").mahalanobisCov.running.count()).toBe(13);
+            await closeNode(restored.node);
         });
     });
 });

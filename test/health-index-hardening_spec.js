@@ -347,4 +347,158 @@ describe("health-index hardening", function () {
             await closeNode(second.node);
         });
     });
+
+    describe("missing sensors", function () {
+        const WEIGHTS = '{"temp":1,"vibration":1.5}';
+        const FAULTED_VIB = { value: 9, isAnomaly: true, zScore: 4 }; // scores 30
+        function faulted(stub) {
+            let msg;
+            for (let i = 0; i < 5; i++) {
+                msg = output(feed(stub, { payload: { temp: { value: 70 }, vibration: FAULTED_VIB } }));
+            }
+            return msg;
+        }
+
+        it("flags a configured sensor that disappears from the payload and warns once", function () {
+            const stub = build({ sensorWeights: WEIGHTS });
+            expect(faulted(stub).healthIndex).toBe(58);
+
+            // the faulted vibration sensor goes offline
+            const res = feed(stub, { payload: { temp: { value: 70 } } });
+            const msg = output(res);
+            // the index rises (nothing is held) - but never silently
+            expect(msg.healthIndex).toBe(100);
+            expect(msg.missingSensors).toEqual(["vibration"]);
+            expect(msg.heldSensors).toEqual([]);
+            expect(msg.skippedSensors).toBeUndefined();
+            expect(res.out1).toBeDefined();
+            expect(stub.warnings.length).toBe(1);
+            expect(stub.warnings[0]).toMatch(/missing from the payload: vibration/);
+
+            feed(stub, { payload: { temp: { value: 70 } } });
+            expect(stub.warnings.length).toBe(1);
+
+            // a payload carrying every configured sensor has no missingSensors field
+            const full = output(feed(stub, { payload: { temp: { value: 70 }, vibration: FAULTED_VIB } }));
+            expect(full.missingSensors).toBeUndefined();
+        });
+
+        it("holds the last score of a missing sensor while it is younger than staleAfterMs", async function () {
+            const stub = build({ sensorWeights: WEIGHTS, staleAfterMs: 60000 });
+            expect(faulted(stub).healthIndex).toBe(58);
+
+            const res = feed(stub, { payload: { temp: { value: 70 } } });
+            const msg = output(res);
+            expect(msg.healthIndex).toBe(58);
+            expect(msg.status).toBe("warning");
+            expect(res.out2).toBeDefined();
+            expect(msg.missingSensors).toEqual(["vibration"]);
+            expect(msg.heldSensors).toEqual(["vibration"]);
+            expect(msg.sensorScores.vibration).toBe(30);
+            expect(msg.dynamicWeights.vibration.held).toBe(true);
+            expect(msg.worstSensor.name).toBe("vibration");
+            expect(msg.contributingFactors.some((f) => f.sensor === "vibration" && /held/.test(f.reason))).toBe(true);
+            expect(stub.warnings[0]).toMatch(/held for 60000 ms/);
+        });
+
+        it("drops a missing sensor once its last score is stale", async function () {
+            const stub = build({ sensorWeights: WEIGHTS, staleAfterMs: 5 });
+            faulted(stub);
+            await settle(); // 20 ms > staleAfterMs
+
+            const msg = output(feed(stub, { payload: { temp: { value: 70 } } }));
+            expect(msg.healthIndex).toBe(100);
+            expect(msg.missingSensors).toEqual(["vibration"]);
+            expect(msg.heldSensors).toEqual([]);
+            expect(msg.sensorScores.vibration).toBeUndefined();
+        });
+
+        it("does not hold a sensor that was never seen, nor one with weight 0", function () {
+            const stub = build({ sensorWeights: '{"temp":1,"vibration":1.5,"off":0}', staleAfterMs: 60000 });
+
+            const msg = output(feed(stub, { payload: { temp: { value: 70 } } }));
+            expect(msg.healthIndex).toBe(100);
+            expect(msg.missingSensors).toEqual(["vibration"]);
+            expect(msg.heldSensors).toEqual([]);
+        });
+    });
+
+    describe("scoring assumptions", function () {
+        it("penalises a decreasing trend on a falling-is-bad sensor", function () {
+            const stub = build({});
+            const base = { pressure: { value: 2, trend: "decreasing", slope: -0.5 } };
+
+            // default direction: rising is bad, so a fall is not penalised
+            expect(output(feed(stub, { payload: base })).sensorScores.pressure).toBe(100);
+            // per-message direction
+            const withDir = output(
+                feed(stub, { payload: { pressure: Object.assign({ direction: "falling" }, base.pressure) } })
+            );
+            expect(withDir.sensorScores.pressure).toBe(90);
+            expect(withDir.contributingFactors[0]).toEqual({
+                sensor: "pressure",
+                reason: "decreasing trend",
+                impact: -10
+            });
+            // trend-predictor's field name is accepted too
+            expect(
+                output(
+                    feed(stub, { payload: { pressure: Object.assign({ failureDirection: "falling" }, base.pressure) } })
+                ).sensorScores.pressure
+            ).toBe(90);
+            // a rising trend on a falling-is-bad sensor is an improvement
+            expect(
+                output(
+                    feed(stub, {
+                        payload: { pressure: { value: 2, trend: "increasing", slope: 0.5, direction: "falling" } }
+                    })
+                ).sensorScores.pressure
+            ).toBe(100);
+        });
+
+        it("takes the failure direction from the node configuration", function () {
+            const stub = build({ sensorDirections: '{"pressure":"falling","bogus":"sideways"}' });
+            expect(stub.warnings.length).toBe(1);
+            expect(stub.warnings[0]).toMatch(/bogus/);
+
+            const msg = output(
+                feed(stub, {
+                    payload: {
+                        pressure: { value: 2, trend: "decreasing", slope: -0.5 },
+                        temp: { value: 70, trend: "increasing", slope: 0.5 }
+                    }
+                })
+            );
+            expect(msg.sensorScores).toEqual({ pressure: 90, temp: 90 });
+            // the message overrides the node setting
+            const overridden = output(
+                feed(stub, {
+                    payload: { pressure: { value: 2, trend: "decreasing", slope: -0.5, direction: "rising" } }
+                })
+            );
+            expect(overridden.sensorScores.pressure).toBe(100);
+        });
+
+        it("does not apply the coefficient-of-variation penalty to a zero-mean indicator", function () {
+            const stub = build({ aggregationMethod: "dynamic" });
+            let msg;
+            for (let i = 0; i < 12; i++) {
+                // a healthy residual oscillating around zero, next to a noisy positive sensor
+                // (70 ± 50: mean 70, σ 50, CV 0.71) and a quiet one
+                msg = output(
+                    feed(stub, {
+                        payload: {
+                            residual: { value: Math.sin(i) * 0.5 },
+                            noisy: { value: 70 + (i % 2 ? 50 : -50) },
+                            temp: { value: 70 }
+                        }
+                    })
+                );
+            }
+            expect(msg.dynamicWeights.residual.reliabilityFactor).toBe(1);
+            expect(msg.dynamicWeights.temp.reliabilityFactor).toBe(1);
+            // CV 0.714 → factor 1 − (0.714 − 0.5)
+            expect(msg.dynamicWeights.noisy.reliabilityFactor).toBeCloseTo(1 - (50 / 70 - 0.5), 6);
+        });
+    });
 });

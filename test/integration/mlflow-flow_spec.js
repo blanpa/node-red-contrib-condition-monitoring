@@ -98,7 +98,16 @@ describe("integration: ml-inference MLflow registry resolution", () => {
         await new Promise((r) => mock.listen(0, "127.0.0.1", r));
         mockPort = mock.address().port;
 
-        harness = await startRed();
+        // The tracking case loads a real model from test/fixtures. The harness
+        // confines the model-path allowlist to <userDir>/models, and cwd is no
+        // longer allowlisted by default, so the fixtures dir is added explicitly.
+        harness = await startRed({
+            settings: {
+                conditionMonitoring: {
+                    allowedModelPaths: [path.resolve(__dirname, "..", "fixtures")]
+                }
+            }
+        });
     }, 40000);
 
     afterAll(async () => {
@@ -180,7 +189,7 @@ describe("integration: ml-inference MLflow registry resolution", () => {
                     id: "mlf-track-node",
                     type: "ml-inference",
                     modelSource: "local",
-                    modelPath, // real fixture (allowlisted via process.cwd())
+                    modelPath, // real fixture (allowlisted via settings above)
                     modelType: "onnx",
                     inputShape: "1,10",
                     preprocessMode: "array",

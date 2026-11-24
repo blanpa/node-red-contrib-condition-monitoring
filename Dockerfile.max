@@ -43,6 +43,10 @@ COPY nodes/python/max_bridge.py /app/max_bridge.py
 RUN mkdir -p /models
 
 # Expose the inference API port
+# max_bridge.py binds 127.0.0.1 by default (since v0.4.1); a container must
+# listen on all interfaces to be reachable from the Node-RED container.
+ENV MAX_BRIDGE_HOST=0.0.0.0
+
 EXPOSE 8765
 
 # Health check

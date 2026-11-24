@@ -250,13 +250,13 @@ describe("callAnthropic (with mocked fetch)", () => {
             calls.push({ url, init });
             return fakeResponse({
                 content: [{ type: "text", text: "All quiet." }],
-                model: "claude-haiku-4-5-20251001",
+                model: "claude-haiku-5-5",
                 usage: { input_tokens: 12, output_tokens: 4 }
             });
         };
         const out = await callAnthropic({
             apiKey: "sk-ant-test",
-            model: "claude-haiku-4-5-20251001",
+            model: "claude-haiku-5-5",
             systemPrompt: "you are an analyst",
             userPrompt: "x=1 x=2",
             fetchFn
@@ -267,7 +267,7 @@ describe("callAnthropic (with mocked fetch)", () => {
         expect(calls[0].init.headers["x-api-key"]).toBe("sk-ant-test");
         expect(calls[0].init.headers["anthropic-version"]).toBe("2023-06-01");
         const sent = JSON.parse(calls[0].init.body);
-        expect(sent.model).toBe("claude-haiku-4-5-20251001");
+        expect(sent.model).toBe("claude-haiku-5-5");
         expect(sent.max_tokens).toBe(1024);
         expect(sent.system).toBe("you are an analyst");
         expect(sent.messages).toEqual([{ role: "user", content: "x=1 x=2" }]);
@@ -797,6 +797,8 @@ describe("llm-analyzer node", () => {
                 sensorName: "pump-3",
                 unit: "bar",
                 userPromptTemplate: "default for {sensor}",
+                // Per-message overrides are opt-in (see llm-analyzer-hardening_spec for the default).
+                allowMsgOverrides: true,
                 wires: [["n2"]]
             },
             { id: "n2", type: "helper" }

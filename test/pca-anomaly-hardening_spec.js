@@ -81,6 +81,153 @@ describe("pca-anomaly hardening", function () {
             expect(res.out2).toBeDefined();
             expect(res.out2.pca.speAnomaly).toBe(true);
             expect(["a", "b"]).toContain(res.out2.topContributor);
+            expect(res.out2.contributionStatistic).toBe("spe");
+            res.out2.allContributions.forEach(function (c) {
+                expect(c.statistic).toBe("spe");
+            });
+        });
+    });
+
+    describe("contribution analysis", function () {
+        // a and b move together; c is independent noise
+        function twoFactor(rng) {
+            const x = rng.gauss();
+            return { a: x, b: x + 0.05 * rng.gauss(), c: rng.gauss() };
+        }
+
+        function trainedTwoFactor(seed, extra) {
+            const stub = build(Object.assign({ windowSize: 60, method: "combined", threshold: 3 }, extra));
+            const rng = seededRandom(seed);
+            let last;
+            for (let i = 0; i < 90; i++) last = feed(stub, { payload: twoFactor(rng) });
+            expect(output(last).pca.nComponents).toBe(2);
+            return stub;
+        }
+
+        it("explains a T²-only anomaly with T² contributions, not residual noise", function () {
+            const stub = trainedTwoFactor(40);
+
+            // Far out along the a/b axis, still on the model: SPE stays ~0
+            const res = feed(stub, { payload: { a: 12, b: 12, c: 0 } });
+
+            expect(res.out2).toBeDefined();
+            const msg = res.out2;
+            expect(msg.pca.t2Anomaly).toBe(true);
+            expect(msg.pca.speAnomaly).toBe(false);
+            expect(msg.contributionStatistic).toBe("t2");
+            expect(["a", "b"]).toContain(msg.topContributor);
+            expect(msg.allContributions.length).toBe(3);
+            const share = {};
+            msg.allContributions.forEach(function (c) {
+                expect(c.statistic).toBe("t2");
+                share[c.sensor] = c.normalizedContribution;
+            });
+            // Previously the SPE residuals (~1e-7) were ranked: 50.0% / 50.0% noise
+            expect(share.a).toBeGreaterThan(0.4);
+            expect(share.b).toBeGreaterThan(0.4);
+            expect(share.c).toBeLessThan(0.05);
+            // The signed per-variable terms add up to T²; reported as magnitudes
+            // they sum to T² up to the (small) negative terms
+            const total = msg.allContributions.reduce(function (s, c) {
+                return s + c.contribution;
+            }, 0);
+            expect(total).toBeGreaterThanOrEqual(msg.pca.t2 * (1 - 1e-9));
+            expect(total).toBeLessThan(msg.pca.t2 * 1.05);
+            expect(msg.contributions[0].sensor).toBe(msg.topContributor);
+            expect(stub.statuses[stub.statuses.length - 1].text).toMatch(/^ANOMALY: [ab]$/);
+        });
+
+        it("reports both lists when both statistics exceed their limits, the larger exceedance first", function () {
+            const stub = trainedTwoFactor(41, { showTopContributors: 2 });
+
+            // Far out along the axis AND off the model
+            const res = feed(stub, { payload: { a: 12, b: 8, c: 0 } });
+
+            expect(res.out2).toBeDefined();
+            const msg = res.out2;
+            expect(msg.pca.t2Anomaly).toBe(true);
+            expect(msg.pca.speAnomaly).toBe(true);
+            const statistics = msg.contributions.map(function (c) {
+                return c.statistic;
+            });
+            expect(new Set(statistics).size).toBe(2);
+            expect(statistics.slice(0, 2)).toEqual([msg.contributionStatistic, msg.contributionStatistic]);
+            expect(msg.contributions[0].sensor).toBe(msg.topContributor);
+            // allContributions is the full breakdown of the primary statistic
+            expect(msg.allContributions.length).toBe(3);
+            expect(
+                msg.allContributions.reduce(function (s, c) {
+                    return s + c.normalizedContribution;
+                }, 0)
+            ).toBeCloseTo(1, 10);
+            msg.allContributions.forEach(function (c) {
+                expect(c.statistic).toBe(msg.contributionStatistic);
+            });
+        });
+
+        it("follows the statistic closer to its limit on a normal sample", function () {
+            const stub = trainedTwoFactor(42);
+            const msg = output(feed(stub, { payload: { a: 0.5, b: 0.5, c: 0.2 } }));
+
+            expect(msg.isAnomaly).toBe(false);
+            expect(["t2", "spe"]).toContain(msg.contributionStatistic);
+            expect(msg.topContributor).toBeDefined();
+            expect(msg.allContributions).toBeUndefined();
+        });
+    });
+
+    describe("input parsing (utils/sensor-value)", function () {
+        it("does not freeze an ISO timestamp into the feature set, and says so once", function () {
+            const stub = build({ windowSize: 20 });
+            let last;
+            for (let i = 0; i < 3; i++) {
+                last = feed(stub, {
+                    payload: { temp: 25 + i, pressure: 4 - i, timestamp: "2024-05-01T12:00:0" + i + "Z" }
+                });
+            }
+
+            expect(stub.node.groups.get("").featureNames).toEqual(["temp", "pressure"]);
+            expect(last.out1.skippedValues).toEqual(["timestamp"]);
+            expect(last.out1.sensorNames).toEqual(["temp", "pressure"]);
+            expect(stub.warnings).toEqual([
+                'Ignoring non-numeric field(s) "timestamp" (text or timestamp, not a sensor value)'
+            ]);
+        });
+
+        it("rejects text with a numeric prefix in object payloads", function () {
+            const stub = build({ windowSize: 20 });
+            feed(stub, { payload: { a: "123abc", b: 1, c: "2" } });
+
+            expect(stub.node.groups.get("").featureNames).toEqual(["b", "c"]);
+        });
+    });
+
+    describe("warm-up", function () {
+        it("emits a warm-up result instead of forwarding the raw message", function () {
+            const stub = build({ windowSize: 20, method: "combined" });
+
+            const res = feed(stub, { payload: { a: 1, b: 2 }, topic: "t", deviceId: "d1" });
+
+            expect(res.out2).toBeUndefined();
+            expect(res.out1.isAnomaly).toBe(false);
+            expect(res.out1.severity).toBe("warmup");
+            expect(res.out1.bufferSize).toBe(1);
+            expect(res.out1.minRequired).toBe(10);
+            expect(res.out1.method).toBe("pca-combined");
+            expect(res.out1.sensorNames).toEqual(["a", "b"]);
+            expect(res.out1.payload).toEqual({ a: 1, b: 2 });
+            expect(res.out1.topic).toBe("t");
+            expect(res.out1.deviceId).toBe("d1");
+            expect(typeof res.out1.timestamp).toBe("number");
+            expect(res.out1.pca).toBeUndefined();
+        });
+
+        it("uses the output topic and group on the warm-up message", function () {
+            const stub = build({ windowSize: 20, outputTopic: "alarms", groupBy: "topic" });
+            const res = feed(stub, { payload: [1, 2], topic: "pump-01" });
+
+            expect(res.out1.topic).toBe("alarms");
+            expect(res.out1.group).toBe("pump-01");
         });
     });
 

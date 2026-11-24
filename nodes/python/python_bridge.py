@@ -79,13 +79,39 @@ def send_response(msg_id, success, result=None, error=None):
 
 
 def load_keras_model(model_path):
-    """Load a Keras model (.keras, .h5)."""
+    """Load a Keras model (.keras, .h5).
+
+    Passes safe_mode=True where the installed Keras accepts it (tf.keras >=
+    2.13, Keras 3): it refuses to deserialise Python lambdas embedded in a
+    Lambda layer. Known limit: the legacy HDF5 (.h5) loader of some Keras
+    versions does not consult safe_mode at all, which is why the Node side
+    never picks a downloaded .h5 for the "auto" model type - the operator has
+    to choose Keras explicitly.
+    """
     try:
         from tensorflow import keras
     except ImportError:
         import keras
-    
-    return keras.models.load_model(model_path), "keras"
+
+    load_model = keras.models.load_model
+
+    try:
+        import inspect
+        accepts_safe_mode = "safe_mode" in inspect.signature(load_model).parameters
+    except (TypeError, ValueError):
+        # Not introspectable (C-implemented / exotic wrapper): try, fall back.
+        accepts_safe_mode = True
+
+    if accepts_safe_mode:
+        try:
+            return load_model(model_path, safe_mode=True), "keras"
+        except TypeError as e:
+            # Only an unknown-keyword error means "this Keras has no
+            # safe_mode"; any other TypeError is the model's and propagates.
+            if "safe_mode" not in str(e):
+                raise
+
+    return load_model(model_path), "keras"
 
 
 def load_sklearn_model(model_path):

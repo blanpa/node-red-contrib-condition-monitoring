@@ -111,7 +111,8 @@ describe("multi-value-processor Node", function () {
                 normalCount++;
                 if (normalCount < 10) return;
                 try {
-                    // 10th identical sample: flat baseline, nothing to flag
+                    // Samples 1-9 are warm-up (window of 10: scoring starts with
+                    // the 10th). 10th identical sample: flat baseline, nothing to flag
                     expect(msg.method).toBe("multi-zscore");
                     expect(msg.hasAnomaly).toBe(false);
                     expect(msg.anomalyCount).toBe(0);
@@ -126,15 +127,17 @@ describe("multi-value-processor Node", function () {
 
             n3.on("input", function (msg) {
                 try {
-                    // 11th sample, window of 10: nine 25s and one 40.
-                    // mean 26.5, sigma 4.5 -> z = 3; pressure unchanged.
+                    // 11th sample, window of 10: 40 is scored against the ten
+                    // 25s before it — a flat baseline, so any departure is a
+                    // large (finite) deviation; pressure unchanged.
                     expect(normalCount).toBe(10);
                     expect(msg.hasAnomaly).toBe(true);
                     expect(msg.anomalyCount).toBe(1);
                     expect(msg.payload[0].valueName).toBe("temp");
-                    expect(msg.payload[0].mean).toBeCloseTo(26.5, 10);
-                    expect(msg.payload[0].stdDev).toBeCloseTo(4.5, 10);
-                    expect(msg.payload[0].zScore).toBeCloseTo(3, 10);
+                    expect(msg.payload[0].mean).toBe(25);
+                    expect(msg.payload[0].stdDev).toBe(0);
+                    expect(msg.payload[0].zScore).toBeGreaterThan(3);
+                    expect(Number.isFinite(msg.payload[0].zScore)).toBe(true);
                     expect(msg.payload[0].isAnomaly).toBe(true);
                     expect(msg.payload[1].isAnomaly).toBe(false);
                     expect(msg.payload[1].zScore).toBe(0);

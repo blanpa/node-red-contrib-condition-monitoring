@@ -4,6 +4,7 @@ module.exports = function (RED) {
     const fs = require("fs");
     const path = require("path");
     const os = require("os");
+    const crypto = require("crypto");
 
     // Import persistent Python bridge
     const { getGlobalBridge, shutdownGlobalBridge } = require("./python-bridge-manager");
@@ -21,23 +22,26 @@ module.exports = function (RED) {
     // Model storage directory
     const MODELS_DIR = path.join(RED.settings.userDir || os.homedir(), "ml-models");
 
+    // Models shipped inside this package (catalog "bundled" entries). They are
+    // read-only assets: nothing is ever written next to them.
+    const BUNDLED_MODELS_DIR = path.join(__dirname, "models");
+
     // Allowlisted base directories for `loadXxxModel(modelPath)` calls.
     //
-    // Defaults to the model dir, the Node-RED user dir and CWD. Operators can
-    // extend the list via `settings.js`:
+    // The model store, the bundled models, and whatever `settings.js` adds:
     //
     //     conditionMonitoring: { allowedModelPaths: [ '/srv/models', '/data/models' ] }
     //
-    // Anything outside this allowlist (including `..` traversal and symlinks
-    // pointing outside) is refused with EPATHFORBIDDEN.
+    // Deliberately NOT the Node-RED user dir or the process cwd (both were on
+    // the list before 0.4.1): the user dir holds flows_cred.json and
+    // settings.js, and a cwd of "/" — systemd's default WorkingDirectory, some
+    // container images — would allowlist the whole filesystem. Anything outside
+    // this allowlist (including `..` traversal and symlinks pointing outside)
+    // is refused with EPATHFORBIDDEN.
     function getModelPathAllowlist() {
         const cmCfg = (RED.settings && RED.settings.conditionMonitoring) || {};
         const extra = Array.isArray(cmCfg.allowedModelPaths) ? cmCfg.allowedModelPaths : [];
-        const bases = [MODELS_DIR];
-        if (RED.settings && RED.settings.userDir) bases.push(RED.settings.userDir);
-        bases.push(process.cwd());
-        // models bundled with this package (catalog "bundled" entries)
-        bases.push(path.join(__dirname, "models"));
+        const bases = [MODELS_DIR, BUNDLED_MODELS_DIR];
         for (const e of extra) {
             if (typeof e === "string" && e.length > 0) bases.push(e);
         }
@@ -50,16 +54,29 @@ module.exports = function (RED) {
      * Use only for *local* paths — URLs are filtered out by callers before
      * they reach this helper.
      *
+     * A relative path names a model in the store (the editor's model list
+     * hands out file names, not server paths) or a bundled model ("models/
+     * <file>" from the catalog), and falls back to the cwd. The probe only
+     * picks the base to resolve against; the allowlist check applies to the
+     * result either way, so it cannot widen what is reachable.
+     *
      * @param {string} modelPath
      * @returns {string} resolved absolute path
      * @throws {Error} EPATHFORBIDDEN when the path escapes the allowlist
      */
     function resolveLocalModelPath(modelPath) {
-        return assertPath(modelPath, {
+        const options = {
             allowedBases: getModelPathAllowlist(),
             base: process.cwd(),
             followSymlinks: true
-        });
+        };
+        if (typeof modelPath === "string" && modelPath.length > 0 && !path.isAbsolute(modelPath)) {
+            for (const base of [MODELS_DIR, __dirname]) {
+                const candidate = path.join(base, modelPath);
+                if (fs.existsSync(candidate)) return assertPath(candidate, options);
+            }
+        }
+        return assertPath(modelPath, options);
     }
 
     // Global Python bridge instance (shared across all ml-inference nodes)
@@ -272,40 +289,93 @@ module.exports = function (RED) {
     RED.events.on("flows:stopped", RED._pythonBridgeShutdownHandler);
 
     // Model Metadata Management
+    //
+    // Metadata lives in the model store, `<MODELS_DIR>/.meta/<sha1 of the
+    // model's absolute path>.json` — never next to the model. A model may sit
+    // in a read-only or version-controlled directory (the bundled models, an
+    // operator's /srv/models checkout, this repo's own test fixtures), and the
+    // sidecar earlier versions wrote there dirtied it on every load. Those
+    // legacy sidecars (`<model>_metadata.json` beside the model) are still
+    // read as a fallback, so nothing already recorded is lost.
+    const METADATA_DIR = path.join(MODELS_DIR, ".meta");
+
+    function metadataKey(modelPath) {
+        let abs = path.resolve(modelPath);
+        try {
+            // Same key whether the caller hands in the lexical or the real path.
+            abs = fs.realpathSync(abs);
+        } catch (err) {
+            // Not there (yet): the lexical form is the key.
+        }
+        return crypto.createHash("sha1").update(abs).digest("hex");
+    }
+
     function getModelMetadataPath(modelPath) {
+        return path.join(METADATA_DIR, metadataKey(modelPath) + ".json");
+    }
+
+    /** Where versions before 0.4.1 wrote the sidecar: next to the model. */
+    function legacyMetadataPath(modelPath) {
         const dir = path.dirname(modelPath);
         const basename = path.basename(modelPath, path.extname(modelPath));
         return path.join(dir, basename + "_metadata.json");
     }
 
-    function loadModelMetadata(modelPath) {
+    function readJsonFile(filePath) {
         try {
-            const metadataPath = getModelMetadataPath(modelPath);
-            if (fs.existsSync(metadataPath)) {
-                const metadataContent = fs.readFileSync(metadataPath, "utf8");
-                return JSON.parse(metadataContent);
+            if (fs.existsSync(filePath)) {
+                return JSON.parse(fs.readFileSync(filePath, "utf8"));
             }
         } catch (err) {
-            // Ignore errors, return null if metadata doesn't exist
+            // Unreadable or not JSON: treated as absent.
         }
         return null;
     }
 
-    // Models shipped inside this package. They are read-only assets: writing a
-    // metadata sidecar next to them dirties the install (and the git checkout).
-    const BUNDLED_MODELS_DIR = path.join(__dirname, "models");
+    function loadModelMetadata(modelPath) {
+        return readJsonFile(getModelMetadataPath(modelPath)) || readJsonFile(legacyMetadataPath(modelPath));
+    }
+
+    /** Key-order independent JSON form, without `lastLoaded` (it changes on every load). */
+    function comparableMetadata(metadata) {
+        const canonical = function (value) {
+            if (Array.isArray(value)) return value.map(canonical);
+            if (value && typeof value === "object") {
+                const out = {};
+                for (const key of Object.keys(value).sort()) {
+                    if (key !== "lastLoaded") out[key] = canonical(value[key]);
+                }
+                return out;
+            }
+            return value;
+        };
+        return JSON.stringify(canonical(metadata));
+    }
 
     function saveModelMetadata(modelPath, metadata) {
         try {
             const metadataPath = getModelMetadataPath(modelPath);
-            if (path.resolve(path.dirname(metadataPath)) === BUNDLED_MODELS_DIR) {
-                return false;
+            const current = readJsonFile(metadataPath);
+            // Only the timestamp moved: nothing worth a write on every load.
+            if (current && comparableMetadata(current) === comparableMetadata(metadata)) {
+                return true;
             }
-            const metadataContent = JSON.stringify(metadata, null, 2);
-            fs.writeFileSync(metadataPath, metadataContent, "utf8");
+            fs.mkdirSync(METADATA_DIR, { recursive: true });
+            fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
             return true;
         } catch (err) {
             return false;
+        }
+    }
+
+    /** Remove a model's metadata: the store entry and, if present, a legacy sidecar. */
+    function deleteModelMetadata(modelPath) {
+        for (const filePath of [getModelMetadataPath(modelPath), legacyMetadataPath(modelPath)]) {
+            try {
+                if (filePath !== modelPath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            } catch (err) {
+                // Best effort: an orphaned metadata file is harmless.
+            }
         }
     }
 
@@ -366,9 +436,29 @@ module.exports = function (RED) {
         this.preprocessMode = config.preprocessMode || "array"; // array, object, flatten
         this.warmup = config.warmup !== false;
 
+        // Tokens and API keys are Node-RED credentials (encrypted in
+        // flows_cred.json, kept out of flow exports). Flows saved before the
+        // fields became credentials still carry them as plain config: those
+        // keep working, but say so — re-entering the value in the editor moves
+        // it over. Same pattern as llm-analyzer's apiKey.
+        function secret(name) {
+            const fromCredentials =
+                node.credentials && typeof node.credentials[name] === "string" ? node.credentials[name].trim() : "";
+            const inline = typeof config[name] === "string" ? config[name].trim() : "";
+            if (inline && !fromCredentials) {
+                node.warn(
+                    "ml-inference: " +
+                        name +
+                        " is set in the node config, which stores it in plain text in flows.json and in " +
+                        "every flow export. Re-enter it in the editor to move it to the node's credentials."
+                );
+            }
+            return fromCredentials || inline;
+        }
+
         // URL Authentication (for Phase 1)
         this.urlAuthType = config.urlAuthType || ""; // bearer, basic, none
-        this.urlAuthToken = config.urlAuthToken || ""; // Bearer token or Basic auth credentials
+        this.urlAuthToken = secret("urlAuthToken"); // Bearer token or Basic auth credentials
 
         // Optional integrity check: lower-case hex SHA-256 of the downloaded artifact.
         // When set, downloads with a different digest are rejected and unlinked.
@@ -381,19 +471,19 @@ module.exports = function (RED) {
         // Hugging Face Hub (Phase 2)
         this.hfModelId = config.hfModelId || ""; // e.g., "microsoft/DialoGPT-medium"
         this.hfRevision = config.hfRevision || "main"; // branch, tag, or commit hash
-        this.hfToken = config.hfToken || ""; // Optional HF token
+        this.hfToken = secret("hfToken"); // Optional HF token
 
         // MLflow Registry (Phase 3)
         this.mlflowRegistryUri = config.mlflowRegistryUri || ""; // e.g., "http://mlflow-server:5000"
         this.mlflowModelName = config.mlflowModelName || "";
         this.mlflowVersion = config.mlflowVersion || "latest"; // version number or "latest"
         this.mlflowStage = config.mlflowStage || "production"; // staging, production, archived
-        this.mlflowAuthToken = config.mlflowAuthToken || ""; // Optional MLflow token
+        this.mlflowAuthToken = secret("mlflowAuthToken"); // Optional MLflow token
 
         // Custom Registry (Phase 4)
         this.customRegistryUrl = config.customRegistryUrl || "";
         this.customModelId = config.customModelId || "";
-        this.customApiKey = config.customApiKey || "";
+        this.customApiKey = secret("customApiKey");
 
         // Auto-Update & Lifecycle (Phase 5)
         this.autoUpdate = config.autoUpdate || false;
@@ -487,6 +577,22 @@ module.exports = function (RED) {
 
             // Filter out invalid entries
             return parts.filter((n) => n > 0);
+        }
+
+        // Like parseShape, but keeps dynamic dimensions ("-1", "N", "?", "batch")
+        // as -1 instead of folding them to 1, so the ONNX path can tell "the
+        // batch is open" from "the operator typed 1".
+        function parseShapeSpec(shapeStr) {
+            if (!shapeStr || shapeStr.trim() === "") return null;
+            let cleaned = shapeStr.trim();
+            if (cleaned.startsWith("[") && cleaned.endsWith("]")) {
+                cleaned = cleaned.slice(1, -1);
+            }
+            if (cleaned === "") return null;
+            return cleaned.split(",").map((s) => {
+                const n = parseInt(s.trim().replace(/[[\]]/g, ""), 10);
+                return Number.isNaN(n) || n <= 0 ? -1 : n;
+            });
         }
 
         // Detect model type from path
@@ -1228,8 +1334,14 @@ module.exports = function (RED) {
                 }
                 return n;
             };
+            // Buffers and typed arrays carry a `.values()` METHOD, which the
+            // property probe below would otherwise pick up as the data.
+            const isTypedArray = (v) => ArrayBuffer.isView(v) && !(v instanceof DataView);
             let inputArray;
 
+            if (isTypedArray(data)) {
+                data = Array.from(data);
+            }
             if (Array.isArray(data)) {
                 inputArray = data.flat(Infinity).map(toNumber);
             } else if (typeof data === "object" && data !== null) {
@@ -1237,8 +1349,12 @@ module.exports = function (RED) {
                     // Extract values from object
                     inputArray = Object.values(data).map(toNumber);
                 } else {
-                    // Try to get array from common properties
-                    inputArray = data.features || data.values || data.input || Object.values(data);
+                    // Try to get array from common properties — only when they
+                    // actually hold an array, else every value of the object.
+                    const named = [data.features, data.values, data.input].find(
+                        (v) => Array.isArray(v) || isTypedArray(v)
+                    );
+                    inputArray = named ? Array.from(named) : Object.values(data);
                     inputArray = inputArray.flat(Infinity).map(toNumber);
                 }
             } else if (typeof data === "number") {
@@ -1282,10 +1398,74 @@ module.exports = function (RED) {
             }
         }
 
+        // Tensor element types ONNX Runtime builds from a plain number array.
+        // The 64-bit ones go through BigInt, which rejects fractions — hence
+        // the truncation below for every integer type.
+        const ORT_INTEGER_TYPES = new Set([
+            "int64",
+            "uint64",
+            "int32",
+            "uint32",
+            "int16",
+            "uint16",
+            "int8",
+            "uint8",
+            "bool"
+        ]);
+        const ORT_FLOAT_TYPES = new Set(["float32", "float64"]);
+
+        /** Element type of `inputName` from the session's metadata; float32 when unknown. */
+        function onnxInputType(session, inputName) {
+            const meta = Array.isArray(session.inputMetadata)
+                ? session.inputMetadata.find((m) => m && m.name === inputName)
+                : null;
+            const type = meta && meta.isTensor !== false && typeof meta.type === "string" ? meta.type : "float32";
+            return ORT_INTEGER_TYPES.has(type) || ORT_FLOAT_TYPES.has(type) ? type : "float32";
+        }
+
+        /**
+         * Tensor shape for `length` values under the configured input shape.
+         *
+         * No shape: [1, N]. One open dimension (-1): it takes whatever N leaves
+         * after the fixed ones. All dimensions fixed and the product is not N:
+         * that is a misconfigured node or a malformed input, and running the
+         * model on a silently reshaped [1, N] tensor would produce garbage
+         * under a green status — so it is an error instead.
+         */
+        function onnxInputShape(length) {
+            const spec = parseShapeSpec(node.inputShape);
+            if (!spec || spec.length === 0) return [1, length];
+
+            const shape = spec.length === 1 ? [1, spec[0]] : spec.slice();
+            const dynamic = shape.filter((d) => d < 0).length;
+            const fixed = shape.filter((d) => d > 0).reduce((a, b) => a * b, 1);
+
+            if (dynamic === 0) {
+                if (fixed !== length) {
+                    throw new Error(
+                        "Input shape [" +
+                            shape.join(",") +
+                            "] expects " +
+                            fixed +
+                            " values, got " +
+                            length +
+                            ". Fix the node's Input Shape (use -1 for a dynamic dimension) or the input."
+                    );
+                }
+                return shape;
+            }
+            if (dynamic === 1 && length % fixed === 0) {
+                shape[shape.indexOf(-1)] = length / fixed;
+                return shape;
+            }
+            node.warn(
+                "Shape mismatch: [" + shape.join(",") + "] cannot hold " + length + " values. Using [1," + length + "]."
+            );
+            return [1, length];
+        }
+
         // Run ONNX inference
         async function runONNXInference(inputData, model, inputNames, outputNames) {
-            const onnxruntime = loadONNXRuntime();
-
             // Ensure inputData is an array
             let dataArray = inputData;
             if (!Array.isArray(dataArray)) {
@@ -1295,34 +1475,16 @@ module.exports = function (RED) {
             // Flatten nested arrays
             const flatData = dataArray.flat(Infinity);
 
-            // Determine shape
-            let shape = parseShape(node.inputShape);
-
-            if (!shape || shape.length === 0) {
-                // Default: batch of 1 with input length
-                shape = [1, flatData.length];
-            } else if (shape.length === 1) {
-                // Single dimension: add batch dimension
-                shape = [1, shape[0]];
-            }
-
-            // Ensure shape matches data length
-            const expectedLength = shape.reduce((a, b) => a * b, 1);
-            if (flatData.length !== expectedLength) {
-                // Adjust shape to match data
-                if (shape.length === 2 && shape[0] === 1) {
-                    shape = [1, flatData.length];
-                } else {
-                    node.warn(
-                        `Shape mismatch: expected ${expectedLength} values, got ${flatData.length}. Adjusting shape.`
-                    );
-                    shape = [1, flatData.length];
-                }
-            }
+            // Shape first: a mismatch is reported the same way whether or not
+            // the runtime is installed.
+            const shape = onnxInputShape(flatData.length);
+            const onnxruntime = loadONNXRuntime();
 
             // Create input tensor
             const inputName = inputNames[0] || "input";
-            const inputTensor = new onnxruntime.Tensor("float32", flatData, shape);
+            const dtype = onnxInputType(model, inputName);
+            const values = ORT_INTEGER_TYPES.has(dtype) ? flatData.map((v) => Math.trunc(v)) : flatData;
+            const inputTensor = new onnxruntime.Tensor(dtype, values, shape);
 
             const feeds = {};
             feeds[inputName] = inputTensor;
@@ -1339,6 +1501,95 @@ module.exports = function (RED) {
 
             // Convert to array
             return Array.from(outputTensor.data);
+        }
+
+        /**
+         * Mean / min / max / std of the numbers in `values` (nested arrays are
+         * flattened), or null when there are none. Plain loops on purpose:
+         * `Math.max(...flat)` overflows the argument list at ~150k elements —
+         * one 3×224×224 image — and took the prediction down with it.
+         */
+        function numericStats(values) {
+            const flat = Array.isArray(values) ? values.flat(Infinity) : [values];
+            let count = 0;
+            let sum = 0;
+            let min = Infinity;
+            let max = -Infinity;
+            for (const v of flat) {
+                if (typeof v !== "number") continue;
+                count++;
+                sum += v;
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+            if (count === 0) return null;
+            const mean = sum / count;
+            let squares = 0;
+            for (const v of flat) {
+                if (typeof v === "number") squares += (v - mean) * (v - mean);
+            }
+            return { mean: mean, min: min, max: max, std: Math.sqrt(squares / count) };
+        }
+
+        /** The MLflow metrics for one inference, as enabled in the node config. */
+        function collectMlflowMetrics(prediction, preparedInput, inferenceTime) {
+            const metrics = {};
+
+            if (node.mlflowLogInferenceTime) {
+                metrics["inference_time_ms"] = inferenceTime;
+            }
+
+            if (node.mlflowLogPredictions && prediction !== null && prediction !== undefined) {
+                if (typeof prediction === "number") {
+                    metrics["prediction_value"] = prediction;
+                } else if (Array.isArray(prediction)) {
+                    const stats = numericStats(prediction);
+                    if (stats) {
+                        metrics["prediction_mean"] = stats.mean;
+                        metrics["prediction_max"] = stats.max;
+                        metrics["prediction_min"] = stats.min;
+                    }
+                } else if (typeof prediction === "object" && prediction.score !== undefined) {
+                    metrics["prediction_score"] = prediction.score;
+                }
+            }
+
+            if (node.mlflowLogInputStats && preparedInput) {
+                const stats = numericStats(preparedInput);
+                if (stats) {
+                    metrics["input_mean"] = stats.mean;
+                    metrics["input_max"] = stats.max;
+                    metrics["input_min"] = stats.min;
+                    metrics["input_std"] = stats.std;
+                }
+            }
+
+            // Anomaly flag, when the prediction indicates one
+            if (node.mlflowLogAnomalies) {
+                let isAnomaly = false;
+                let anomalyScore = 0;
+
+                if (typeof prediction === "number") {
+                    // Threshold-based: assume > 0.5 is anomaly
+                    isAnomaly = prediction > 0.5;
+                    anomalyScore = prediction;
+                } else if (Array.isArray(prediction) && prediction.length >= 2) {
+                    // Classification: [normal_prob, anomaly_prob]
+                    const flatPred = prediction.flat(Infinity);
+                    if (flatPred.length >= 2) {
+                        isAnomaly = flatPred[1] > flatPred[0];
+                        anomalyScore = flatPred[1];
+                    }
+                } else if (prediction && typeof prediction === "object") {
+                    isAnomaly = prediction.isAnomaly || prediction.anomaly || false;
+                    anomalyScore = prediction.score || prediction.anomalyScore || 0;
+                }
+
+                metrics["is_anomaly"] = isAnomaly ? 1 : 0;
+                metrics["anomaly_score"] = anomalyScore;
+            }
+
+            return metrics;
         }
 
         // Process messages
@@ -1452,79 +1703,6 @@ module.exports = function (RED) {
 
                 const inferenceTime = Date.now() - startTime;
 
-                // ========================================
-                // MLflow Tracking - Log Performance Metrics
-                // ========================================
-                if (node.mlflowTracker && node.mlflowTrackingEnabled) {
-                    const metrics = {};
-
-                    // Always log inference time if enabled
-                    if (node.mlflowLogInferenceTime) {
-                        metrics["inference_time_ms"] = inferenceTime;
-                    }
-
-                    // Log prediction statistics if enabled
-                    if (node.mlflowLogPredictions && prediction !== null) {
-                        if (typeof prediction === "number") {
-                            metrics["prediction_value"] = prediction;
-                        } else if (Array.isArray(prediction)) {
-                            // For array predictions, log statistics
-                            const flatPred = prediction.flat(Infinity).filter((v) => typeof v === "number");
-                            if (flatPred.length > 0) {
-                                metrics["prediction_mean"] = flatPred.reduce((a, b) => a + b, 0) / flatPred.length;
-                                metrics["prediction_max"] = Math.max(...flatPred);
-                                metrics["prediction_min"] = Math.min(...flatPred);
-                            }
-                        } else if (typeof prediction === "object" && prediction.score !== undefined) {
-                            metrics["prediction_score"] = prediction.score;
-                        }
-                    }
-
-                    // Log input statistics if enabled
-                    if (node.mlflowLogInputStats && preparedInput) {
-                        const flatInput = preparedInput.flat(Infinity).filter((v) => typeof v === "number");
-                        if (flatInput.length > 0) {
-                            metrics["input_mean"] = flatInput.reduce((a, b) => a + b, 0) / flatInput.length;
-                            metrics["input_max"] = Math.max(...flatInput);
-                            metrics["input_min"] = Math.min(...flatInput);
-                            metrics["input_std"] = Math.sqrt(
-                                flatInput.reduce((sum, val) => sum + Math.pow(val - metrics["input_mean"], 2), 0) /
-                                    flatInput.length
-                            );
-                        }
-                    }
-
-                    // Log anomaly detection if enabled and prediction indicates anomaly
-                    if (node.mlflowLogAnomalies) {
-                        let isAnomaly = false;
-                        let anomalyScore = 0;
-
-                        if (typeof prediction === "number") {
-                            // Threshold-based: assume > 0.5 is anomaly
-                            isAnomaly = prediction > 0.5;
-                            anomalyScore = prediction;
-                        } else if (Array.isArray(prediction) && prediction.length >= 2) {
-                            // Classification: [normal_prob, anomaly_prob]
-                            const flatPred = prediction.flat(Infinity);
-                            if (flatPred.length >= 2) {
-                                isAnomaly = flatPred[1] > flatPred[0];
-                                anomalyScore = flatPred[1];
-                            }
-                        } else if (typeof prediction === "object") {
-                            isAnomaly = prediction.isAnomaly || prediction.anomaly || false;
-                            anomalyScore = prediction.score || prediction.anomalyScore || 0;
-                        }
-
-                        metrics["is_anomaly"] = isAnomaly ? 1 : 0;
-                        metrics["anomaly_score"] = anomalyScore;
-                    }
-
-                    // Log all collected metrics
-                    if (Object.keys(metrics).length > 0) {
-                        node.mlflowTracker.logMetrics(metrics);
-                    }
-                }
-
                 // Build output message (deep clone: nested outputProperty writes must not mutate the original msg)
                 const outputMsg = RED.util.cloneMessage(msg);
 
@@ -1562,6 +1740,19 @@ module.exports = function (RED) {
                 // Update status with inference time
                 node.inferenceCount = (node.inferenceCount || 0) + 1;
                 node.status({ fill: "green", shape: "dot", text: inferenceTime + "ms | #" + node.inferenceCount });
+
+                // MLflow bookkeeping runs after the message is out, on its own:
+                // a failure here is a warning, never a dropped prediction.
+                if (node.mlflowTracker && node.mlflowTrackingEnabled) {
+                    try {
+                        const metrics = collectMlflowMetrics(prediction, preparedInput, inferenceTime);
+                        if (Object.keys(metrics).length > 0) {
+                            node.mlflowTracker.logMetrics(metrics);
+                        }
+                    } catch (trackingErr) {
+                        node.warn("[MLflowTracker] Failed to log metrics: " + trackingErr.message);
+                    }
+                }
             } catch (err) {
                 node.status({ fill: "red", shape: "dot", text: String(err.message).substring(0, 30) });
                 done(err);
@@ -1655,7 +1846,14 @@ module.exports = function (RED) {
         }
     }
 
-    RED.nodes.registerType("ml-inference", MLInferenceNode);
+    RED.nodes.registerType("ml-inference", MLInferenceNode, {
+        credentials: {
+            urlAuthToken: { type: "password" },
+            hfToken: { type: "password" },
+            mlflowAuthToken: { type: "password" },
+            customApiKey: { type: "password" }
+        }
+    });
 
     // The editor-facing HTTP surface lives in its own module — see
     // ml-inference-admin.js. Runtime state it needs is injected; the Python
@@ -1666,7 +1864,7 @@ module.exports = function (RED) {
         nodeDir: __dirname,
         loadModelMetadata: loadModelMetadata,
         saveModelMetadata: saveModelMetadata,
-        mlflowApiRequest: mlflowApiRequest,
+        deleteModelMetadata: deleteModelMetadata,
         loadTensorFlowJS: loadTensorFlowJS,
         loadONNXRuntime: loadONNXRuntime,
         getMaxBridge: getMaxBridge,

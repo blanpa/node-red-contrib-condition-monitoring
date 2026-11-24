@@ -10,8 +10,14 @@ module.exports = function (RED) {
     // Import shared statistics utilities
     const stats = require("./utils/statistics");
     const { clampInt, clampFloat } = require("./utils/config-validator");
+    const { parseSensorValue, parseSensorObject, createSkippedFieldWarner } = require("./utils/sensor-value");
     const groupState = require("./utils/group-state");
     const persistenceHelper = require("./utils/persistence-helper");
+
+    // A z-score / IQR sample is scored against the window as it stood BEFORE
+    // the sample arrived, once that window holds this many values (or is
+    // full, for smaller windows). Same rule as anomaly-detector.
+    const MIN_BASELINE = 10;
 
     // The streaming accumulator loses precision when the spread of a window is
     // tiny next to its level (catastrophic cancellation). Below this ratio of
@@ -34,6 +40,9 @@ module.exports = function (RED) {
 
     // Complete historical samples needed before a Mahalanobis distance is scored.
     const MIN_MAHALANOBIS_SAMPLES = 10;
+
+    // Paired samples needed before a correlation is reported.
+    const MIN_CORRELATION_SAMPLES = 3;
 
     // Import ml-matrix for robust matrix operations (Mahalanobis distance)
     let Matrix = null;
@@ -121,7 +130,10 @@ module.exports = function (RED) {
                 moments: Object.create(null),
                 correlationBuffer1: [],
                 correlationBuffer2: [],
-                mahalanobisBuffer: []
+                mahalanobisBuffer: [],
+                // Streaming mean / covariance of mahalanobisBuffer for one set
+                // of value names (see covarianceFor); null until first used
+                mahalanobisCov: null
             };
         }
 
@@ -153,41 +165,48 @@ module.exports = function (RED) {
         });
 
         // --- Per-value sliding window -----------------------------------------
-        // `dataBuffers[name]` is the authoritative window. `moments[name]` mirrors
-        // it in a RunningStats accumulator so the z-score costs O(1) per sample
-        // instead of a pass over the whole window. Everything that changes a
-        // window goes through pushValue() / resyncMoments() so the two cannot
-        // drift apart.
+        // `dataBuffers[name]` is the authoritative window: a ring buffer of the
+        // last windowSize values (stats.createRingBuffer). `moments[name]`
+        // mirrors it in a RunningStats accumulator so the z-score costs O(1) per
+        // sample instead of a pass over the whole window. Everything that
+        // changes a window goes through pushValue() / resyncMoments() so the two
+        // cannot drift apart.
 
         /** Rebuild the accumulator of one value from its buffer. */
         function resyncMoments(state, valueName) {
             const track = { running: new stats.RunningStats(), removals: 0, peakVariance: 0 };
-            const buffer = state.dataBuffers[valueName] || [];
-            for (let i = 0; i < buffer.length; i++) {
-                track.running.push(buffer[i].value);
+            const buffer = state.dataBuffers[valueName];
+            const n = buffer ? buffer.length : 0;
+            for (let i = 0; i < n; i++) {
+                track.running.push(buffer.get(i));
             }
             track.peakVariance = track.running.variance();
             state.moments[valueName] = track;
             return track;
         }
 
+        /** The window of one value, created on first use. */
+        function windowOf(state, valueName) {
+            if (!state.dataBuffers[valueName]) {
+                state.dataBuffers[valueName] = stats.createRingBuffer(node.windowSize);
+            }
+            return state.dataBuffers[valueName];
+        }
+
         /** Append a sample to a value's window, evicting the oldest once full. */
         function pushValue(state, valueName, value) {
-            if (!state.dataBuffers[valueName]) {
-                state.dataBuffers[valueName] = [];
-            }
-            const buffer = state.dataBuffers[valueName];
+            const buffer = windowOf(state, valueName);
             const track = state.moments[valueName] || resyncMoments(state, valueName);
 
-            buffer.push({ timestamp: Date.now(), value: value });
+            const evicted = buffer.push(value);
             track.running.push(value);
             let variance = track.running.variance();
             if (variance > track.peakVariance) {
                 track.peakVariance = variance;
             }
 
-            if (buffer.length > node.windowSize) {
-                track.running.remove(buffer.shift().value);
+            if (evicted !== undefined) {
+                track.running.remove(evicted);
                 track.removals++;
                 variance = track.running.variance();
                 // The reverse update accumulates rounding error. Rebuilding once
@@ -202,33 +221,52 @@ module.exports = function (RED) {
         }
 
         /**
-         * Z-score of `value` against its window (which already contains it).
-         * Same definition as stats.calculateZScore — population standard
-         * deviation, 0 when the window is flat — read from the accumulator when
-         * the window is well conditioned and computed exactly otherwise.
+         * Deviation of `value` from the window's mean in units of σ. The window
+         * does not contain the sample, so a perfectly flat baseline has σ = 0
+         * and any departure from it is an arbitrarily large deviation, not "no
+         * deviation" (stats.calculateZScore's convention for a flat window the
+         * sample is part of). The floor keeps the result finite; it sits at the
+         * rounding resolution of the level, so a real but tiny spread (0.01 at
+         * a level of 1e9) still yields the true z-score.
+         */
+        function sigmaDeviation(value, mean, stdDev) {
+            const diff = value - mean;
+            if (diff === 0) return 0;
+            const floor = Math.max(Math.abs(mean) * 1e-12, 1e-12);
+            return diff / Math.max(stdDev, floor);
+        }
+
+        /**
+         * Z-score of `value` against its window BEFORE the value is pushed.
+         * Population standard deviation, read from the accumulator when the
+         * window is well conditioned and computed exactly otherwise.
          */
         function windowZScore(state, valueName, value) {
-            const running = state.moments[valueName].running;
-            const mean = running.mean();
-            const stdDev = running.stdDev();
-            if (stdDev > MIN_STREAMING_SPREAD_RATIO * Math.abs(mean)) {
-                return { zScore: (value - mean) / stdDev, mean: mean, stdDev: stdDev };
+            const track = state.moments[valueName] || resyncMoments(state, valueName);
+            let mean = track.running.mean();
+            let stdDev = track.running.stdDev();
+            if (stdDev <= MIN_STREAMING_SPREAD_RATIO * Math.abs(mean)) {
+                const values = state.dataBuffers[valueName].toArray();
+                mean = calculateMean(values);
+                stdDev = calculateStdDev(values, mean);
             }
-            return calculateZScore(
-                value,
-                state.dataBuffers[valueName].map((d) => d.value)
-            );
+            return { zScore: sigmaDeviation(value, mean, stdDev), mean: mean, stdDev: stdDev };
         }
 
         // --- State persistence ---------------------------------------------------
         let persistence = null;
         let persistCounter = 0;
 
+        // Values of a persisted window: plain numbers (current layout) or the
+        // `{timestamp, value}` objects earlier releases stored.
         function finiteSamples(raw) {
             if (!Array.isArray(raw)) return [];
-            return raw.filter(function (d) {
-                return d && typeof d.value === "number" && Number.isFinite(d.value);
+            const values = [];
+            raw.forEach(function (d) {
+                const v = d !== null && typeof d === "object" ? d.value : d;
+                if (typeof v === "number" && Number.isFinite(v)) values.push(v);
             });
+            return values;
         }
 
         function finiteNumbers(raw) {
@@ -239,6 +277,11 @@ module.exports = function (RED) {
             stateKey: "multiValueProcessorState",
             saveInterval: 30000,
             debug: node.debugEnabled,
+            // Blobs written before the manager versioned them (pre-0.4.1) are
+            // accepted as they are: onStateLoaded validates every field itself.
+            migrate: function (state) {
+                return state;
+            },
             onStateLoaded: function (saved) {
                 if (!saved.groups || typeof saved.groups !== "object") {
                     return;
@@ -258,7 +301,10 @@ module.exports = function (RED) {
                     Object.keys(buffers).forEach(function (valueName) {
                         const samples = finiteSamples(buffers[valueName]).slice(-node.windowSize);
                         if (samples.length > 0) {
-                            target.dataBuffers[valueName] = samples;
+                            const buffer = windowOf(target, valueName);
+                            samples.forEach(function (v) {
+                                buffer.push(v);
+                            });
                             resyncMoments(target, valueName);
                             restored += samples.length;
                         }
@@ -274,6 +320,7 @@ module.exports = function (RED) {
                     }
 
                     const history = Array.isArray(entry.mahalanobisBuffer) ? entry.mahalanobisBuffer : [];
+                    target.mahalanobisCov = null; // rebuilt from the buffer on first use
                     target.mahalanobisBuffer = history
                         .filter(function (sample) {
                             return sample && typeof sample === "object";
@@ -311,7 +358,7 @@ module.exports = function (RED) {
                     Object.keys(state.dataBuffers).forEach(function (valueName) {
                         // "__proto__" cannot be a key of the plain object that is stored
                         if (valueName !== "__proto__" && state.dataBuffers[valueName].length > 0) {
-                            dataBuffers[valueName] = state.dataBuffers[valueName];
+                            dataBuffers[valueName] = state.dataBuffers[valueName].toArray();
                             hasData = true;
                         }
                     });
@@ -343,17 +390,15 @@ module.exports = function (RED) {
             return node.groupBy && state.key !== DEFAULT_GROUP ? state.key + ": " + text : text;
         }
 
-        // Parse one incoming value. Numbers pass as they are, numeric strings
-        // are converted; everything else — and NaN / Infinity — is NaN, which
-        // the callers drop instead of letting it poison a whole window.
-        function toFiniteNumber(raw) {
-            if (typeof raw === "number") return Number.isFinite(raw) ? raw : NaN;
-            if (typeof raw === "string") {
-                const parsed = parseFloat(raw);
-                return Number.isFinite(parsed) ? parsed : NaN;
-            }
-            return NaN;
-        }
+        // Values are read with the shared strict parser (utils/sensor-value):
+        // numbers and purely numeric strings count, everything else — text,
+        // "123abc", ISO timestamps, NaN / Infinity, null — is skipped instead
+        // of poisoning a window or being monitored as a sensor.
+        //
+        // A skipped field that earlier releases DID read as a number (a date
+        // string became 2024, "123abc" became 123) is reported once per name,
+        // so the change in what is monitored does not go unnoticed.
+        const warnSkippedFields = createSkippedFieldWarner(node);
 
         // Initial status
         node.status({ fill: "blue", shape: "ring", text: node.mode + " mode" });
@@ -361,7 +406,6 @@ module.exports = function (RED) {
         // Use shared statistics utilities
         const calculateMean = stats.calculateMean;
         const calculateStdDev = stats.calculateStdDev;
-        const calculateZScore = stats.calculateZScore;
         const calculatePearsonCorrelation = stats.calculatePearsonCorrelation;
         const calculateSpearmanCorrelation = stats.calculateSpearmanCorrelation;
 
@@ -676,6 +720,105 @@ module.exports = function (RED) {
             return { means: means, covariance: cov, count: m };
         }
 
+        // --- Streaming covariance for the Mahalanobis path ---------------------
+        // The covariance used to be recomputed from the whole history on every
+        // message (O(n·p²)). `state.mahalanobisCov` keeps a RunningCovariance of
+        // the COMPLETE rows of mahalanobisBuffer for one tuple of value names:
+        // rows join it as they are buffered and leave it as they are evicted,
+        // O(p²) per message. It is rebuilt from the buffer when the names
+        // change, once per window turnover, when a variance collapses, after a
+        // restore (null) and after a reset (the state is gone).
+
+        // The row of `sample` for `valueNames`, or null when a value is missing
+        function rowFor(sample, valueNames) {
+            const row = new Array(valueNames.length);
+            for (let i = 0; i < valueNames.length; i++) {
+                const v = sample[valueNames[i]];
+                if (typeof v !== "number" || !Number.isFinite(v)) return null;
+                row[i] = v;
+            }
+            return row;
+        }
+
+        function notePeakVariances(acc) {
+            for (let i = 0; i < acc.names.length; i++) {
+                const v = acc.running.variance(i);
+                if (v > acc.peakVariances[i]) acc.peakVariances[i] = v;
+            }
+        }
+
+        function varianceCollapsed(acc) {
+            for (let i = 0; i < acc.names.length; i++) {
+                if (acc.running.variance(i) < acc.peakVariances[i] * VARIANCE_COLLAPSE_RATIO) return true;
+            }
+            return false;
+        }
+
+        function rebuildCovariance(state, valueNames) {
+            const acc = {
+                key: valueNames.join("\u0001"),
+                names: valueNames.slice(),
+                running: new stats.RunningCovariance(valueNames.length),
+                removals: 0,
+                peakVariances: new Float64Array(valueNames.length)
+            };
+            state.mahalanobisBuffer.forEach(function (sample) {
+                const row = rowFor(sample, valueNames);
+                if (row) acc.running.push(row);
+            });
+            notePeakVariances(acc);
+            state.mahalanobisCov = acc;
+            return acc;
+        }
+
+        // Mean vector and sample covariance of the complete rows for valueNames;
+        // exact to rounding against calculateCovarianceMatrix on the same buffer.
+        function covarianceFor(state, valueNames) {
+            let acc = state.mahalanobisCov;
+            if (!acc || acc.key !== valueNames.join("\u0001")) {
+                acc = rebuildCovariance(state, valueNames);
+            }
+            const m = acc.running.count();
+            if (m < 2) return null;
+
+            // A spread tiny next to the level cancels catastrophically in the
+            // accumulator: compute exactly then, as the z-score path does.
+            const means = acc.running.means();
+            for (let i = 0; i < valueNames.length; i++) {
+                if (Math.sqrt(acc.running.variance(i)) <= MIN_STREAMING_SPREAD_RATIO * Math.abs(means[i])) {
+                    return calculateCovarianceMatrix(state.mahalanobisBuffer, valueNames);
+                }
+            }
+            return { means: means, covariance: acc.running.covariance(), count: m };
+        }
+
+        /** Append a sample to the Mahalanobis history, evicting the oldest once full. */
+        function pushMahalanobisSample(state, sampleObj) {
+            state.mahalanobisBuffer.push(sampleObj);
+            const acc = state.mahalanobisCov;
+            if (acc) {
+                const row = rowFor(sampleObj, acc.names);
+                if (row) {
+                    acc.running.push(row);
+                    notePeakVariances(acc);
+                }
+            }
+
+            if (state.mahalanobisBuffer.length > node.windowSize) {
+                const evicted = state.mahalanobisBuffer.shift();
+                const row = acc ? rowFor(evicted, acc.names) : null;
+                if (row) {
+                    acc.running.remove(row);
+                    acc.removals++;
+                    // Same bound on the reverse update's rounding error as the
+                    // per-value moments (see pushValue)
+                    if (acc.removals >= node.windowSize || varianceCollapsed(acc)) {
+                        rebuildCovariance(state, acc.names);
+                    }
+                }
+            }
+        }
+
         // Use shared median calculation
         const calculateMedian = stats.calculateMedian;
 
@@ -688,13 +831,10 @@ module.exports = function (RED) {
                 values = msg.payload.filter((v) => typeof v === "number" && Number.isFinite(v));
                 valueNames = msg.valueNames || values.map((v, i) => "value" + i);
             } else if (typeof msg.payload === "object" && msg.payload !== null) {
-                Object.keys(msg.payload).forEach((key) => {
-                    const val = toFiniteNumber(msg.payload[key]);
-                    if (Number.isFinite(val)) {
-                        valueNames.push(key);
-                        values.push(val);
-                    }
-                });
+                const parsed = parseSensorObject(msg.payload);
+                values = parsed.values;
+                valueNames = parsed.names;
+                warnSkippedFields(msg.payload, parsed.skipped);
             } else {
                 node.error("Payload must be an array or object for aggregation", msg);
                 return null;
@@ -801,19 +941,17 @@ module.exports = function (RED) {
             let valueNames = [];
 
             if (Array.isArray(sourceField)) {
+                // Array elements are split out as they are, whatever their type
                 values = sourceField;
                 valueNames = values.map((v, i) => "value" + i);
             } else if (typeof sourceField === "object" && sourceField !== null) {
-                Object.keys(sourceField).forEach((key) => {
-                    const val = sourceField[key];
-                    if (typeof val === "number" || (typeof val === "string" && !isNaN(parseFloat(val)))) {
-                        valueNames.push(key);
-                        values.push(parseFloat(val));
-                    }
-                });
+                const parsed = parseSensorObject(sourceField);
+                values = parsed.values;
+                valueNames = parsed.names;
+                warnSkippedFields(sourceField, parsed.skipped);
             } else {
-                const val = parseFloat(sourceField);
-                if (!isNaN(val)) {
+                const val = parseSensorValue(sourceField);
+                if (val !== null) {
                     values = [val];
                     valueNames = ["value"];
                 }
@@ -825,12 +963,27 @@ module.exports = function (RED) {
             }
 
             if (node.outputMode === "sequential") {
+                // Clone the inbound message ONCE, without the payload that is
+                // replaced anyway, and give every element a shallow copy of that
+                // base. Deep-cloning the whole message per element made a
+                // 5000-element split cost 5000 copies of a 5000-element array.
+                let base = {};
+                if (node.preserveOriginal) {
+                    const rest = Object.assign({}, msg);
+                    delete rest.payload;
+                    base = RED.util.cloneMessage(rest);
+                }
+                if (node.outputTopic) {
+                    base.topic = node.outputTopic;
+                }
+                const total = values.length;
                 values.forEach((value, index) => {
-                    const newMsg = node.preserveOriginal ? RED.util.cloneMessage(msg) : {};
-                    newMsg.payload = value;
-                    newMsg.valueIndex = index;
-                    newMsg.valueName = valueNames[index];
-                    newMsg.totalValues = values.length;
+                    const newMsg = Object.assign({}, base, {
+                        payload: value,
+                        valueIndex: index,
+                        valueName: valueNames[index],
+                        totalValues: total
+                    });
                     send([newMsg, null]);
                 });
                 return null;
@@ -839,45 +992,42 @@ module.exports = function (RED) {
                 outputMsg.payload = values;
                 outputMsg.valueNames = valueNames;
                 outputMsg.valueCount = values.length;
+                if (node.outputTopic) {
+                    outputMsg.topic = node.outputTopic;
+                }
                 return { normal: outputMsg, anomaly: null };
             }
         }
 
         // Analyze mode
         function processAnalyze(msg, state) {
-            const values = [];
-            const valueNames = [];
-            const skippedValues = [];
+            let values = [];
+            let valueNames = [];
+            let skippedValues = [];
 
-            // Non-finite entries (NaN, Infinity, null, text) are left out and
-            // reported in msg.skippedValues. One NaN in a buffer would otherwise
-            // turn every statistic of that buffer into NaN for a whole window.
-            const collect = function (name, raw) {
-                const val = toFiniteNumber(raw);
-                if (Number.isFinite(val)) {
-                    valueNames.push(name);
-                    values.push(val);
-                } else {
-                    skippedValues.push(name);
-                }
-            };
-
+            // Entries that are not sensor values (NaN, Infinity, null, text,
+            // timestamps) are left out and reported in msg.skippedValues. One
+            // NaN in a buffer would otherwise turn every statistic of that
+            // buffer into NaN for a whole window.
             if (Array.isArray(msg.payload)) {
                 const givenNames = Array.isArray(msg.valueNames) ? msg.valueNames : [];
                 msg.payload.forEach((raw, i) => {
-                    collect(
-                        typeof givenNames[i] === "string" && givenNames[i] !== "" ? givenNames[i] : "value" + i,
-                        raw
-                    );
-                });
-            } else if (typeof msg.payload === "object" && msg.payload !== null) {
-                Object.keys(msg.payload).forEach((key) => {
-                    const raw = msg.payload[key];
-                    // Non-numeric fields of an object are metadata, not bad readings
-                    if (typeof raw === "number" || (typeof raw === "string" && !isNaN(parseFloat(raw)))) {
-                        collect(key, raw);
+                    const name =
+                        typeof givenNames[i] === "string" && givenNames[i] !== "" ? givenNames[i] : "value" + i;
+                    const val = parseSensorValue(raw);
+                    if (val === null) {
+                        skippedValues.push(name);
+                    } else {
+                        valueNames.push(name);
+                        values.push(val);
                     }
                 });
+            } else if (typeof msg.payload === "object" && msg.payload !== null) {
+                const parsed = parseSensorObject(msg.payload);
+                values = parsed.values;
+                valueNames = parsed.names;
+                skippedValues = parsed.skipped;
+                warnSkippedFields(msg.payload, skippedValues);
             } else {
                 node.error("Payload must be an array or object", msg);
                 return null;
@@ -891,10 +1041,23 @@ module.exports = function (RED) {
             const results = [];
             let hasAnomaly = false;
 
+            // z-score / IQR score a sample against the window as it stood BEFORE
+            // the sample joined it. A sample that is part of its own baseline
+            // inflates the spread, which caps |z| at sqrt(n − 1): with a short
+            // window an outlier could never reach the threshold. The first sample
+            // scored is the one that completes a baseline of
+            // min(windowSize, MIN_BASELINE) values; until then samples are
+            // buffered unscored and reported as warm-up. IQR needs 4 values, the
+            // z-score 2, in any case.
+            const minRequired = Math.max(
+                node.anomalyMethod === "iqr" ? 4 : 2,
+                Math.min(node.windowSize, MIN_BASELINE) - 1
+            );
+
             values.forEach((value, index) => {
                 const valueName = valueNames[index];
-
-                const buffer = pushValue(state, valueName, value);
+                const buffer = state.dataBuffers[valueName];
+                const history = buffer ? buffer.length : 0;
 
                 let isAnomaly = false;
                 const analysis = {
@@ -913,17 +1076,19 @@ module.exports = function (RED) {
                         isAnomaly = true;
                         analysis.reason = analysis.reason ? analysis.reason + " and above maximum" : "Above maximum";
                     }
-                } else if (node.anomalyMethod === "zscore") {
-                    if (buffer.length >= 2) {
+                } else if (node.anomalyMethod === "zscore" || node.anomalyMethod === "iqr") {
+                    if (history < minRequired) {
+                        analysis.severity = "warmup";
+                        analysis.bufferSize = history;
+                        analysis.minRequired = minRequired;
+                    } else if (node.anomalyMethod === "zscore") {
                         const zResult = windowZScore(state, valueName, value);
                         analysis.zScore = zResult.zScore;
                         analysis.mean = zResult.mean;
                         analysis.stdDev = zResult.stdDev;
                         isAnomaly = Math.abs(zResult.zScore) > node.threshold;
-                    }
-                } else if (node.anomalyMethod === "iqr") {
-                    if (buffer.length >= 4) {
-                        const iqr = calculateIQR(buffer.map((d) => d.value));
+                    } else {
+                        const iqr = calculateIQR(buffer.toArray());
                         const lowerBound = iqr.q1 - 1.5 * iqr.iqr;
                         const upperBound = iqr.q3 + 1.5 * iqr.iqr;
                         analysis.q1 = iqr.q1;
@@ -938,6 +1103,9 @@ module.exports = function (RED) {
                     analysis.mahalanobisDeferred = true; // Will be calculated below
                 }
 
+                // Scored: now the sample joins the window
+                pushValue(state, valueName, value);
+
                 analysis.isAnomaly = isAnomaly;
                 if (isAnomaly) hasAnomaly = true;
                 results.push(analysis);
@@ -950,9 +1118,7 @@ module.exports = function (RED) {
                 // than (n-1)/sqrt(n) from the mean, however extreme it is — with a
                 // short window that bound sits below the alarm limit.
                 const covResult =
-                    state.mahalanobisBuffer.length >= MIN_MAHALANOBIS_SAMPLES
-                        ? calculateCovarianceMatrix(state.mahalanobisBuffer, valueNames)
-                        : null;
+                    state.mahalanobisBuffer.length >= MIN_MAHALANOBIS_SAMPLES ? covarianceFor(state, valueNames) : null;
 
                 // Limits for the squared distance of a new sample against a mean
                 // and covariance estimated from `count` samples (scaled F; tends
@@ -966,7 +1132,15 @@ module.exports = function (RED) {
                     ? stats.hotellingLimitFromZ(values.length, covResult.count, node.threshold)
                     : Infinity;
 
-                if (covResult && covResult.count >= MIN_MAHALANOBIS_SAMPLES && Number.isFinite(limitSquared)) {
+                if (!covResult || covResult.count < MIN_MAHALANOBIS_SAMPLES || !Number.isFinite(limitSquared)) {
+                    // Too little complete history for this many sensors: warm-up
+                    const minSamples = Math.max(MIN_MAHALANOBIS_SAMPLES, values.length + 1);
+                    results.forEach(function (r) {
+                        r.severity = "warmup";
+                        r.bufferSize = covResult ? covResult.count : state.mahalanobisBuffer.length;
+                        r.minRequired = minSamples;
+                    });
+                } else {
                     // Calculate Mahalanobis distance for current sample
                     const distance = calculateMahalanobisDistance(values, covResult.means, covResult.covariance);
 
@@ -1011,11 +1185,7 @@ module.exports = function (RED) {
                 values.forEach(function (val, idx) {
                     sampleObj[valueNames[idx]] = val;
                 });
-                state.mahalanobisBuffer.push(sampleObj);
-
-                if (state.mahalanobisBuffer.length > node.windowSize) {
-                    state.mahalanobisBuffer.shift();
-                }
+                pushMahalanobisSample(state, sampleObj);
             }
 
             const outputMsg = RED.util.cloneMessage(msg);
@@ -1026,17 +1196,29 @@ module.exports = function (RED) {
             if (skippedValues.length > 0) {
                 outputMsg.skippedValues = skippedValues;
             }
+            if (node.outputTopic) {
+                outputMsg.topic = node.outputTopic;
+            }
 
-            node.status({
-                fill: hasAnomaly ? "red" : "green",
-                shape: "dot",
-                text: groupText(
-                    state,
-                    hasAnomaly
-                        ? outputMsg.anomalyCount + "/" + results.length + " anomalous"
-                        : results.length + " values ok"
-                )
-            });
+            const warming = results.filter((r) => r.severity === "warmup");
+            if (warming.length === results.length) {
+                node.status({
+                    fill: "yellow",
+                    shape: "ring",
+                    text: groupText(state, "warm-up " + warming[0].bufferSize + "/" + warming[0].minRequired)
+                });
+            } else {
+                node.status({
+                    fill: hasAnomaly ? "red" : "green",
+                    shape: "dot",
+                    text: groupText(
+                        state,
+                        hasAnomaly
+                            ? outputMsg.anomalyCount + "/" + results.length + " anomalous"
+                            : results.length + " values ok"
+                    )
+                });
+            }
 
             return { normal: hasAnomaly ? null : outputMsg, anomaly: hasAnomaly ? outputMsg : null };
         }
@@ -1056,10 +1238,10 @@ module.exports = function (RED) {
                 return null;
             }
 
-            const value1 = toFiniteNumber(msg.payload[node.sensor1]);
-            const value2 = toFiniteNumber(msg.payload[node.sensor2]);
+            const value1 = parseSensorValue(msg.payload[node.sensor1]);
+            const value2 = parseSensorValue(msg.payload[node.sensor2]);
 
-            if (!Number.isFinite(value1) || !Number.isFinite(value2)) {
+            if (value1 === null || value2 === null) {
                 node.warn("Missing or invalid sensor values: " + node.sensor1 + ", " + node.sensor2);
                 return null;
             }
@@ -1072,13 +1254,36 @@ module.exports = function (RED) {
                 state.correlationBuffer2.shift();
             }
 
-            if (state.correlationBuffer1.length < 3) {
+            const bufferSize = state.correlationBuffer1.length;
+            if (bufferSize < MIN_CORRELATION_SAMPLES) {
+                // Warm-up: a result object rather than silence, so a downstream
+                // check of msg.isAnomalous sees every message.
+                const warmupMsg = {
+                    payload: msg.payload,
+                    correlation: null,
+                    isAnomalous: false,
+                    severity: "warmup",
+                    bufferSize: bufferSize,
+                    minRequired: MIN_CORRELATION_SAMPLES,
+                    sensor1: node.sensor1,
+                    sensor2: node.sensor2,
+                    method: node.correlationMethod,
+                    stats: {
+                        sensor1Mean: calculateMean(state.correlationBuffer1),
+                        sensor2Mean: calculateMean(state.correlationBuffer2),
+                        bufferSize: bufferSize
+                    }
+                };
+                if (node.outputTopic) {
+                    warmupMsg.topic = node.outputTopic;
+                }
+                copyPassthrough(warmupMsg, msg);
                 node.status({
                     fill: "yellow",
                     shape: "ring",
-                    text: groupText(state, "Buffering: " + state.correlationBuffer1.length + "/" + node.windowSize)
+                    text: groupText(state, "Buffering: " + bufferSize + "/" + node.windowSize)
                 });
-                return null;
+                return { normal: warmupMsg, anomaly: null };
             }
 
             // Correlation with a series that never moved is undefined (0/0), not
@@ -1102,6 +1307,9 @@ module.exports = function (RED) {
                         bufferSize: state.correlationBuffer1.length
                     }
                 };
+                if (node.outputTopic) {
+                    undefinedMsg.topic = node.outputTopic;
+                }
                 copyPassthrough(undefinedMsg, msg);
                 node.status({ fill: "grey", shape: "ring", text: groupText(state, "ρ undefined (constant input)") });
                 return { normal: undefinedMsg, anomaly: null };
@@ -1154,6 +1362,9 @@ module.exports = function (RED) {
                 };
             }
 
+            if (node.outputTopic) {
+                outputMsg.topic = node.outputTopic;
+            }
             copyPassthrough(outputMsg, msg);
 
             const statusColor = isAnomalous ? "red" : "green";

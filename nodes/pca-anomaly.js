@@ -11,6 +11,7 @@ module.exports = function (RED) {
     const persistenceHelper = require("./utils/persistence-helper");
 
     const { clampInt, clampFloat } = require("./utils/config-validator");
+    const { parseSensorObject, createSkippedFieldWarner } = require("./utils/sensor-value");
     const groupState = require("./utils/group-state");
 
     const { chiSquaredQuantileFromZ, hotellingLimitFromZ } = require("./utils/statistics");
@@ -77,6 +78,10 @@ module.exports = function (RED) {
                 node.debug(message);
             }
         };
+
+        // Warns once per field about payload fields earlier releases read as
+        // numbers (an ISO timestamp became 2024) and that are skipped now
+        const warnSkippedFields = createSkippedFieldWarner(node);
 
         // Group key of a message; DEFAULT_GROUP when grouping is off or the
         // message carries no usable value.
@@ -206,6 +211,11 @@ module.exports = function (RED) {
             stateKey: "pcaAnomalyState",
             saveInterval: 60000,
             debug: node.debugEnabled,
+            // Blobs written before the manager versioned them (pre-0.4.1) are
+            // accepted as they are: onStateLoaded handles the v1/v2 layouts.
+            migrate: function (state) {
+                return state;
+            },
             onStateLoaded: function (state) {
                 // v2 stores one entry per group; v1 stored a single flat model,
                 // which restores into the default (ungrouped) bucket.
@@ -458,37 +468,102 @@ module.exports = function (RED) {
 
         // Pull named, finite numeric features out of a payload. Array entries
         // keep the name of their ORIGINAL position, so a dropped (non-finite)
-        // entry cannot shift its neighbours onto the wrong sensor.
+        // entry cannot shift its neighbours onto the wrong sensor. Object
+        // fields go through the shared strict parser (utils/sensor-value):
+        // text, "123abc" and ISO timestamps are skipped and listed, not
+        // monitored as sensors. `skipped` names what was left out.
         function extractFeatures(payload) {
-            const names = [];
-            const values = [];
-
             if (Array.isArray(payload)) {
+                const names = [];
+                const values = [];
+                const skipped = [];
                 payload.forEach(function (v, i) {
                     if (typeof v === "number" && Number.isFinite(v)) {
                         names.push("sensor" + i);
                         values.push(v);
+                    } else {
+                        skipped.push("sensor" + i);
                     }
                 });
-            } else if (typeof payload === "object" && payload !== null) {
-                Object.keys(payload).forEach(function (key) {
-                    const val = payload[key];
-                    if (typeof val === "number" && Number.isFinite(val)) {
-                        names.push(key);
-                        values.push(val);
-                    } else if (typeof val === "string") {
-                        const parsed = parseFloat(val);
-                        if (Number.isFinite(parsed)) {
-                            names.push(key);
-                            values.push(parsed);
-                        }
-                    }
-                });
-            } else {
-                return null;
+                return { names: names, values: values, skipped: skipped };
             }
+            if (typeof payload === "object" && payload !== null) {
+                return parseSensorObject(payload);
+            }
+            return null;
+        }
 
-            return { names: names, values: values };
+        // Per-variable breakdown of T² (Westerhuis / Kourti): x_j · Σ_i (t_i / λ_i) · U_ji
+        // over the retained components; the terms sum to T². Reported as
+        // magnitudes, so they rank like the SPE residuals.
+        function t2Contributions(state, standardizedSample, scores) {
+            const U = state.eigenvectors;
+            const k = state.nComponents;
+            return standardizedSample.map(function (x, j) {
+                let s = 0;
+                for (let i = 0; i < k; i++) {
+                    if (state.eigenvalues[i] > 1e-10) {
+                        s += (scores[i] / state.eigenvalues[i]) * U[j][i];
+                    }
+                }
+                return Math.abs(x * s);
+            });
+        }
+
+        // Per-variable breakdown of SPE: the absolute reconstruction residual
+        function speContributions(standardizedSample, reconstructed) {
+            return standardizedSample.map(function (x, j) {
+                return Math.abs(x - reconstructed[j]);
+            });
+        }
+
+        // Normalised, sorted contribution list of one statistic
+        function contributionList(statistic, raw, state, values, valueNames, reconstructed) {
+            let total = 0;
+            for (let i = 0; i < raw.length; i++) total += raw[i];
+            const list = raw.map(function (contrib, i) {
+                const normalized = total > 0 ? contrib / total : 0;
+                return {
+                    sensor: valueNames[i],
+                    statistic: statistic,
+                    contribution: contrib,
+                    originalValue: values[i],
+                    reconstructedValue: reconstructed[i] * state.stdDev[i] + state.mean[i],
+                    normalizedContribution: normalized,
+                    percentContribution: (normalized * 100).toFixed(1) + "%"
+                };
+            });
+            list.sort(function (a, b) {
+                return b.contribution - a.contribution;
+            });
+            return list;
+        }
+
+        // Warm-up result: the sample was buffered but not scored (window still
+        // filling, or the fit failed). A result object rather than the raw
+        // message, so a downstream check of msg.isAnomaly sees every message.
+        function buildWarmupMessage(state, msg, skipped) {
+            const outputMsg = {
+                payload: msg.payload,
+                isAnomaly: false,
+                severity: "warmup",
+                method: "pca-" + node.method,
+                bufferSize: state.dataBuffer.length,
+                minRequired: minTrainSamples,
+                sensorNames: state.featureNames,
+                timestamp: Date.now()
+            };
+            if (skipped && skipped.length > 0) {
+                outputMsg.skippedValues = skipped;
+            }
+            if (node.outputTopic) {
+                outputMsg.topic = node.outputTopic;
+            }
+            if (node.groupBy) {
+                outputMsg.group = state.key;
+            }
+            copyPassthrough(outputMsg, msg);
+            return outputMsg;
         }
 
         node.on("input", function (msg, send, done) {
@@ -525,6 +600,7 @@ module.exports = function (RED) {
                     done("Payload must be an array or object with multiple sensor values");
                     return;
                 }
+                warnSkippedFields(msg.payload, features.skipped);
 
                 const state = getGroupState(resolveGroupKey(msg));
 
@@ -583,7 +659,7 @@ module.exports = function (RED) {
                                 text: groupText(state, "Training: " + state.dataBuffer.length + "/" + minTrainSamples)
                             });
                         }
-                        send([msg, null]);
+                        send([buildWarmupMessage(state, msg, features.skipped), null]);
                         done();
                         return;
                     }
@@ -597,7 +673,7 @@ module.exports = function (RED) {
                 const stats = calculateStatistics(state, standardizedSample);
 
                 if (!stats) {
-                    send([msg, null]);
+                    send([buildWarmupMessage(state, msg, features.skipped), null]);
                     done();
                     return;
                 }
@@ -619,37 +695,42 @@ module.exports = function (RED) {
                         isAnomaly = isT2Anomaly || isSPEAnomaly;
                 }
 
-                // Calculate contribution to anomaly for each sensor
-                let contributions = [];
-                let totalContribution = 0;
-
-                for (let i = 0; i < values.length; i++) {
-                    const contrib = Math.abs(standardizedSample[i] - stats.reconstructed[i]);
-                    totalContribution += contrib;
-                    contributions.push({
-                        sensor: valueNames[i],
-                        contribution: contrib,
-                        originalValue: values[i],
-                        reconstructedValue: stats.reconstructed[i] * state.stdDev[i] + state.mean[i]
-                    });
+                // Which statistic the contribution analysis explains. T² and
+                // SPE live in different subspaces: a T²-only anomaly has
+                // residuals near zero, so ranking the SPE residuals for it
+                // reports rounding noise as the root cause. Every statistic
+                // that exceeded its limit gets its own breakdown; the one
+                // further over its limit (by ratio) is primary and names
+                // topContributor. For a normal sample the breakdown follows the
+                // statistic closer to its limit.
+                const t2Ratio = stats.t2 / state.t2Threshold;
+                const speRatio = stats.spe / state.speThreshold;
+                const primaryStatistic = t2Ratio >= speRatio ? "t2" : "spe";
+                const statistics = [primaryStatistic];
+                if (isT2Anomaly && isSPEAnomaly) {
+                    statistics.push(primaryStatistic === "t2" ? "spe" : "t2");
                 }
 
-                // Normalize and sort contributions
-                contributions = contributions.map(function (c) {
-                    c.normalizedContribution = totalContribution > 0 ? c.contribution / totalContribution : 0;
-                    c.percentContribution = (c.normalizedContribution * 100).toFixed(1) + "%";
-                    return c;
+                const contributionLists = statistics.map(function (statistic) {
+                    const raw =
+                        statistic === "t2"
+                            ? t2Contributions(state, standardizedSample, stats.scores)
+                            : speContributions(standardizedSample, stats.reconstructed);
+                    return contributionList(statistic, raw, state, values, valueNames, stats.reconstructed);
                 });
-                contributions.sort(function (a, b) {
-                    return b.contribution - a.contribution;
-                });
+                const contributions = contributionLists[0];
 
-                // Filter by threshold and limit to top N
-                const filteredContributions = contributions
-                    .filter(function (c) {
+                // Filter by threshold and limit to top N, per statistic
+                const filteredContributions = [];
+                contributionLists.forEach(function (list) {
+                    list.filter(function (c) {
                         return c.normalizedContribution >= node.contributionThreshold;
                     })
-                    .slice(0, node.showTopContributors);
+                        .slice(0, node.showTopContributors)
+                        .forEach(function (c) {
+                            filteredContributions.push(c);
+                        });
+                });
 
                 // Explained variance of the retained components
                 const explainedVarianceRatio = state.cumulativeVariance[state.nComponents - 1];
@@ -674,11 +755,15 @@ module.exports = function (RED) {
                     contributions: filteredContributions.length > 0 ? filteredContributions : undefined,
                     allContributions: isAnomaly ? contributions : undefined,
                     topContributor: contributions.length > 0 ? contributions[0].sensor : null,
+                    contributionStatistic: primaryStatistic,
                     sensorNames: valueNames,
                     bufferSize: state.dataBuffer.length,
                     timestamp: Date.now()
                 };
 
+                if (features.skipped.length > 0) {
+                    outputMsg.skippedValues = features.skipped;
+                }
                 if (node.outputTopic) {
                     outputMsg.topic = node.outputTopic;
                 }

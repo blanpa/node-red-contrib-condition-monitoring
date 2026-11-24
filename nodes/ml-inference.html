@@ -10,18 +10,14 @@
             modelSha256: { value: "" },
             modelType: { value: "auto" },
             urlAuthType: { value: "" },
-            urlAuthToken: { value: "" },
             hfModelId: { value: "" },
             hfRevision: { value: "main" },
-            hfToken: { value: "" },
             mlflowRegistryUri: { value: "" },
             mlflowModelName: { value: "" },
             mlflowVersion: { value: "latest" },
             mlflowStage: { value: "production" },
-            mlflowAuthToken: { value: "" },
             customRegistryUrl: { value: "" },
             customModelId: { value: "" },
-            customApiKey: { value: "" },
             autoUpdate: { value: false },
             updateCheckInterval: { value: 3600 },
             modelStage: { value: "production" },
@@ -40,6 +36,15 @@
             outputProperty: { value: "prediction" },
             preprocessMode: { value: "array" },
             warmup: { value: true }
+        },
+        // Tokens and API keys are credentials: encrypted in flows_cred.json,
+        // never in the flow file or a flow export. (They were plain defaults
+        // before 0.4.1; the runtime still reads those once and warns.)
+        credentials: {
+            urlAuthToken: { type: "password" },
+            hfToken: { type: "password" },
+            mlflowAuthToken: { type: "password" },
+            customApiKey: { type: "password" }
         },
         inputs: 1,
         outputs: 1,
@@ -141,7 +146,10 @@
                             }
                             var typeIcon = model.type === 'onnx' ? 'cube' : 'sitemap';
                             var typeColor = model.type === 'onnx' ? '#FF6F00' : '#1976D2';
-                            var isSelected = $("#node-input-modelPath").val() === model.path;
+                            // The list names models relative to the store; flows saved
+                            // earlier hold the absolute path, so match on the name too.
+                            var currentPath = $("#node-input-modelPath").val() || "";
+                            var isSelected = currentPath === model.path || currentPath.split(/[\\/]/).pop() === model.name;
                             
                             listHtml += '<div class="ml-model-item' + (isSelected ? ' ml-model-selected' : '') + '" data-path="' + model.path + '" data-name="' + model.name + '">';
                             listHtml += '<div class="ml-model-icon" style="background: ' + typeColor + ';">';
@@ -1319,9 +1327,16 @@
     
     <h3>Configuration</h3>
     <ul>
-        <li><b>Model Path:</b> Local path, URL, or model ID (Hugging Face, MLflow)</li>
+        <li><b>Model Path:</b> Local path, URL, or model ID (Hugging Face, MLflow). A local path must lie inside the
+            model store (<code>&lt;userDir&gt;/ml-models</code>, where uploads land — a bare file name is resolved there),
+            the models bundled with this package (<code>models/&lt;file&gt;</code>), or a directory listed under
+            <code>conditionMonitoring.allowedModelPaths</code> in <code>settings.js</code>; anything else is refused.</li>
         <li><b>Model Type:</b> Auto-detect, TensorFlow.js, ONNX, TFLite, Keras, scikit-learn, or Coral</li>
-        <li><b>Input Shape:</b> Tensor dimensions (e.g., "1,10" for batch=1, features=10)</li>
+        <li><b>Input Shape:</b> Tensor dimensions (e.g., "1,10" for batch=1, features=10; "-1,10" for an open batch).
+            For ONNX models the input must fit the shape exactly — a mismatch fails the message instead of running
+            the model on a silently reshaped tensor.</li>
+        <li><b>Tokens / API keys:</b> stored as Node-RED credentials (encrypted), never in the flow file. A token
+            that an older flow still carries inline keeps working but logs a warning; re-enter it to move it over.</li>
         <li><b>Input Property:</b> Where to read input data (default: payload)</li>
         <li><b>Output Property:</b> Where to store prediction (default: prediction)</li>
         <li><b>Warmup:</b> Run dummy inference on load for faster first prediction</li>

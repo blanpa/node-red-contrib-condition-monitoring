@@ -14,6 +14,23 @@ const path = require("path");
 const readline = require("readline");
 const EventEmitter = require("events");
 
+// Defaults for the crash guard and the backpressure cap (see the constructor).
+const DEFAULT_CRASH_BACKOFF_MS = 30000;
+const DEFAULT_MAX_CRASH_RESTARTS = 5;
+const DEFAULT_CRASH_WINDOW_MS = 10 * 60 * 1000;
+const DEFAULT_MAX_PENDING_REQUESTS = 64;
+
+/**
+ * Record of the crashes of one logical bridge. It lives outside the instance
+ * on purpose: ml-inference drops the singleton on every `exit`
+ * (forgetPythonBridge → shutdownGlobalBridge), so the next predict() gets a
+ * brand-new PythonBridgeManager — an instance field would start from zero
+ * with every respawn, which is exactly the storm this guards against.
+ */
+function createCrashLedger() {
+    return { lastCrashAt: 0, crashes: [] };
+}
+
 class PythonBridgeManager extends EventEmitter {
     constructor(options = {}) {
         super();
@@ -22,6 +39,27 @@ class PythonBridgeManager extends EventEmitter {
         this.bridgeScript = options.bridgeScript || path.join(__dirname, "python", "python_bridge.py");
         this.startupTimeout = options.startupTimeout || 30000;
         this.requestTimeout = options.requestTimeout || 60000;
+
+        // Backpressure: the Python loop is single-threaded and cannot cancel a
+        // request Node has already given up on, so every timed-out request is
+        // still executed. Beyond this many in-flight requests, sendCommand()
+        // rejects immediately (EBUSY) instead of growing the backlog.
+        this.maxPendingRequests =
+            typeof options.maxPendingRequests === "number" ? options.maxPendingRequests : DEFAULT_MAX_PENDING_REQUESTS;
+
+        // Crash guard. A model that segfaults the interpreter on load or on
+        // predict would otherwise cost one respawn (a full TensorFlow import)
+        // per incoming message: after a crash the next start() is refused for
+        // `crashBackoffMs`, and after `maxCrashRestarts` crashes within
+        // `crashWindowMs` it stays refused until the window has passed (or
+        // Node-RED is restarted).
+        this.crashBackoffMs =
+            typeof options.crashBackoffMs === "number" ? options.crashBackoffMs : DEFAULT_CRASH_BACKOFF_MS;
+        this.maxCrashRestarts =
+            typeof options.maxCrashRestarts === "number" ? options.maxCrashRestarts : DEFAULT_MAX_CRASH_RESTARTS;
+        this.crashWindowMs =
+            typeof options.crashWindowMs === "number" ? options.crashWindowMs : DEFAULT_CRASH_WINDOW_MS;
+        this.crashLedger = options.crashLedger || createCrashLedger();
 
         this.process = null;
         this.isReady = false;
@@ -40,11 +78,64 @@ class PythonBridgeManager extends EventEmitter {
     }
 
     /**
+     * Note a crash of a bridge that had been ready. Trims the ledger to the
+     * crash window so an old, unrelated crash does not count forever.
+     */
+    _recordCrash(now = Date.now()) {
+        const ledger = this.crashLedger;
+        ledger.lastCrashAt = now;
+        ledger.crashes = ledger.crashes.filter((t) => now - t < this.crashWindowMs);
+        ledger.crashes.push(now);
+    }
+
+    /**
+     * The error that forbids a restart right now, or null. Checked by start().
+     */
+    _restartRefusal(now = Date.now()) {
+        const ledger = this.crashLedger;
+        if (!ledger.lastCrashAt) return null;
+
+        const recent = ledger.crashes.filter((t) => now - t < this.crashWindowMs);
+        if (this.maxCrashRestarts > 0 && recent.length >= this.maxCrashRestarts) {
+            const waitMs = this.crashWindowMs - (now - ledger.lastCrashAt);
+            const err = new Error(
+                `Python bridge crashed ${recent.length} times within ${Math.round(this.crashWindowMs / 60000)} min; ` +
+                    `not restarting it for another ${Math.ceil(waitMs / 1000)} s ` +
+                    "(check the model and the Python stderr log, or restart Node-RED to retry now)"
+            );
+            err.code = "EBRIDGELOCKOUT";
+            return err;
+        }
+
+        const sinceCrash = now - ledger.lastCrashAt;
+        if (sinceCrash < this.crashBackoffMs) {
+            const err = new Error(
+                `Python bridge crashed ${Math.round(sinceCrash / 1000)} s ago; ` +
+                    `not restarting it for another ${Math.ceil((this.crashBackoffMs - sinceCrash) / 1000)} s`
+            );
+            err.code = "EBRIDGEBACKOFF";
+            return err;
+        }
+        return null;
+    }
+
+    /** Forget earlier crashes (a deliberate, clean stop ends the series). */
+    resetCrashLedger() {
+        this.crashLedger.lastCrashAt = 0;
+        this.crashLedger.crashes = [];
+    }
+
+    /**
      * Start the Python bridge subprocess
      */
     async start() {
         if (this.process) {
             return; // Already started
+        }
+
+        const refusal = this._restartRefusal();
+        if (refusal) {
+            throw refusal;
         }
 
         return new Promise((resolve, reject) => {
@@ -176,6 +267,13 @@ class PythonBridgeManager extends EventEmitter {
                 // its place): nothing of the current state belongs to it.
                 if (this.process !== proc) return;
 
+                // A death after ready is a crash and arms the restart
+                // backoff. A death before ready is a start() failure, which
+                // the caller already backs off on its own.
+                if (this.isReady && !this.isShuttingDown) {
+                    this._recordCrash();
+                }
+
                 this.isReady = false;
                 this.process = null;
 
@@ -290,6 +388,13 @@ class PythonBridgeManager extends EventEmitter {
         if (!command || typeof command !== "string") {
             throw new Error("command must be a non-empty string");
         }
+        if (this.maxPendingRequests > 0 && this.pendingRequests.size >= this.maxPendingRequests) {
+            const busy = new Error(
+                `Python bridge busy: ${this.pendingRequests.size} requests pending (limit ${this.maxPendingRequests})`
+            );
+            busy.code = "EBUSY";
+            throw busy;
+        }
 
         const id = `req_${++this.requestCounter}`;
         const message = JSON.stringify({ id, command, ...params }) + "\n";
@@ -367,6 +472,9 @@ class PythonBridgeManager extends EventEmitter {
         }
 
         this.isShuttingDown = true;
+        // A deliberate stop of a running bridge (deploy, runtime shutdown) is
+        // not a crash: the next start is a fresh series.
+        this.resetCrashLedger();
 
         try {
             await this.sendCommand("shutdown");
@@ -424,6 +532,10 @@ class PythonBridgeManager extends EventEmitter {
 // Singleton instance for shared use across nodes
 let globalBridge = null;
 
+// Crash history of the shared subprocess bridge; survives the singleton being
+// dropped and recreated after a crash (see createCrashLedger).
+const globalCrashLedger = createCrashLedger();
+
 /**
  * Get or create the global Python bridge instance.
  *
@@ -443,10 +555,16 @@ function getGlobalBridge() {
             const { RemotePythonBridge } = require("./remote-python-bridge");
             globalBridge = new RemotePythonBridge({ serverUrl: remoteUrl });
         } else {
-            globalBridge = new PythonBridgeManager();
+            globalBridge = new PythonBridgeManager({ crashLedger: globalCrashLedger });
         }
     }
     return globalBridge;
+}
+
+/** Forget the shared bridge's crash history (tests; an explicit operator reset). */
+function resetGlobalCrashLedger() {
+    globalCrashLedger.lastCrashAt = 0;
+    globalCrashLedger.crashes = [];
 }
 
 /**
@@ -465,6 +583,8 @@ async function shutdownGlobalBridge() {
 
 module.exports = {
     PythonBridgeManager,
+    createCrashLedger,
     getGlobalBridge,
-    shutdownGlobalBridge
+    shutdownGlobalBridge,
+    resetGlobalCrashLedger
 };

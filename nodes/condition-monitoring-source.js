@@ -404,8 +404,11 @@ module.exports = function (RED) {
                 emitSample(send);
                 done();
             } catch (err) {
+                // handleNodeError already reports via node.error(text, msg);
+                // done(err) would make Node-RED report it a second time, so a
+                // catch node saw every failure twice with two different texts.
                 errorHandler.handleNodeError(node, "CM source error: " + err.message, msg);
-                done(err);
+                done();
             }
         });
 

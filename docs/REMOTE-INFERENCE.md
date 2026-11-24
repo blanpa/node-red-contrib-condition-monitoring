@@ -84,8 +84,14 @@ docker run -p 8770:8770 -v "$PWD/test-models:/data/models:ro" cm-inference
 Or directly, for development:
 
 ```bash
-CM_INFERENCE_PORT=8770 python3 nodes/python/inference_server.py
+# Loopback only (the default), models under ./test-models
+CM_INFERENCE_PORT=8770 CM_INFERENCE_MODEL_ROOT="$PWD/test-models" \
+  python3 nodes/python/inference_server.py
 ```
+
+The server binds to `127.0.0.1` unless `CM_INFERENCE_HOST` says otherwise, and
+refuses any `model_path` outside `CM_INFERENCE_MODEL_ROOT` (default
+`/data/models`, the container mount) — set it when your models live elsewhere.
 
 ## HTTP API
 
@@ -100,8 +106,55 @@ JSON in / JSON out. Same wire contract the local bridge uses internally.
 | POST | `/unload` | `{"model_id"}` | `{"success":true}` |
 
 Errors return `{"success":false,"error":"..."}` with `400` (bad request),
-`404` (missing file / model not loaded) or `500` (backend failure). The client
-retries `5xx`/transport failures but never `4xx`.
+`401` (token required, see below), `403` (`model_path` outside the model root),
+`404` (missing file / model not loaded) or `500` (backend failure:
+`ExceptionClass: message`; the traceback is logged on the server, not sent).
+
+Client retry policy (`remote-python-bridge.js`, shared with the MAX bridge):
+
+| Failure | Retried? |
+| --- | --- |
+| Connection error (`ECONNREFUSED`, `ECONNRESET`, DNS, …) — the server never saw the request | yes, for every call |
+| Timeout — the server is still executing the request | **never** |
+| `5xx` | only for `GET /status` (a `5xx` from `/predict` is the model failing, not the transport) |
+| `4xx` | never |
+
+The client also caps a response at 16 MiB and drops the connection beyond it.
+
+## Securing the sidecar
+
+The server loads whatever file a client names — including pickles, which
+execute on load — so it must only be reachable by its Node-RED. Three
+controls, all environment-driven on the **server**; the matching client
+variable makes Node-RED cooperate:
+
+| Server (`inference_server.py`) | Default | Client (Node-RED) |
+| --- | --- | --- |
+| `CM_INFERENCE_HOST` | `127.0.0.1` — loopback only. The supplied Dockerfile/compose files set `0.0.0.0` because the client is another container on a private network. | `CM_INFERENCE_URL` |
+| `CM_INFERENCE_TOKEN` | unset — no authentication (as before). When set, every request except `GET /health` must carry `Authorization: Bearer <token>` or `X-Bridge-Token: <token>`, else `401`. | `CM_INFERENCE_TOKEN` — same value; `remote-python-bridge.js` sends the `Authorization` header on every request. |
+| `CM_INFERENCE_MODEL_ROOT` | `/data/models`. `os.pathsep`-separated list of directories a `model_path` must resolve into (symlinks resolved first); otherwise `403`. The roots are printed at startup and never echoed to the client. | — (paths come from the node's validated model store) |
+
+`GET /health` is left unauthenticated on purpose: container `HEALTHCHECK`s probe
+it, and it reveals only liveness and a model count.
+
+Compose example:
+
+```yaml
+services:
+  node-red:
+    environment:
+      - CM_INFERENCE_URL=http://inference:8770
+      - CM_INFERENCE_TOKEN=${CM_INFERENCE_TOKEN:?set a shared secret}
+  inference:
+    environment:
+      - CM_INFERENCE_HOST=0.0.0.0          # reachable from the node-red container
+      - CM_INFERENCE_TOKEN=${CM_INFERENCE_TOKEN:?set a shared secret}
+      - CM_INFERENCE_MODEL_ROOT=/data/models
+```
+
+The MAX Engine server (`max_bridge.py`, `max-bridge-manager.js`) has the same
+three controls under `MAX_BRIDGE_HOST` (default `127.0.0.1`),
+`MAX_BRIDGE_TOKEN` and `MAX_BRIDGE_MODEL_ROOT` (default `/models`).
 
 ## Scaling & load distribution
 
@@ -181,6 +234,8 @@ inference, swap the base image for a CUDA-enabled TensorFlow image.
 - Throughput per replica is bounded by per-model serialization (same-model
   predicts cannot overlap) and the lack of request batching. Scale out with
   replicas (above) or move to a batching model server for GPU saturation.
-- There is no authentication on the HTTP API — keep the sidecar on a private
-  Docker network (as in the supplied compose), not exposed to the internet.
+- Authentication is a single shared bearer token (see "Securing the sidecar");
+  there is no TLS termination in the server itself. Keep the sidecar on a
+  private Docker network (as in the supplied compose) or behind a TLS proxy,
+  never exposed to the internet.
 - ONNX / TF.js / MAX Engine paths are out of scope here (see the MAX server).

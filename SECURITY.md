@@ -32,9 +32,13 @@ The package ships several defenses against common deployment risks. Operators
 should be aware of these:
 
 - **Path traversal protection** — `nodes/utils/path-validator.js` enforces an
-  allowlist for any user-supplied model path. The defaults are the
-  `ml-models` cache directory, the Node-RED `userDir`, and `process.cwd()`.
-  Operators can extend the allowlist via `settings.js`:
+  allowlist for any user-supplied model path (`modelPath`, `msg.loadModel`).
+  The defaults are the model store (`<userDir>/ml-models`, where uploads and
+  downloads land) and the models bundled with the package — nothing else.
+  The Node-RED `userDir` and `process.cwd()` were on the list up to 0.4.0 and
+  are deliberately not any more: the user dir holds `flows_cred.json` and
+  `settings.js`, and a cwd of `/` (systemd's default, some containers) made
+  the check a no-op. Models elsewhere need an explicit entry in `settings.js`:
 
   ```js
   conditionMonitoring: {
@@ -42,16 +46,38 @@ should be aware of these:
   }
   ```
 
+  Model metadata is written into the store (`ml-models/.meta/`), never next
+  to the model, so an allowlisted directory may be read-only.
+
 - **Model download integrity** — every download flow (URL, Hugging Face,
   MLflow, custom registry) accepts an optional SHA-256 digest via the
   `modelSha256` node property. When set, mismatches are rejected with
   `ESHAMISMATCH` and the partial file is unlinked.
 
 - **WebSocket auth & origin allowlist** — the dashboard WebSocket can be
-  protected with a shared `authToken` and a list of `allowedOrigins`. Tokens
-  are compared in constant time. Requests without a matching token are closed
-  with WebSocket code `4401`. Configure these in any node that publishes to
-  the WebSocket (e.g. `anomaly-detector`).
+  protected with a shared auth token and a list of allowed origins. Both are
+  set in the **WebSocket panel of the `anomaly-detector` node**: the token is a
+  Node-RED credential (`websocketAuthToken`, type `password` — encrypted at
+  rest, never part of a flow export); the origins are a comma-separated
+  `websocketAllowedOrigins` property. A token kept in the plain node config
+  (flows written before the credential existed) still works but is warned
+  about, since it travels with the flow file. Tokens are compared in constant
+  time over SHA-256 digests, so neither content nor length leaks through
+  timing. Requests without a matching token are closed with WebSocket code
+  `4401`; when an origin allowlist is set, requests without an `Origin` header
+  are refused too. All nodes publishing on one port share one server, which
+  takes the first deployed node's settings and is stopped and restarted on
+  redeploy, so a rotated token takes effect without a Node-RED restart. A
+  client that stops reading its messages is skipped and, after ten skipped
+  broadcasts in a row, disconnected, so a stalled dashboard cannot grow the
+  runtime's memory.
+
+- **Model-registry tokens** — the `ml-inference` node keeps its URL bearer
+  token, Hugging Face token, MLflow token and custom-registry API key as
+  Node-RED credentials (type `password`), encrypted at rest and excluded from
+  flow exports. Flows saved before 0.4.1 carry them as plain node properties;
+  those still work but log a warning on start — re-enter the value in the
+  editor to move it into the credentials file.
 
 - **LLM credentials & data egress** — the `llm-analyzer` node stores its API
   key as a Node-RED credential (`apiKey`, type `password`), encrypted at rest

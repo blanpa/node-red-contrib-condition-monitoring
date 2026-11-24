@@ -2,8 +2,11 @@
  * ml-inference admin routes
  * =========================
  *
- * Every `RED.httpAdmin` route the ml-inference node exposes: runtime probing,
- * the model store (list / upload / delete), and the model-registry proxies.
+ * Every `RED.httpAdmin` route the ml-inference node exposes: runtime probing
+ * and the model store (list / upload / delete). Nothing here makes an outbound
+ * request on the caller's behalf — the MLflow registry proxy that used to live
+ * here was reachable with read permission and the editor never called it, so
+ * it was removed rather than hardened.
  *
  * Split out of `ml-inference.js`, which had grown past 2600 lines with ~575 of
  * them being HTTP surface that has nothing to do with running inference. Keeping
@@ -30,7 +33,7 @@ const { assertPath } = require("./utils/path-validator");
  *   @param {string}   deps.MODELS_DIR
  *   @param {Function} deps.loadModelMetadata
  *   @param {Function} deps.saveModelMetadata
- *   @param {Function} deps.mlflowApiRequest
+ *   @param {Function} deps.deleteModelMetadata
  *   @param {Function} deps.loadTensorFlowJS
  *   @param {Function} deps.loadONNXRuntime
  *   @param {Function} deps.getMaxBridge
@@ -42,7 +45,7 @@ module.exports = function registerAdminRoutes(RED, deps) {
     const MODELS_DIR = deps.MODELS_DIR;
     const loadModelMetadata = deps.loadModelMetadata;
     const saveModelMetadata = deps.saveModelMetadata;
-    const mlflowApiRequest = deps.mlflowApiRequest;
+    const deleteModelMetadata = deps.deleteModelMetadata || function () {};
     const loadTensorFlowJS = deps.loadTensorFlowJS;
     const loadONNXRuntime = deps.loadONNXRuntime;
     const getMaxBridge = deps.getMaxBridge;
@@ -398,12 +401,20 @@ module.exports = function registerAdminRoutes(RED, deps) {
         ".json": "tfjs"
     };
 
-    /** Sidecar written next to a model file by saveModelMetadata(). */
-    function metadataSidecarPath(modelPath) {
-        return path.join(path.dirname(modelPath), path.basename(modelPath, path.extname(modelPath)) + "_metadata.json");
+    /** Metadata as the API reports it: without the server path it records. */
+    function publicMetadata(metadata) {
+        if (!metadata || typeof metadata !== "object") return null;
+        const copy = Object.assign({}, metadata);
+        delete copy.path;
+        return copy;
     }
 
-    // API endpoint to list uploaded models
+    // API endpoint to list uploaded models.
+    //
+    // Models are reported by NAME, relative to the store, not by server path —
+    // same reasoning as the catalog route above: the editor needs something it
+    // can put into `modelPath` (the loader resolves store-relative names), not
+    // the install's directory layout.
     RED.httpAdmin.get("/ml-inference/models", needsPermission(RED, "ml-inference.read"), function (req, res) {
         try {
             ensureModelsDir();
@@ -425,12 +436,12 @@ module.exports = function registerAdminRoutes(RED, deps) {
                     const ext = path.extname(f).toLowerCase();
                     return {
                         name: f,
-                        path: filePath,
+                        path: f,
                         size: stats.size,
                         modified: stats.mtime,
                         type: MODEL_TYPE_BY_EXT[ext],
                         version: metadata?.version || "1.0.0",
-                        metadata: metadata || null
+                        metadata: publicMetadata(metadata)
                     };
                 });
 
@@ -453,14 +464,14 @@ module.exports = function registerAdminRoutes(RED, deps) {
                     const metadata = fs.existsSync(modelJsonPath) ? loadModelMetadata(modelJsonPath) : null;
                     return {
                         name: d,
-                        path: dirPath,
+                        path: d,
                         type: "tfjs",
                         version: metadata?.version || "1.0.0",
-                        metadata: metadata || null
+                        metadata: publicMetadata(metadata)
                     };
                 });
 
-            res.json({ models: [...fileModels, ...dirModels], modelsDir: MODELS_DIR });
+            res.json({ models: [...fileModels, ...dirModels] });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -532,13 +543,16 @@ module.exports = function registerAdminRoutes(RED, deps) {
                         saveModelMetadata(filePath, metadata);
                     }
 
+                    // Store-relative, like the listing: the editor puts `path`
+                    // (or `dir`, for a TF.js model) straight into modelPath.
+                    const dirName = inModelDir ? path.basename(targetDir) : null;
                     res.json({
                         success: true,
-                        path: filePath,
-                        dir: inModelDir ? targetDir : null,
+                        path: inModelDir ? path.join(dirName, safeName) : safeName,
+                        dir: dirName,
                         name: safeName,
                         size: buffer.length,
-                        metadata: metadata
+                        metadata: publicMetadata(metadata)
                     });
                 } catch (err) {
                     respondError(res, err);
@@ -597,9 +611,9 @@ module.exports = function registerAdminRoutes(RED, deps) {
 
                     res.json({
                         success: true,
-                        path: modelDir,
+                        path: safeName,
                         name: safeName,
-                        metadata: metadata
+                        metadata: publicMetadata(metadata)
                     });
                 } catch (err) {
                     respondError(res, err);
@@ -621,17 +635,16 @@ module.exports = function registerAdminRoutes(RED, deps) {
 
             const stats = fs.statSync(modelPath);
             if (stats.isDirectory()) {
-                // Delete directory recursively
+                // Delete directory recursively; a TF.js model's metadata is
+                // keyed by its model.json.
                 fs.rmSync(modelPath, { recursive: true, force: true });
+                deleteModelMetadata(path.join(modelPath, "model.json"));
             } else {
                 fs.unlinkSync(modelPath);
-                // Take the metadata sidecar along, or it lingers as an orphan
-                // (and would describe the next model uploaded under this name).
-                const sidecar = metadataSidecarPath(modelPath);
-                if (sidecar !== modelPath && fs.existsSync(sidecar)) {
-                    fs.unlinkSync(sidecar);
-                }
             }
+            // Take the metadata along, or it lingers as an orphan (and would
+            // describe the next model uploaded under this name).
+            deleteModelMetadata(modelPath);
 
             res.json({ success: true });
         } catch (err) {
@@ -652,101 +665,10 @@ module.exports = function registerAdminRoutes(RED, deps) {
         });
     });
 
-    // Get models from MLflow Registry
-    /**
-     * Validate an operator-supplied registry base URL before the server fetches it.
-     *
-     * SECURITY: the admin route below hands this URL to the runtime's own HTTP
-     * client, which turns the editor port into a request proxy if the input is
-     * unchecked. The route is admin-authenticated, so this is defence in depth —
-     * but it still blocks non-HTTP schemes and URL-embedded credentials, and it
-     * honours an optional host allowlist (`mlInferenceAllowedRegistryHosts` in
-     * settings.js) for deployments that want to pin the registry.
-     *
-     * @throws {Error} code EPATHFORBIDDEN
-     */
-    function assertRegistryUrl(rawUri) {
-        const reject = (message) => {
-            const err = new Error(message);
-            err.code = "EPATHFORBIDDEN";
-            return err;
-        };
-
-        let url;
-        try {
-            url = new URL(String(rawUri));
-        } catch (e) {
-            throw reject("registryUri is not a valid URL");
-        }
-        if (url.protocol !== "http:" && url.protocol !== "https:") {
-            throw reject("registryUri must use http or https, got " + url.protocol);
-        }
-        if (url.username || url.password) {
-            throw reject("registryUri must not embed credentials");
-        }
-
-        const allowlist = RED.settings && RED.settings.mlInferenceAllowedRegistryHosts;
-        if (Array.isArray(allowlist) && allowlist.length > 0) {
-            const host = url.hostname.toLowerCase();
-            const permitted = allowlist.some(function (h) {
-                return typeof h === "string" && h.trim().toLowerCase() === host;
-            });
-            if (!permitted) {
-                throw reject("registry host is not in mlInferenceAllowedRegistryHosts: " + host);
-            }
-        }
-        return url;
-    }
-
-    RED.httpAdmin.get(
-        "/ml-inference/registries/mlflow/models",
-        needsPermission(RED, "ml-inference.read"),
-        async function (req, res) {
-            const registryUri = req.query.registryUri;
-            if (!registryUri) {
-                return res.status(400).json({ error: "registryUri parameter required" });
-            }
-            // The token comes in as a header, never a query parameter: query
-            // strings end up in proxy logs, Referer headers and browser history.
-            const token = req.headers["x-mlflow-token"] || "";
-
-            try {
-                const url = assertRegistryUrl(registryUri);
-                // Reuse the runtime's own MLflow client so this route honours the
-                // URL's scheme (it used to force https, breaking http registries)
-                // and inherits its timeout and response-size bounds.
-                const baseUrl = url.href.replace(/\/$/, "");
-                const result = await mlflowApiRequest(
-                    baseUrl + "/api/2.0/mlflow/registered-models/search",
-                    "GET",
-                    token,
-                    null
-                );
-                res.json({ models: result.registered_models || [] });
-            } catch (err) {
-                respondError(res, err);
-            }
-        }
-    );
-
-    // Get model versions
-    RED.httpAdmin.get(
-        "/ml-inference/models/:name/versions",
-        needsPermission(RED, "ml-inference.read"),
-        function (req, res) {
-            try {
-                const modelPath = safeChildPath(MODELS_DIR, req.params.name).filePath;
-
-                // For now, return single version from metadata
-                const metadata = loadModelMetadata(modelPath);
-                if (metadata) {
-                    res.json({ versions: [{ version: metadata.version, metadata: metadata }] });
-                } else {
-                    res.json({ versions: [] });
-                }
-            } catch (err) {
-                respondError(res, err);
-            }
-        }
-    );
+    // Gone on purpose, and not to be brought back without a write permission
+    // and an outbound-host policy: `GET /ml-inference/registries/mlflow/models`
+    // fetched a caller-supplied URL with a caller-supplied bearer token (an
+    // SSRF with read permission), and `GET /ml-inference/models/:name/versions`
+    // only ever echoed the metadata that `/ml-inference/models` already lists.
+    // The editor used neither.
 };

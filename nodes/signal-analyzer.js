@@ -56,6 +56,8 @@ module.exports = function (RED) {
         this.fftSize = clampInt(config.fftSize, 2, 1048576, 256);
         this.samplingRate = clampFloat(config.samplingRate, 0.001, 1e9, 1000);
         this.peakThreshold = clampFloat(config.peakThreshold, 0, 1e12, 0.1);
+        // Crest-factor alarm threshold of vibration mode. Nodes saved before the
+        // editor had a field for it carry no value and keep the historical 6.
         this.vibrationThreshold = clampFloat(config.vibrationThreshold, 0, 1e12, 6);
         this.outputFormat = config.outputFormat || "peaks";
         this.windowFunction = config.windowFunction || "hann";
@@ -211,6 +213,12 @@ module.exports = function (RED) {
             stateKey: "signalAnalyzerState",
             saveInterval: 30000,
             debug: node.debugEnabled,
+            // The blob shape has not changed since the unversioned (pre-0.4.1)
+            // writes (onStateLoaded handles the v1/v2 group layout itself), so
+            // those are adopted as they are.
+            migrate: function (state, fromVersion) {
+                return fromVersion === 0 ? state : null;
+            },
             onStateLoaded: function (state) {
                 // v2 stores one entry per group; v1 stored a single flat buffer,
                 // which restores into the default (ungrouped) bucket.
@@ -278,21 +286,34 @@ module.exports = function (RED) {
         const calculateMean = stats.calculateMean;
         const calculateStdDev = stats.calculateStdDev;
 
-        // Vibration Features
-        function calculateVibrationFeatures(data, shaftSpeedRpm, isWaveform) {
+        // Vibration Features.
+        // `data` is either a waveform frame or the window of a scalar stream.
+        // A frame's mean is a DC offset (gravity on an accelerometer, the live
+        // zero of a 4-20 mA loop), not vibration: left in, it swamps rms, peak
+        // and crest factor (1 g + 0.1 g sine read a crest factor of 1.1 instead
+        // of 1.41), so a frame is centred first and the offset reported as
+        // `dcOffset`. A scalar stream is a series of readings whose level is
+        // the information, so its mean stays in.
+        function calculateVibrationFeatures(data, shaftSpeedRpm, isWaveform, samplingRate) {
             const n = data.length;
-            const sumSquares = data.reduce(function (sum, val) {
+            const mean = calculateMean(data);
+            let series = data;
+            if (isWaveform) {
+                series = new Array(n);
+                for (let i = 0; i < n; i++) series[i] = data[i] - mean;
+            }
+
+            const sumSquares = series.reduce(function (sum, val) {
                 return sum + val * val;
             }, 0);
             const rms = Math.sqrt(sumSquares / n);
 
-            const max = arrayMax(data);
-            const min = arrayMin(data);
+            const max = arrayMax(series);
+            const min = arrayMin(series);
             const peakToPeak = max - min;
             const peak = Math.max(Math.abs(max), Math.abs(min));
             const crestFactor = rms !== 0 ? peak / rms : 0;
 
-            const mean = calculateMean(data);
             const stdDev = calculateStdDev(data, mean);
 
             const m4 =
@@ -308,7 +329,7 @@ module.exports = function (RED) {
             const skewness = stdDev !== 0 ? m3 / Math.pow(stdDev, 3) : 0;
 
             const meanAbs =
-                data.reduce(function (sum, val) {
+                series.reduce(function (sum, val) {
                     return sum + Math.abs(val);
                 }, 0) / n;
             const formFactor = meanAbs !== 0 ? rms / meanAbs : 0;
@@ -320,11 +341,11 @@ module.exports = function (RED) {
             if (Math.abs(skewness) > 1) healthScore -= 10;
             healthScore = Math.max(0, Math.min(100, healthScore));
 
-            // Calculate Sample Entropy
-            const sampleEntropy = calculateSampleEntropy(data, 2, 0.2 * stdDev);
+            // Calculate Sample Entropy (differences only: the offset does not matter)
+            const sampleEntropy = calculateSampleEntropy(series, 2, 0.2 * stdDev);
 
             // Calculate Autocorrelation (first 10 lags)
-            const autocorrelation = calculateAutocorrelation(data, 10);
+            const autocorrelation = calculateAutocorrelation(series, 10);
 
             // Detect periodicity from autocorrelation peaks
             const periodicity = detectPeriodicity(autocorrelation);
@@ -333,7 +354,13 @@ module.exports = function (RED) {
             // input is integrated to velocity in the 10–1000 Hz band when the
             // sampling rate allows it (see convertToVelocity).
             const inputUnit = node.vibInputUnit || "mm_s";
-            const conversion = convertToVelocity(rms, inputUnit, shaftSpeedRpm, isWaveform ? data : null);
+            const conversion = convertToVelocity(
+                rms,
+                inputUnit,
+                shaftSpeedRpm,
+                isWaveform ? series : null,
+                samplingRate
+            );
             const isoResult = vibration.evaluateVibrationSeverity(
                 conversion.rmsVelocity,
                 node.iso10816Class,
@@ -354,6 +381,9 @@ module.exports = function (RED) {
                 stdDev: stdDev,
                 formFactor: formFactor,
                 impulseFactor: impulseFactor,
+                // Mean removed from a frame before the indicators above; null
+                // for a scalar stream, whose readings keep their level.
+                dcOffset: isWaveform ? mean : null,
                 sampleEntropy: sampleEntropy,
                 autocorrelation: autocorrelation,
                 periodicity: periodicity,
@@ -383,7 +413,7 @@ module.exports = function (RED) {
          *
          * @returns {{rmsVelocity:number, method:string, band?:number[], frequency?:number}}
          */
-        function convertToVelocity(rmsValue, inputUnit, shaftSpeedRpm, samples) {
+        function convertToVelocity(rmsValue, inputUnit, shaftSpeedRpm, samples, samplingRate) {
             switch (inputUnit) {
                 case "mm_s":
                     return { rmsVelocity: rmsValue, method: "none" };
@@ -392,7 +422,7 @@ module.exports = function (RED) {
                 case "g":
                 case "m_s2": {
                     const toMs2 = inputUnit === "g" ? 9.80665 : 1;
-                    const spectral = integrateAccelerationToVelocity(samples, toMs2);
+                    const spectral = integrateAccelerationToVelocity(samples, toMs2, samplingRate);
                     if (spectral) return spectral;
                     const rpm = shaftSpeedRpm > 0 ? shaftSpeedRpm : node.shaftSpeed;
                     const convFreq = rpm > 0 ? rpm / 60 : 50; // Hz
@@ -408,12 +438,15 @@ module.exports = function (RED) {
             }
         }
 
-        // Spectral integration of an acceleration buffer to velocity RMS (mm/s).
-        // Uses the largest power-of-two tail of the buffer so the FFT needs no
-        // zero padding (padding would scale the amplitudes down by L/N), and a
-        // rectangular window so the bin energies stay uncorrected.
-        function integrateAccelerationToVelocity(samples, toMs2) {
-            const fs = node.samplingRate;
+        // Spectral integration of an acceleration frame to velocity RMS (mm/s).
+        // Uses the largest power-of-two tail of the frame so the FFT needs no
+        // zero padding (padding spreads every line over neighbouring bins and
+        // inflates the band energy by N/L), and a rectangular window so the bin
+        // energies stay uncorrected. The whole frame matters: with 256 samples
+        // of a 10 kHz capture the bins are 39 Hz wide, a 25 Hz (1500 rpm) line
+        // leaks into the excluded DC bin and the velocity reads 40 % low.
+        function integrateAccelerationToVelocity(samples, toMs2, samplingRate) {
+            const fs = samplingRate > 0 ? samplingRate : node.samplingRate;
             if (!Array.isArray(samples) || samples.length < 16 || !(fs / 2 > vibration.ISO_BAND_LOW_HZ)) {
                 return null;
             }
@@ -476,7 +509,7 @@ module.exports = function (RED) {
         }
 
         // Process Cepstrum Analysis
-        function processCepstrum(msg, state, value, shaftSpeedRpm) {
+        function processCepstrum(msg, state, value, shaftSpeedRpm, samplingRate) {
             state.buffer.push(value);
 
             if (state.buffer.length < node.fftSize) {
@@ -501,7 +534,7 @@ module.exports = function (RED) {
             const maxQuefrency = node.quefrencyRangeHigh || 0.1;
 
             // Perform cepstrum analysis
-            const cepResult = performCepstrum(state.buffer, node.fftSize, node.samplingRate);
+            const cepResult = performCepstrum(state.buffer, node.fftSize, samplingRate);
 
             // Find rahmonics (periodic components)
             const rahmonics = findRahmonics(
@@ -556,6 +589,7 @@ module.exports = function (RED) {
                 gearFaults: gearFaults,
                 shaftSpeed: rpm,
                 shaftFrequency: shaftFreq,
+                samplingRate: samplingRate,
                 hasFault: hasAnomaly,
                 faultCount: gearFaults.length,
                 timestamp: Date.now()
@@ -608,7 +642,7 @@ module.exports = function (RED) {
         }
 
         // Process Envelope Analysis
-        function processEnvelope(msg, state, value, shaftSpeedRpm, bearing, peakFloorFactor) {
+        function processEnvelope(msg, state, value, shaftSpeedRpm, bearing, peakFloorFactor, samplingRate) {
             state.buffer.push(value);
 
             if (state.buffer.length < node.fftSize) {
@@ -630,8 +664,8 @@ module.exports = function (RED) {
             const bearingFreqs = resolveBearingFrequencies(shaftFreq, bearing);
 
             // Perform envelope analysis
-            const band = resolveEnvelopeBand(node.samplingRate);
-            const envelope = performEnvelopeAnalysis(state.buffer, node.samplingRate, band.low, band.high, debugLog);
+            const band = resolveEnvelopeBand(samplingRate);
+            const envelope = performEnvelopeAnalysis(state.buffer, samplingRate, band.low, band.high, debugLog);
 
             // FFT of the envelope with its mean removed: the envelope of a
             // rectified signal has a large DC component that would otherwise set
@@ -640,7 +674,7 @@ module.exports = function (RED) {
             const envelopeAC = envelope.map(function (v) {
                 return v - envMean;
             });
-            const envelopeFFT = performFFT(envelopeAC, node.fftSize, node.samplingRate, "hann");
+            const envelopeFFT = performFFT(envelopeAC, node.fftSize, samplingRate, "hann");
             const floorFactor = peakFloorFactor > 0 ? peakFloorFactor : node.envelopePeakFloor;
             const envelopePeaks = findSignificantPeaks(envelopeFFT.frequencies, envelopeFFT.magnitudes, floorFactor);
             const binWidth = envelopeFFT.frequencies.length > 1 ? envelopeFFT.frequencies[1] : 0;
@@ -672,6 +706,7 @@ module.exports = function (RED) {
                 shaftSpeed: shaftSpeedRpm,
                 shaftFrequency: shaftFreq,
                 bearingFreqs: bearingFreqs,
+                samplingRate: samplingRate,
                 hasFault: hasAnomaly,
                 faultCount: faults.length,
                 timestamp: Date.now()
@@ -712,7 +747,7 @@ module.exports = function (RED) {
         }
 
         // Process FFT
-        function processFFT(msg, state, value) {
+        function processFFT(msg, state, value, samplingRate) {
             state.buffer.push(value);
 
             if (state.buffer.length < node.fftSize) {
@@ -749,7 +784,7 @@ module.exports = function (RED) {
             for (let i = 0; i < centred.length; i++) {
                 centred[i] = state.buffer[i] - dcOffset;
             }
-            const fftResult = performFFT(centred, node.fftSize, node.samplingRate, node.windowFunction);
+            const fftResult = performFFT(centred, node.fftSize, samplingRate, node.windowFunction);
             const peaks = findSpectralPeaks(fftResult.frequencies, fftResult.magnitudes, node.peakThreshold);
             const features = calculateSpectralFeatures(fftResult.frequencies, fftResult.magnitudes);
             // `magnitude` stays |X_k| / N as before; `amplitude` is the physical
@@ -766,7 +801,7 @@ module.exports = function (RED) {
                 dcOffset: dcOffset,
                 amplitudeScale: scale,
                 features: features,
-                samplingRate: node.samplingRate,
+                samplingRate: samplingRate,
                 fftSize: node.fftSize,
                 windowFunction: node.windowFunction,
                 overlapPercent: node.overlapPercent
@@ -791,7 +826,7 @@ module.exports = function (RED) {
         }
 
         // Process Vibration with configurable threshold (for msg.config override)
-        function processVibrationWithConfig(msg, state, values, vibrationThreshold, shaftSpeedRpm) {
+        function processVibrationWithConfig(msg, state, values, vibrationThreshold, shaftSpeedRpm, samplingRate) {
             for (let i = 0; i < values.length; i++) state.buffer.push(values[i]);
 
             if (state.buffer.length > node.windowSize) {
@@ -807,29 +842,50 @@ module.exports = function (RED) {
                 return null;
             }
 
-            // A frame (array payload) is a waveform the ISO conversion may
-            // integrate; a scalar stream is not, even though it fills the same buffer.
+            // A frame (array payload of 16 samples or more) is a waveform: it is
+            // analysed whole — centred, with the ISO conversion integrating the
+            // spectrum. The window size only applies to a stream of scalar
+            // readings, which is a time series of *values* and not a signal:
+            // its last windowSize samples are analysed, mean included. (Cutting
+            // a frame to the window used to turn a 4096-sample capture into
+            // 256 samples: too coarse a spectrum for the 10 Hz band edge and
+            // too short for a crest factor or kurtosis to mean anything.)
             const isWaveform = values.length >= 16;
-            const features = calculateVibrationFeatures(state.buffer, shaftSpeedRpm, isWaveform);
+            const analysed = isWaveform ? values : state.buffer;
+            if (isWaveform && values.length > node.windowSize) {
+                debugLog(
+                    "Vibration: frame of " +
+                        values.length +
+                        " samples analysed whole (window size applies to scalar streams only)"
+                );
+            }
+            const features = calculateVibrationFeatures(analysed, shaftSpeedRpm, isWaveform, samplingRate);
+            const iso = features.iso20816;
 
+            // Anomaly: impulsive signal (crest factor above the threshold, or
+            // kurtosis beyond 4) or an ISO zone D severity. The zone used to be
+            // reported but never routed, so a machine in alarm went to "normal".
+            const crestFactorThreshold = vibrationThreshold > 0 ? vibrationThreshold : 6;
+            const hasAnomaly =
+                features.crestFactor > crestFactorThreshold || Math.abs(features.kurtosis) > 4 || iso.isAlarm === true;
+
+            let statusText = "RMS: " + features.rms.toFixed(2) + " | CF: " + features.crestFactor.toFixed(2);
+            if (iso.isValid) statusText += " | zone " + iso.zone;
             node.status({
-                fill: "green",
-                shape: "dot",
-                text: groupText(state, "RMS: " + features.rms.toFixed(2) + " | CF: " + features.crestFactor.toFixed(2))
+                fill: hasAnomaly ? "red" : "green",
+                shape: hasAnomaly ? "ring" : "dot",
+                text: groupText(state, statusText)
             });
 
             const outputMsg = {
                 payload: features,
-                topic: msg.topic || "vibration-features",
+                topic: node.outputTopic || msg.topic || "vibration-features",
                 timestamp: Date.now(),
-                windowSize: state.buffer.length
+                windowSize: analysed.length,
+                samplingRate: samplingRate
             };
 
             copyPassthrough(outputMsg, msg);
-
-            // Check for potential issues (vibrationThreshold overrides default crest factor check)
-            const crestFactorThreshold = vibrationThreshold > 0 ? vibrationThreshold : 6;
-            const hasAnomaly = features.crestFactor > crestFactorThreshold || Math.abs(features.kurtosis) > 4;
 
             return { normal: hasAnomaly ? null : outputMsg, anomaly: hasAnomaly ? outputMsg : null };
         }
@@ -858,20 +914,35 @@ module.exports = function (RED) {
             );
             const stats = calculatePeakStatistics(peaks, state.buffer);
 
-            const currentIndex = state.buffer.length - 1;
-            const isPeak = peaks.some(function (p) {
-                return p.index === currentIndex;
-            });
+            // A peak needs a neighbour on both sides, so the sample that just
+            // arrived can never be one; it *confirms* the previous sample as a
+            // peak. isPeak therefore reports the previous sample (one-sample
+            // latency) — testing the current index was always false and output
+            // 2 never fired.
+            const confirmedIndex = state.buffer.length - 2;
+            let confirmedPeak = null;
+            for (let i = 0; i < peaks.length; i++) {
+                if (peaks[i].index === confirmedIndex) {
+                    confirmedPeak = peaks[i];
+                    break;
+                }
+            }
+            const isPeak = confirmedPeak !== null;
 
             const outputMsg = {
                 payload: value,
                 isPeak: isPeak,
+                peak: confirmedPeak,
                 peaks: peaks,
                 peakCount: peaks.length,
                 stats: stats,
                 sampleCount: state.sampleCount,
                 timestamp: timestamp
             };
+
+            if (node.outputTopic) {
+                outputMsg.topic = node.outputTopic;
+            }
 
             copyPassthrough(outputMsg, msg);
 
@@ -899,6 +970,19 @@ module.exports = function (RED) {
                 positiveNumber(cfg.shaftSpeed) ||
                 node.shaftSpeed ||
                 0
+            );
+        }
+
+        // Per-message sampling rate (Hz): msg.samplingRate, msg.config.samplingRate
+        // (msg.config.sampleRate is accepted as the name the help once used),
+        // then the node setting. Frames from a sensor carry their own rate, and
+        // every frequency in the analysis (bins, bands, fault lines) follows it.
+        function resolveSamplingRate(msg, cfg) {
+            return (
+                positiveNumber(msg.samplingRate) ||
+                positiveNumber(cfg.samplingRate) ||
+                positiveNumber(cfg.sampleRate) ||
+                node.samplingRate
             );
         }
 
@@ -939,6 +1023,7 @@ module.exports = function (RED) {
                 // msg.shaftSpeed, msg.config.shaftSpeed, then the node setting.
                 const activeShaftSpeed = resolveShaftSpeed(msg, cfg);
                 const activeBearing = resolveBearingConfig(cfg);
+                const activeSamplingRate = resolveSamplingRate(msg, cfg);
 
                 // msg.reset clears the buffer of the group this message belongs to;
                 // msg.reset === "all" clears every group at once.
@@ -994,7 +1079,7 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processFFT(msg, state, framed.last);
+                    result = processFFT(msg, state, framed.last, activeSamplingRate);
                 } else if (activeMode === "vibration") {
                     let values = Array.isArray(msg.payload) ? msg.payload : [msg.payload];
                     values = values.filter(function (v) {
@@ -1005,7 +1090,14 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processVibrationWithConfig(msg, state, values, activeVibrationThreshold, activeShaftSpeed);
+                    result = processVibrationWithConfig(
+                        msg,
+                        state,
+                        values,
+                        activeVibrationThreshold,
+                        activeShaftSpeed,
+                        activeSamplingRate
+                    );
                 } else if (activeMode === "peaks") {
                     const value = parseFloat(msg.payload);
                     const timestamp = msg.timestamp || Date.now();
@@ -1026,7 +1118,15 @@ module.exports = function (RED) {
                         cfg.envelopePeakFloor !== undefined
                             ? parseFloat(cfg.envelopePeakFloor)
                             : node.envelopePeakFloor;
-                    result = processEnvelope(msg, state, framed.last, activeShaftSpeed, activeBearing, activePeakFloor);
+                    result = processEnvelope(
+                        msg,
+                        state,
+                        framed.last,
+                        activeShaftSpeed,
+                        activeBearing,
+                        activePeakFloor,
+                        activeSamplingRate
+                    );
                 } else if (activeMode === "cepstrum") {
                     const framed = bufferFrameReturnLast(msg.payload);
                     if (!framed) {
@@ -1034,7 +1134,7 @@ module.exports = function (RED) {
                         done();
                         return;
                     }
-                    result = processCepstrum(msg, state, framed.last, activeShaftSpeed);
+                    result = processCepstrum(msg, state, framed.last, activeShaftSpeed, activeSamplingRate);
                 }
 
                 if (result) {

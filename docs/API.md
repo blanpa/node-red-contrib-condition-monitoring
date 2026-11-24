@@ -468,25 +468,73 @@ msg.payload = {
   feature3: 0.8
 };
 
-// Dynamic model loading
-msg.loadModel = {
-  path: "/models/new-model.onnx",
-  id: "new-model"
-};
+// Typed arrays and Buffers are accepted as-is
+msg.payload = Float32Array.from([0.5, 1.2, 0.8, 0.3]);
+
+// Dynamic model loading (a path inside the model-path allowlist, see below)
+msg.loadModel = "/srv/models/new-model.onnx";
 ```
+
+Outside `preprocessMode: "object"`, an object's `features`, `values` or
+`input` property is used when it holds an array (or typed array); otherwise
+every value of the object is taken.
 
 ### ML Inference Output
 
 ```javascript
 msg = {
-  payload: [0.15, 0.85],      // Model output
-  prediction: [0.15, 0.85],   // Same as payload
-  modelId: "anomaly-v1",
-  runtime: "onnx",            // "onnx", "tfjs", "python"
-  inferenceTime: 5,           // ms
-  inputShape: [1, 10]
+  payload: [0.5, 1.2, 0.8, 0.3],   // untouched input
+  prediction: [0.15, 0.85],        // model output (outputProperty, default "prediction")
+  mlInference: {
+    modelPath: "models/bearing_fault_clf.onnx",
+    modelFormat: "onnx",           // onnx | tfjs | savedmodel | tflite | keras | sklearn | max
+    inferenceTime: 5,              // ms
+    invalidInputs: 0,              // non-numeric input values that went in as 0
+    inputShape: "1,4",             // as configured
+    outputShape: [1, 2],           // tensor dims of the output, when known
+    timestamp: 1700000000000,
+    mlflowTracking: null           // { experimentName, runId } when tracking is on
+  }
 }
 ```
+
+### ML Inference: credentials, model paths, metadata
+
+**Credentials.** The four secrets are Node-RED credentials (encrypted in
+`flows_cred.json`, excluded from flow exports), not node properties:
+
+| Credential | Type | Used for |
+|------------|------|----------|
+| `urlAuthToken` | `password` | Bearer token or `user:pass` for a URL model source (`urlAuthType`) |
+| `hfToken` | `password` | Hugging Face Hub token |
+| `mlflowAuthToken` | `password` | MLflow registry and tracking token |
+| `customApiKey` | `password` | Custom registry API key |
+
+Resolution order at runtime: `node.credentials.<name>`, then the inline
+`config.<name>` a flow saved before 0.4.1 may still carry (it works, but the
+node warns once on start — re-enter the value in the editor to migrate it).
+
+**Model paths.** A local `modelPath` / `msg.loadModel` must resolve inside
+the model store (`<userDir>/ml-models`), the bundled models
+(`models/<file>`), or a directory listed in `settings.js` under
+`conditionMonitoring.allowedModelPaths`; anything else fails with
+`EPATHFORBIDDEN`. A relative path is looked up in the store first (the
+editor's model list hands out bare file names), then among the bundled
+models, then against the cwd. The Node-RED user dir and the process cwd are
+**not** allowlisted (they were up to 0.4.0).
+
+**Metadata.** Load bookkeeping (`name`, `version`, `format`, `lastLoaded`,
+…) is stored in `<userDir>/ml-models/.meta/<sha1(absolute model path)>.json`
+and only rewritten when something other than `lastLoaded` changed. A
+`<model>_metadata.json` sidecar written next to the model by earlier
+versions is still read as a fallback, but never written again.
+
+**ONNX input shape.** With `inputShape` set, the input must contain exactly
+`∏ dims` values — a mismatch fails the message instead of running the model
+on a silently reshaped `[1, N]` tensor. Use `-1` for an open dimension
+(`"-1,10"`); with no shape configured the input is fed as `[1, N]`. The
+tensor element type follows the session's input metadata (`float32` when
+unknown; integer types are truncated).
 
 ### Signal Analyzer Output (FFT Mode)
 
@@ -835,8 +883,10 @@ Numeric fields are clamped to their valid range (out-of-range values are pinned,
 |-------|------|---------|-------------|
 | `name` | string | `""` | Editor label only |
 | `provider` | string | `"anthropic"` | One of `anthropic` \| `openai` \| `google` \| `ollama` \| `openai-compatible` |
-| `model` | string | `"claude-haiku-4-5-20251001"` | Free-text model name passed to the provider |
+| `model` | string | `"claude-haiku-5-5"` | Free-text model name passed to the provider (undated Anthropic id = current Haiku snapshot) |
 | `apiUrl` | string | `""` | Empty = provider default endpoint. **Required** for `openai-compatible` |
+| `allowMsgApiUrl` | boolean | `false` | Honour `msg.apiUrl` (same origin as the configured endpoint only) |
+| `allowMsgOverrides` | boolean | `false` | Honour `msg.prompt`, `msg.systemPrompt` and `msg.model`. A missing key (nodes saved before 0.4.1) means `false`; present overrides are then ignored with one warning |
 | `triggerMode` | string | `"batch"` | `batch` \| `manual` \| `interval` |
 | `batchSize` | number | `50` | Range 1–1000. Used only in `batch` mode |
 | `intervalMs` | number | `60000` | Range 250–86400000 (24 h). Used only in `interval` mode |
@@ -854,7 +904,7 @@ Numeric fields are clamped to their valid range (out-of-range values are pinned,
 | `sensorName` | string | `""` | Metadata; fills the `{sensor}` placeholder |
 | `unit` | string | `""` | Metadata; fills the `{unit}` placeholder |
 | `passthroughOriginal` | boolean | `true` | If true, the triggering message's `payload` is copied to `msg.input` on the output |
-| `persistState` | boolean | `false` | Persist buffer, detected columns, and lifetime counters across redeploys |
+| `persistState` | boolean | `false` | Persist buffer, detected columns, and lifetime counters across redeploys (newest 100 000 samples at most) |
 
 ### Credential Handling
 
@@ -903,7 +953,7 @@ Variables available in both modes: `{sensor}`, `{unit}`, `{count}`, `{stats}`, `
 
 Stats are pre-computed by the node (mean/stdDev/min/max/range) so the LLM does not burn tokens recomputing them. In JSON output mode an instruction block (built by `buildJsonInstruction()`, including the `outputSchema` example if set) is appended to the system prompt — provider-native JSON modes are not used.
 
-Record mode column detection: with an empty `columns` field, the **first** record received establishes the numeric column set, which is then frozen for the node's lifetime. Common timestamp/identifier fields (`timestamp`, `time`, `ts`, `_ts`, `epoch`, `datetime`, `date`, `id`, `_id` — case-insensitive) are skipped automatically; list columns explicitly to include them.
+Record mode column detection: with an empty `columns` field, the **first** record received establishes the numeric column set, which is then frozen for the node's lifetime. Common timestamp/identifier fields (`timestamp`, `time`, `ts`, `_ts`, `epoch`, `datetime`, `date`, `id`, `_id` — case-insensitive) are skipped automatically; list columns explicitly to include them. Keys that contain control characters or newlines, are empty, or are longer than 64 characters are never detected as columns, and every column name written into a prompt is sanitised (`sanitizeColumnName()`: control characters stripped, whitespace collapsed, 64-character cap) — record keys are supplied by the upstream sender, not the operator.
 
 ### Input Message
 
@@ -915,9 +965,11 @@ msg = {
 
   flush: true,                 // optional — manual mode only: fire now
   prompt: "…",                 // optional — replaces the user prompt template
-                               //   ({word} substitution is still applied)
+                               //   ({word} substitution is still applied);
+                               //   ignored (one warning) unless allowMsgOverrides is enabled
   systemPrompt: "…",           // optional — replaces the system prompt for this call
-  model: "gpt-4o-mini",        // optional — per-message model override
+                               //   (same opt-in)
+  model: "gpt-4o-mini",        // optional — per-message model override (same opt-in)
   apiUrl: "http://mock:8080"   // optional — per-message endpoint override (tests/gateways);
                                // ignored unless "Allow msg.apiUrl override" is enabled, and then
                                // only accepted within the origin of the configured endpoint
@@ -945,7 +997,7 @@ msg = {
   samples: [/* exact batch sent */],  // number[] (scalar) or object[] (record)
   sensor: "machine-A/temp",        // sensorName or null
   unit: "°C",                      // unit or null
-  model: "claude-haiku-4-5-…",     // model reported by the provider
+  model: "claude-haiku-5-5",       // model reported by the provider
   durationMs: 1234,                // wall-clock time of the API call
 
   // JSON mode only:
@@ -965,7 +1017,7 @@ msg = {
 - The buffer is drained (copied and cleared) on every fire; `msg.samples` carries the exact batch that was sent.
 - `maxBufferSize` is a hard ring-buffer cap: when exceeded, the **oldest** entries are dropped and the drop count appears in the status line (`buffering 9999/10000 ⚠ 12 dropped`). Most relevant in `manual`/`interval` modes where the buffer can otherwise grow unbounded.
 - `maxSamplesInPrompt` independently caps how many buffered values are rendered into the prompt (token-cost knob) — the newest N are kept, older ones are summarized only by the stats line.
-- With `persistState: true`, the buffer, detected columns, and lifetime usage counters are saved every 30 s and on close (context key `llmAnalyzerState_<nodeId>` via the shared persistence helper) and restored after a redeploy.
+- With `persistState: true`, the buffer, detected columns, and lifetime usage counters are saved every 30 s and on close (context key `llmAnalyzerState_<nodeId>` via the shared persistence helper) and restored after a redeploy. At most the newest 100 000 samples are written (`min(maxBufferSize, 100000)`, one warning when the cap applies). A batch that is out with the provider when the node closes is part of the snapshot, so a redeploy mid-call does not lose it.
 
 ### Timeouts and Errors
 
@@ -980,6 +1032,7 @@ Each request runs under an `AbortController` armed with `timeoutMs`; on expiry t
 | `http` | Any other non-2xx status |
 | `shape` | Provider response missing expected fields |
 | `blocked` | Google only — prompt blocked (`promptFeedback.blockReason`) |
+| `refusal` | Anthropic only — `stop_reason: "refusal"` (HTTP 200 with no text); not retried |
 | `config` | Missing key/URL/model, unknown provider |
 
 JSON mode adds two error paths: an unparseable response (`json parse` status; the error message carries `msg.rawResponse`, `msg.usage`, `msg.model`) and a missing `outputPath` field (`path not found` status; error message additionally carries `msg.json`). The error kind is also shown in the node status (red ring).
@@ -1090,9 +1143,28 @@ const manager = new NodeStateManager(node, {
   stateKey: 'myState',        // Context key
   saveInterval: 30000,        // Auto-save interval (ms)
   autoSave: true,             // Enable auto-save
-  saveOnChange: false         // Save on every change
+  saveOnChange: false,        // Save on every change
+  stateVersion: 1,            // Schema version written as `__v` (default: STATE_VERSION)
+  migrate: (state, fromVersion) => state, // Convert a blob of another version, or return null
+  maxPersistedItems: 100000,  // Cap on any persisted array (newest kept); default unlimited
+  onAutoSave: () => {}        // Called on each auto-save tick before the dirty check
 });
 ```
+
+#### Schema version and migration
+
+Every blob written carries `__v` (currently `1`, exported as `STATE_VERSION`). On load:
+
+- same version → deserialized as before;
+- no `__v` at all (a blob written by 0.4.0, before the marker existed) → treated as version `1` (`UNVERSIONED_BLOB_VERSION`): the shape did not change, so it loads **unchanged, without a warning**, and the next save writes it back with `__v`;
+- a different `__v` → `migrate(state, fromVersion)` is called when the manager has one; an object it returns is adopted. Without a hook, or when it returns anything else or throws, the manager **starts fresh** and logs a warning (`[Persistence] Persisted state is version N, this node expects version 1 — starting fresh`). The state is marked dirty so the next save replaces the stale blob and the warning does not repeat;
+- a blob that cannot be deserialized (corrupt typed-array data, a non-object value) → warning + fresh start, same way.
+
+Nodes using `initializeStatePersistence()` pass `migrate` and `maxPersistedItems` through the helper's options.
+
+#### Size bound
+
+`maxPersistedItems` is **off by default** (every array is written whole; the anomaly-detector / signal-analyzer windows are never trimmed). When a node sets it, every top-level array (plain arrays and object arrays; typed arrays are left intact) is trimmed to its newest N items at serialization time, with **one** warning per manager. It bounds what the context store rewrites on every save; the live state in the node is untouched. Only `llm-analyzer` sets it (`min(maxBufferSize, 100000)`).
 
 #### Methods
 
@@ -1143,6 +1215,26 @@ const anomalyState = createAnomalyStateManager(node);
 const mlState = createMLStateManager(node);
 const signalState = createSignalStateManager(node);
 ```
+
+#### Persistence helper (`nodes/utils/persistence-helper.js`)
+
+```javascript
+const persistence = initializeStatePersistence(node, {
+  stateKey: 'myNodeState',
+  saveInterval: 30000,
+  onStateLoaded: (state) => { /* restore */ },
+  getStateToSave: () => ({ buffer: node.buffer }),
+  migrate: (state, fromVersion) => state,   // optional, see above
+  maxPersistedItems: 100000                 // optional
+});
+
+persistence.saveNow();     // snapshot via getStateToSave() into the manager (written by auto-save)
+persistence.markDirty();   // cheaper: the manager's next auto-save tick pulls the snapshot itself
+await persistence.flush(); // snapshot + write now; resolves false when the state is not loaded yet (nothing written)
+await persistence.close(); // snapshot, final write, stop the timer
+```
+
+`markDirty()` + the manager's auto-save is the intended single writer for a node's blob; a node should not run a second timer of its own next to it.
 
 ---
 

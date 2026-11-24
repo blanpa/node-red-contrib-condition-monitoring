@@ -55,10 +55,13 @@ describe("isolation-forest-anomaly Node", function () {
 
             n2.on("input", function (msg) {
                 try {
-                    // A single sample cannot be scored: passed through untouched
+                    // A single sample cannot be scored: reported as warm-up
                     expect(msg.payload).toBe(50);
-                    expect(msg).not.toHaveProperty("isAnomaly");
-                    expect(msg).not.toHaveProperty("method");
+                    expect(msg.isAnomaly).toBe(false);
+                    expect(msg.severity).toBe("warmup");
+                    expect(msg.bufferSize).toBe(1);
+                    expect(msg.minRequired).toBe(2);
+                    expect(typeof msg.method).toBe("string");
                     done();
                 } catch (err) {
                     done(err);

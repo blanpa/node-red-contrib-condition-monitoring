@@ -16,8 +16,12 @@ module.exports = function (RED) {
     const persistenceHelper = require("./utils/persistence-helper");
 
     const { clampInt, clampFloat } = require("./utils/config-validator");
+    const { parseSensorValue } = require("./utils/sensor-value");
     const groupState = require("./utils/group-state");
     const { copyPassthrough } = require("./utils/message");
+
+    // Samples needed before the z-score fallback can score at all.
+    const MIN_FALLBACK_SAMPLES = 2;
 
     // Samples needed before the first forest is built.
     const MIN_TRAIN_SAMPLES = 10;
@@ -129,7 +133,8 @@ module.exports = function (RED) {
         function createGroupState(key) {
             return {
                 key: key,
-                dataBuffer: [],
+                // Sliding window of the last windowSize values (ring buffer)
+                dataBuffer: stats.createRingBuffer(node.windowSize),
                 scoreBuffer: [], // recent scores, used by adaptive mode
                 model: null, // { trees, subsampleSize }
                 isTrained: false,
@@ -188,6 +193,11 @@ module.exports = function (RED) {
             stateKey: "isolationForestState",
             saveInterval: 60000,
             debug: node.debugEnabled,
+            // Blobs written before the manager versioned them (pre-0.4.1) are
+            // accepted as they are: onStateLoaded handles the v1/v2 layouts.
+            migrate: function (state) {
+                return state;
+            },
             onStateLoaded: function (state) {
                 // v2 stores one entry per group; v1 stored a single flat buffer,
                 // which restores into the default (ungrouped) bucket.
@@ -206,8 +216,12 @@ module.exports = function (RED) {
                         return;
                     }
                     const target = getGroupState(key);
-                    target.dataBuffer = entry.dataBuffer.filter(function (d) {
-                        return d && Number.isFinite(d.value);
+                    // Plain numbers (current layout) or the `{timestamp, value}`
+                    // objects earlier releases stored; the newest windowSize kept
+                    target.dataBuffer.clear();
+                    entry.dataBuffer.forEach(function (d) {
+                        const v = d !== null && typeof d === "object" ? d.value : d;
+                        if (typeof v === "number" && Number.isFinite(v)) target.dataBuffer.push(v);
                     });
                     target.scoreBuffer = Array.isArray(entry.scoreBuffer) ? entry.scoreBuffer : [];
                     target.sampleCount = entry.sampleCount || 0;
@@ -253,7 +267,7 @@ module.exports = function (RED) {
                         return;
                     }
                     groups[key] = {
-                        dataBuffer: state.dataBuffer,
+                        dataBuffer: state.dataBuffer.toArray(),
                         scoreBuffer: state.scoreBuffer,
                         anomalyThreshold: state.anomalyThreshold,
                         sampleCount: state.sampleCount,
@@ -276,8 +290,8 @@ module.exports = function (RED) {
         // previous one. (No time index: the newest sample would always sit at
         // the edge of that feature and score as easier to isolate.)
         function featuresAt(buffer, index) {
-            const value = buffer[index].value;
-            return [value, index > 0 ? value - buffer[index - 1].value : 0];
+            const value = buffer.get(index);
+            return [value, index > 0 ? value - buffer.get(index - 1) : 0];
         }
 
         // Anomaly score in (0, 1]; higher = easier to isolate = more anomalous.
@@ -313,9 +327,10 @@ module.exports = function (RED) {
 
             try {
                 const buffer = state.dataBuffer;
-                const trainingData = buffer.map(function (d, index) {
-                    return featuresAt(buffer, index);
-                });
+                const trainingData = new Array(buffer.length);
+                for (let index = 0; index < buffer.length; index++) {
+                    trainingData[index] = featuresAt(buffer, index);
+                }
 
                 // ml-isolation-forest grows every tree on the whole set it is
                 // given and only knows `nEstimators`. Each tree is therefore
@@ -435,30 +450,21 @@ module.exports = function (RED) {
                     return;
                 }
 
-                // Extract value from message
-                const value = parseFloat(msg.payload);
-
-                // Validate value is a finite number (catches NaN, Infinity, -Infinity)
-                if (!Number.isFinite(value)) {
+                // Strict: numbers and purely numeric strings only. parseFloat
+                // read "123abc" as 123 and [7] as 7 (utils/sensor-value).
+                const value = parseSensorValue(msg.payload);
+                if (value === null) {
                     done("Payload is not a valid finite number");
                     return;
                 }
 
                 const state = getGroupState(resolveGroupKey(msg));
 
-                // Add value to buffer
-                state.dataBuffer.push({
-                    timestamp: Date.now(),
-                    value: value
-                });
+                // Add value to the window (the oldest leaves once it is full)
+                state.dataBuffer.push(value);
 
                 // Increment sample count
                 state.sampleCount++;
-
-                // Limit buffer to maximum size
-                if (state.dataBuffer.length > node.windowSize) {
-                    state.dataBuffer.shift();
-                }
 
                 // Train model when enough data is available, refit when due
                 if (!state.isTrained) {
@@ -472,13 +478,36 @@ module.exports = function (RED) {
                 // If Isolation Forest is not available or not trained, use simple fallback method
                 if (!IsolationForest || !state.isTrained) {
                     // Fallback: Z-Score based detection using shared utilities
-                    if (state.dataBuffer.length < 2) {
-                        send([msg, null]);
+                    if (state.dataBuffer.length < MIN_FALLBACK_SAMPLES) {
+                        // Warm-up: a result object rather than the raw message,
+                        // so a downstream check of msg.isAnomaly sees every message
+                        const warmupMsg = {
+                            payload: value,
+                            isAnomaly: false,
+                            severity: "warmup",
+                            bufferSize: state.dataBuffer.length,
+                            minRequired: MIN_FALLBACK_SAMPLES,
+                            method: IsolationForest ? "isolation-forest" : "fallback-zscore",
+                            timestamp: Date.now()
+                        };
+                        if (node.outputTopic) {
+                            warmupMsg.topic = node.outputTopic;
+                        }
+                        if (node.groupBy) {
+                            warmupMsg.group = state.key;
+                        }
+                        copyPassthrough(warmupMsg, msg, { preserveTopic: !node.outputTopic });
+                        node.status({
+                            fill: "yellow",
+                            shape: "ring",
+                            text: groupText(state, "warm-up " + state.dataBuffer.length + "/" + MIN_FALLBACK_SAMPLES)
+                        });
+                        send([warmupMsg, null]);
                         done();
                         return;
                     }
 
-                    const values = state.dataBuffer.map((d) => d.value);
+                    const values = state.dataBuffer.toArray();
                     const zScoreResult = stats.calculateZScore(value, values);
                     const zScore = zScoreResult.zScore;
                     const isFallbackAnomaly = Math.abs(zScore) > 3.0;

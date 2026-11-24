@@ -9,8 +9,10 @@
  *     on attacker-controlled JSON, so a weight named "../../x" wrote outside the
  *     model directory.
  *   - `POST /ml-inference/upload` buffered the request body with no ceiling.
- *   - `GET  /ml-inference/registries/mlflow/models` fetched any URL it was
- *     handed, and forced https so real http registries never worked.
+ *   - `GET  /ml-inference/registries/mlflow/models` made the runtime fetch any
+ *     URL it was handed with a caller-chosen bearer token, under read
+ *     permission. The editor never called it; it is gone, and so is the
+ *     equally unused `GET /ml-inference/models/:name/versions`.
  */
 
 const fs = require("fs");
@@ -165,17 +167,17 @@ describe("integration: ml-inference admin routes", () => {
         });
     });
 
-    describe("mlflow registry proxy", () => {
+    describe("removed routes stay removed", () => {
         let mock;
         let mockPort;
-        let seen;
+        let hits;
 
         beforeAll(async () => {
-            seen = [];
+            hits = 0;
             mock = http.createServer((req, res) => {
-                seen.push({ url: req.url, auth: req.headers.authorization });
+                hits++;
                 res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ registered_models: [{ name: "bearing-clf" }] }));
+                res.end(JSON.stringify({ registered_models: [] }));
             });
             await new Promise((r) => mock.listen(0, "127.0.0.1", r));
             mockPort = mock.address().port;
@@ -185,66 +187,38 @@ describe("integration: ml-inference admin routes", () => {
             await new Promise((r) => mock.close(r));
         });
 
-        it("reaches an http registry (the route used to force https)", async () => {
+        it("the MLflow registry proxy is gone: 404, and the runtime contacts nobody", async () => {
             const res = await request(
                 harness.port,
                 "GET",
                 "/ml-inference/registries/mlflow/models?registryUri=" +
-                    encodeURIComponent(`http://127.0.0.1:${mockPort}`)
-            );
-
-            expect(res.status).toBe(200);
-            expect(res.json.models).toEqual([{ name: "bearing-clf" }]);
-            expect(seen[seen.length - 1].url).toBe("/api/2.0/mlflow/registered-models/search");
-        });
-
-        it("passes the token as a header, never in the query string", async () => {
-            await request(
-                harness.port,
-                "GET",
-                "/ml-inference/registries/mlflow/models?registryUri=" +
-                    encodeURIComponent(`http://127.0.0.1:${mockPort}`),
+                    encodeURIComponent(`http://127.0.0.1:${mockPort}/?`),
                 { headers: { "x-mlflow-token": "s3cr3t" } }
             );
 
-            const last = seen[seen.length - 1];
-            expect(last.auth).toBe("Bearer s3cr3t");
-            expect(last.url).not.toContain("s3cr3t");
+            expect(res.status).toBe(404);
+            await new Promise((r) => setTimeout(r, 100));
+            expect(hits).toBe(0);
         });
 
-        it("rejects a non-http scheme", async () => {
-            for (const uri of ["file:///etc/passwd", "gopher://x/1", "ftp://example.org"]) {
-                const res = await request(
-                    harness.port,
-                    "GET",
-                    "/ml-inference/registries/mlflow/models?registryUri=" + encodeURIComponent(uri)
-                );
-                expect(res.status).toBe(400);
-                expect(res.json.error).toMatch(/http or https/i);
+        it("the model versions route is gone: 404", async () => {
+            const res = await request(harness.port, "GET", "/ml-inference/models/small.onnx/versions");
+            expect(res.status).toBe(404);
+        });
+    });
+
+    describe("model listing", () => {
+        it("names models relative to the store and discloses no server path", async () => {
+            const res = await request(harness.port, "GET", "/ml-inference/models");
+
+            expect(res.status).toBe(200);
+            expect(Object.keys(res.json)).toEqual(["models"]);
+            expect(res.body).not.toContain(harness.userDir);
+            const names = res.json.models.map((m) => m.name);
+            expect(names).toContain("small.onnx");
+            for (const m of res.json.models) {
+                expect(m.path).toBe(m.name);
             }
-        });
-
-        it("rejects credentials embedded in the URL", async () => {
-            const res = await request(
-                harness.port,
-                "GET",
-                "/ml-inference/registries/mlflow/models?registryUri=" +
-                    encodeURIComponent("http://user:pass@127.0.0.1:1/")
-            );
-
-            expect(res.status).toBe(400);
-            expect(res.json.error).toMatch(/credentials/i);
-        });
-
-        it("rejects a malformed URL", async () => {
-            const res = await request(
-                harness.port,
-                "GET",
-                "/ml-inference/registries/mlflow/models?registryUri=" + encodeURIComponent("not a url")
-            );
-
-            expect(res.status).toBe(400);
-            expect(res.json.error).toMatch(/valid URL/i);
         });
     });
 
@@ -262,8 +236,7 @@ describe("integration: ml-inference admin routes", () => {
             "/ml-inference/max-status",
             "/ml-inference/coral-status",
             "/ml-inference/models",
-            "/ml-inference/registries",
-            "/ml-inference/models/does-not-exist/versions"
+            "/ml-inference/registries"
         ];
 
         it.each(ROUTES)(

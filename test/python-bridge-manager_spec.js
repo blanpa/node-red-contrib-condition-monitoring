@@ -5,7 +5,12 @@ const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-const { PythonBridgeManager, getGlobalBridge, shutdownGlobalBridge } = require("../nodes/python-bridge-manager");
+const {
+    PythonBridgeManager,
+    getGlobalBridge,
+    shutdownGlobalBridge,
+    resetGlobalCrashLedger
+} = require("../nodes/python-bridge-manager");
 
 /**
  * These tests exercise the bridge protocol without any Python ML stack.
@@ -238,6 +243,95 @@ describe("PythonBridgeManager", () => {
             await expect(bridge.sendCommand("ping")).rejects.toThrow("EPIPE");
             expect(bridge.getStats().pendingRequests).toBe(0);
         });
+
+        it("rejects with EBUSY once maxPendingRequests are in flight, without writing to Python", async () => {
+            const bridge = makeStubbedBridge({ requestTimeout: 5000, maxPendingRequests: 2 });
+            const a = bridge.sendCommand("ping");
+            const b = bridge.sendCommand("ping");
+
+            const err = await bridge.sendCommand("ping").catch((e) => e);
+            expect(err).toBeInstanceOf(Error);
+            expect(err.code).toBe("EBUSY");
+            expect(err.message).toMatch(/busy: 2 requests pending \(limit 2\)/);
+            expect(bridge.getStats().pendingRequests).toBe(2);
+            expect(bridge.process.stdin.write).toHaveBeenCalledTimes(2);
+
+            bridge._handleResponse(JSON.stringify({ id: "req_1", success: true, result: 1 }));
+            bridge._handleResponse(JSON.stringify({ id: "req_2", success: true, result: 2 }));
+            await expect(Promise.all([a, b])).resolves.toEqual([1, 2]);
+
+            // Capacity is back once the backlog drained.
+            const c = bridge.sendCommand("ping");
+            bridge._handleResponse(JSON.stringify({ id: "req_3", success: true, result: 3 }));
+            await expect(c).resolves.toBe(3);
+        });
+
+        it("caps pending requests at 64 by default", () => {
+            expect(new PythonBridgeManager().maxPendingRequests).toBe(64);
+        });
+    });
+
+    describe("crash backoff (ledger driven, no process)", () => {
+        it("refuses start() inside the backoff window after a crash and says how long", async () => {
+            const bridge = new PythonBridgeManager({ crashBackoffMs: 30000 });
+            bridge._recordCrash(Date.now() - 5000);
+
+            const err = await bridge.start().catch((e) => e);
+            expect(err).toBeInstanceOf(Error);
+            expect(err.code).toBe("EBRIDGEBACKOFF");
+            expect(err.message).toMatch(/crashed 5 s ago; not restarting it for another 25 s/);
+            expect(bridge.process).toBeNull();
+        });
+
+        it("allows start() again once the backoff has passed", () => {
+            const bridge = new PythonBridgeManager({ crashBackoffMs: 30000 });
+            bridge._recordCrash(Date.now() - 31000);
+            expect(bridge._restartRefusal()).toBeNull();
+        });
+
+        it("locks out after maxCrashRestarts crashes within the window, until the window has passed", () => {
+            const bridge = new PythonBridgeManager({ crashBackoffMs: 0, maxCrashRestarts: 3, crashWindowMs: 600000 });
+            const now = Date.now();
+            bridge._recordCrash(now - 3000);
+            bridge._recordCrash(now - 2000);
+            expect(bridge._restartRefusal(now)).toBeNull();
+
+            bridge._recordCrash(now - 1000);
+            const err = bridge._restartRefusal(now);
+            expect(err.code).toBe("EBRIDGELOCKOUT");
+            expect(err.message).toMatch(/crashed 3 times within 10 min; not restarting it for another 599 s/);
+            expect(err.message).toMatch(/restart Node-RED to retry now/);
+
+            // Crashes age out of the window; one fresh attempt is allowed then.
+            expect(bridge._restartRefusal(now + 600000)).toBeNull();
+        });
+
+        it("shares one ledger across the instances getGlobalBridge hands out after a crash", async () => {
+            resetGlobalCrashLedger();
+            const a = getGlobalBridge();
+            a._recordCrash();
+            // What ml-inference's forgetPythonBridge does on `exit`: drop the
+            // singleton, so the next predict() constructs a new instance.
+            await shutdownGlobalBridge();
+            const b = getGlobalBridge();
+            expect(b).not.toBe(a);
+
+            const err = await b.start().catch((e) => e);
+            expect(err.code).toBe("EBRIDGEBACKOFF");
+            expect(b.process).toBeNull();
+
+            resetGlobalCrashLedger();
+            expect(b._restartRefusal()).toBeNull();
+            await shutdownGlobalBridge();
+        });
+
+        it("a clean stop() of a running bridge ends the crash series", async () => {
+            const bridge = makeStubbedBridge({ requestTimeout: 50 });
+            bridge._recordCrash(Date.now() - 1000);
+            bridge.sendCommand = jest.fn().mockRejectedValue(new Error("no answer"));
+            await bridge.stop();
+            expect(bridge._restartRefusal()).toBeNull();
+        });
     });
 
     describe("startup error paths", () => {
@@ -349,6 +443,61 @@ describe("PythonBridgeManager", () => {
             expect(bridge.isReady).toBe(false);
             expect(bridge.process).toBeNull();
             expect(bridge.getStats().pendingRequests).toBe(0);
+        });
+
+        it("refuses to respawn inside the backoff window after a crash (no respawn storm)", async () => {
+            bridge = new PythonBridgeManager({
+                bridgeScript: fakeBridgeScript,
+                startupTimeout: 10000,
+                requestTimeout: 5000,
+                crashBackoffMs: 60000
+            });
+            await bridge.start();
+
+            const exitPromise = once(bridge, "exit");
+            await expect(bridge.sendCommand("crash")).rejects.toThrow(/exited with code 3/);
+            await exitPromise;
+
+            const started = Date.now();
+            const err = await bridge.start().catch((e) => e);
+            expect(err).toBeInstanceOf(Error);
+            expect(err.code).toBe("EBRIDGEBACKOFF");
+            expect(err.message).toMatch(/Python bridge crashed 0 s ago; not restarting it for another 60 s/);
+            // Refused up front: no interpreter was spawned.
+            expect(Date.now() - started).toBeLessThan(500);
+            expect(bridge.process).toBeNull();
+            expect(bridge.isReady).toBe(false);
+        });
+
+        it("stays down with a clear error after too many crashes in the window", async () => {
+            bridge = new PythonBridgeManager({
+                bridgeScript: fakeBridgeScript,
+                startupTimeout: 10000,
+                requestTimeout: 5000,
+                crashBackoffMs: 0,
+                maxCrashRestarts: 2,
+                crashWindowMs: 600000
+            });
+            for (let i = 0; i < 2; i++) {
+                await bridge.start();
+                const exitPromise = once(bridge, "exit");
+                await bridge.sendCommand("crash").catch(() => {});
+                await exitPromise;
+            }
+            const err = await bridge.start().catch((e) => e);
+            expect(err.code).toBe("EBRIDGELOCKOUT");
+            expect(err.message).toMatch(/crashed 2 times within 10 min/);
+            expect(bridge.process).toBeNull();
+        }, 20000);
+
+        it("does not count a death before ready as a crash", async () => {
+            bridge = new PythonBridgeManager({
+                bridgeScript: diesEarlyScript,
+                startupTimeout: 20000,
+                requestTimeout: 1000
+            });
+            await expect(bridge.start()).rejects.toThrow(/exited during startup/);
+            expect(bridge._restartRefusal()).toBeNull();
         });
 
         it("survives stdout noise from the child without an 'error' listener", async () => {

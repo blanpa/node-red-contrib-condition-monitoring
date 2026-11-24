@@ -17,12 +17,17 @@
  *   const bridge = getMaxBridge();
  *   await bridge.loadModel('/models/anomaly.onnx', 'anomaly-detector');
  *   const result = await bridge.predict('anomaly-detector', [0.5, 1.2, 0.8]);
+ *
+ * Authentication: when `MAX_BRIDGE_TOKEN` is set in the Node-RED environment
+ * (or `options.authToken` is passed), every request carries it as
+ * `Authorization: Bearer <token>`. The server (nodes/python/max_bridge.py)
+ * requires exactly that header when the same variable is set on its side.
  */
 
 const http = require("http");
 const https = require("https");
 const EventEmitter = require("events");
-const { requestJson, withRetry, isClientError } = require("./utils/json-http-client");
+const { requestJson, withRetry, retryPolicy } = require("./utils/json-http-client");
 
 class MaxBridgeManager extends EventEmitter {
     constructor(options = {}) {
@@ -34,6 +39,12 @@ class MaxBridgeManager extends EventEmitter {
         this.healthCheckInterval = options.healthCheckInterval || 30000;
         this.retryAttempts = options.retryAttempts || 3;
         this.retryDelay = options.retryDelay || 1000;
+
+        // Shared secret for the server, read once: a token that appears in the
+        // environment after the bridge was created is picked up on the next
+        // deploy (the singleton is recreated), not mid-flight.
+        this.authToken =
+            options.authToken !== undefined ? options.authToken || null : process.env.MAX_BRIDGE_TOKEN || null;
 
         // Parse URL
         const url = new URL(this.serverUrl);
@@ -67,6 +78,7 @@ class MaxBridgeManager extends EventEmitter {
             method: method,
             path: path,
             data: data,
+            headers: this.authToken ? { Authorization: "Bearer " + this.authToken } : undefined,
             timeoutMs: this.requestTimeout,
             contentTypeAlways: true,
             onSettled: (responseTime, success) => this._updateStats(responseTime, success)
@@ -91,16 +103,19 @@ class MaxBridgeManager extends EventEmitter {
     }
 
     /**
-     * Make request with retry
+     * Make request with retry.
+     *
+     * Connection errors are always retried (the server never saw the
+     * request). Timeouts and 4xx never are. A 5xx is retried only when
+     * `idempotent` is set — i.e. for GET status: a 5xx from /predict is the
+     * model failing, and a timed-out predict is still running on the server,
+     * so repeating either just multiplies the load.
      */
-    _requestWithRetry(method, path, data = null) {
+    _requestWithRetry(method, path, data = null, { idempotent = false } = {}) {
         return withRetry(() => this._request(method, path, data), {
             retryAttempts: this.retryAttempts,
             retryDelay: this.retryDelay,
-            // Don't retry on client errors (4xx). Prefer the structured
-            // statusCode; the message check stays as a fallback for
-            // errors raised without one.
-            isFinal: (err) => isClientError(err) || !!(err.message && err.message.includes("HTTP 4"))
+            isFinal: retryPolicy({ retryServerErrors: idempotent })
         });
     }
 
@@ -126,7 +141,7 @@ class MaxBridgeManager extends EventEmitter {
      * Get server status and loaded models
      */
     async getStatus() {
-        return this._requestWithRetry("GET", "/status");
+        return this._requestWithRetry("GET", "/status", null, { idempotent: true });
     }
 
     /**

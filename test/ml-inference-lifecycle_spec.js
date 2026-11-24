@@ -37,7 +37,20 @@ const hasPython3 = (() => {
 const itIf = (cond) => (cond ? it : it.skip);
 
 const BUNDLED_ONNX = path.join(__dirname, "..", "nodes", "models", "bearing_fault_clf.onnx");
+const FIXTURES = path.join(__dirname, "fixtures");
+const FIXTURE_ONNX = path.join(FIXTURES, "model.onnx");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Names, sizes and mtimes of everything under `dir` — to prove a load left it alone. */
+function snapshotDir(dir) {
+    const out = {};
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true, recursive: true })) {
+        const full = path.join(entry.parentPath || entry.path, entry.name);
+        const st = fs.statSync(full);
+        out[path.relative(dir, full)] = { size: st.size, mtimeMs: st.mtimeMs, isDir: st.isDirectory() };
+    }
+    return out;
+}
 
 async function waitFor(predicate, timeoutMs = 5000) {
     const start = Date.now();
@@ -54,14 +67,21 @@ describe("ml-inference lifecycle", () => {
     let registry;
     let registryMode;
     let registryHits;
+    let adminRoutes;
     const nodes = [];
 
     function loadModule() {
         jest.resetModules();
+        // Admin handlers by "METHOD path", so a test can call one directly.
+        adminRoutes = {};
+        const record = (method) =>
+            function (route, ...handlers) {
+                adminRoutes[method + " " + route] = handlers[handlers.length - 1];
+            };
         RED = {
             settings: { userDir },
             events: new EventEmitter(),
-            httpAdmin: { get() {}, post() {}, delete() {} },
+            httpAdmin: { get: record("GET"), post: record("POST"), delete: record("DELETE") },
             auth: { needsPermission: () => (req, res, next) => next() },
             log: { debug() {}, info() {}, warn() {} },
             util: { cloneMessage: (m) => JSON.parse(JSON.stringify(m)) },
@@ -380,10 +400,11 @@ describe("ml-inference lifecycle", () => {
     });
 
     describe("Python bridge", () => {
+        // In the model store: the user dir itself is not allowlisted.
         const bridgeConfig = (id) => ({
             id,
             modelSource: "local",
-            modelPath: path.join(userDir, "m.pkl"),
+            modelPath: path.join(userDir, "ml-models", "m.pkl"),
             modelType: "sklearn"
         });
         // What a node reports when the bridge itself answered the load request
@@ -393,7 +414,8 @@ describe("ml-inference lifecycle", () => {
             node.errors.length > 0 && !/Python bridge (exited|not ready|stopped)/.test(node.errors.join(" "));
 
         beforeEach(() => {
-            fs.writeFileSync(path.join(userDir, "m.pkl"), "not a real pickle");
+            fs.mkdirSync(path.join(userDir, "ml-models"), { recursive: true });
+            fs.writeFileSync(path.join(userDir, "ml-models", "m.pkl"), "not a real pickle");
         });
 
         itIf(hasPython3)(
@@ -507,6 +529,127 @@ describe("ml-inference lifecycle", () => {
             await waitFor(() => second.modelLoaded || second.errors.length > 0);
             expect(second.errors).toEqual([]);
             expect(second.modelLoaded).toBe(true);
+        });
+
+        // Model metadata, driven through the MAX loader because it is the one
+        // local loader that needs no optional runtime here (the mock server
+        // accepts every model).
+        describe("model metadata", () => {
+            const metaDir = () => path.join(userDir, "ml-models", ".meta");
+            const metaFiles = () => (fs.existsSync(metaDir()) ? fs.readdirSync(metaDir()).sort() : []);
+            const readMeta = (name) => JSON.parse(fs.readFileSync(path.join(metaDir(), name), "utf8"));
+            const localMax = (id, modelPath) => createNode({ id, modelSource: "local", modelPath, modelType: "max" });
+
+            it("is written into the store, leaving the model's own directory untouched", async () => {
+                // test/fixtures is a tracked directory with a legacy sidecar in it: a
+                // load used to rewrite that sidecar (new lastLoaded) every time.
+                RED.settings.conditionMonitoring = { allowedModelPaths: [FIXTURES] };
+                const before = snapshotDir(FIXTURES);
+
+                const node = localMax("n1", FIXTURE_ONNX);
+                await waitFor(() => node.modelLoaded || node.errors.length > 0);
+                expect(node.errors).toEqual([]);
+
+                expect(snapshotDir(FIXTURES)).toEqual(before);
+                const files = metaFiles();
+                expect(files).toHaveLength(1);
+                expect(files[0]).toMatch(/^[0-9a-f]{40}\.json$/);
+                // name/version/path come from the legacy sidecar in test/fixtures
+                // (read as a fallback), the format from this load.
+                expect(readMeta(files[0])).toMatchObject({
+                    name: "model.onnx",
+                    version: "1.0.0",
+                    path: "./test/fixtures/model.onnx",
+                    type: "max",
+                    format: "max",
+                    source: "local"
+                });
+            });
+
+            it("still reads a legacy sidecar next to the model, and never writes one", async () => {
+                const store = path.join(userDir, "ml-models");
+                fs.mkdirSync(store, { recursive: true });
+                fs.copyFileSync(BUNDLED_ONNX, path.join(store, "legacy.onnx"));
+                const sidecar = path.join(store, "legacy_metadata.json");
+                const legacy = JSON.stringify({ name: "Legacy Name", version: "7.7.7", metadata: { tag: "kept" } });
+                fs.writeFileSync(sidecar, legacy);
+
+                const node = localMax("n1", path.join(store, "legacy.onnx"));
+                await waitFor(() => node.modelLoaded || node.errors.length > 0);
+                expect(node.errors).toEqual([]);
+
+                expect(fs.readFileSync(sidecar, "utf8")).toBe(legacy);
+                expect(metaFiles()).toHaveLength(1);
+                expect(readMeta(metaFiles()[0])).toMatchObject({
+                    name: "Legacy Name",
+                    version: "7.7.7",
+                    metadata: { tag: "kept" }
+                });
+                expect(fs.readdirSync(store).sort()).toEqual([".meta", "legacy.onnx", "legacy_metadata.json"]);
+            });
+
+            it("is not rewritten when only lastLoaded would change", async () => {
+                RED.settings.conditionMonitoring = { allowedModelPaths: [FIXTURES] };
+                const node = localMax("n1", FIXTURE_ONNX);
+                await waitFor(() => node.modelLoaded);
+                const file = path.join(metaDir(), metaFiles()[0]);
+                const first = fs.readFileSync(file, "utf8");
+                expect(JSON.parse(first).lastLoaded).toBeDefined();
+
+                await sleep(20);
+                await infer(node, { loadModel: FIXTURE_ONNX });
+                expect(node.modelLoaded).toBe(true);
+                expect(fs.readFileSync(file, "utf8")).toBe(first);
+
+                // Something other than the timestamp changed: written.
+                node.modelStage = "staging";
+                await infer(node, { loadModel: FIXTURE_ONNX });
+                const third = fs.readFileSync(file, "utf8");
+                expect(third).not.toBe(first);
+                expect(JSON.parse(third).stage).toBe("staging");
+            });
+
+            it("is what the admin listing reports, by model name, and what deletion removes", async () => {
+                const store = path.join(userDir, "ml-models");
+                fs.mkdirSync(store, { recursive: true });
+                fs.copyFileSync(BUNDLED_ONNX, path.join(store, "listed.onnx"));
+                fs.writeFileSync(path.join(store, "listed_metadata.json"), JSON.stringify({ version: "3.1.4" }));
+                const node = localMax("n1", path.join(store, "listed.onnx"));
+                await waitFor(() => node.modelLoaded || node.errors.length > 0);
+                expect(node.errors).toEqual([]);
+                await closeNode(nodes.pop());
+
+                const call = (key, req) => {
+                    const res = {
+                        code: 200,
+                        body: null,
+                        status(c) {
+                            this.code = c;
+                            return this;
+                        },
+                        json(b) {
+                            this.body = b;
+                        }
+                    };
+                    adminRoutes[key](req, res);
+                    return res;
+                };
+                const list = call("GET /ml-inference/models", {});
+                expect(list.code).toBe(200);
+                expect(Object.keys(list.body)).toEqual(["models"]);
+                // Neither the .meta directory nor the legacy sidecar is a model.
+                expect(list.body.models.map((m) => m.name)).toEqual(["listed.onnx"]);
+                const listed = list.body.models[0];
+                expect(listed).toMatchObject({ path: "listed.onnx", type: "onnx", version: "3.1.4" });
+                expect(listed.metadata.format).toBe("max");
+                expect(JSON.stringify(list.body)).not.toContain(userDir);
+
+                const del = call("DELETE /ml-inference/models/:name", { params: { name: "listed.onnx" } });
+                expect(del.body).toEqual({ success: true });
+                expect(fs.existsSync(path.join(store, "listed.onnx"))).toBe(false);
+                expect(fs.existsSync(path.join(store, "listed_metadata.json"))).toBe(false);
+                expect(metaFiles()).toEqual([]);
+            });
         });
     });
 

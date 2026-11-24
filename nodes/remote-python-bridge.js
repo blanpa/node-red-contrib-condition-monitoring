@@ -33,12 +33,17 @@
  * The public surface intentionally mirrors PythonBridgeManager: start(),
  * loadModel(), predict(), unloadModel(), getStatus(), ping(), stop(),
  * getStats(), plus EventEmitter events.
+ *
+ * Authentication: when `CM_INFERENCE_TOKEN` is set in the Node-RED environment
+ * (or `options.authToken` is passed), every request carries it as
+ * `Authorization: Bearer <token>`. inference_server.py requires exactly that
+ * header when the same variable is set on its side.
  */
 
 const http = require("http");
 const https = require("https");
 const EventEmitter = require("events");
-const { requestJson, withRetry } = require("./utils/json-http-client");
+const { requestJson, withRetry, retryPolicy } = require("./utils/json-http-client");
 
 /**
  * Deterministic string hash (djb2). Used to map a model_id to a replica index;
@@ -64,6 +69,11 @@ class RemotePythonBridge extends EventEmitter {
         this.startupTimeout = options.startupTimeout || 30000;
         this.retryAttempts = options.retryAttempts || 3;
         this.retryDelay = options.retryDelay || 1000;
+
+        // Shared secret for the sidecar, read once at construction (the
+        // singleton is recreated on deploy, so a new token is picked up then).
+        this.authToken =
+            options.authToken !== undefined ? options.authToken || null : process.env.CM_INFERENCE_TOKEN || null;
 
         this.endpoints = urls.map((u) => {
             const url = new URL(u);
@@ -116,6 +126,7 @@ class RemotePythonBridge extends EventEmitter {
             method: method,
             path: path,
             data: data,
+            headers: this.authToken ? { Authorization: "Bearer " + this.authToken } : undefined,
             timeoutMs: timeoutMs,
             timeoutMessage: `Request timeout: ${method} ${path}`,
             emptyBodyIsObject: true,
@@ -135,11 +146,18 @@ class RemotePythonBridge extends EventEmitter {
         }
     }
 
-    /** Retry transport/5xx failures; never retry 4xx (a bad request stays bad). */
-    _requestWithRetry(method, path, data, endpoint) {
+    /**
+     * Retry connection errors (the server never saw the request); never retry
+     * a timeout or a 4xx. A 5xx is retried only for `idempotent` calls (GET
+     * status): a 5xx from /predict is the model failing, and a timed-out
+     * predict is still being executed by the server — repeating either just
+     * multiplies the load on a sidecar that is already struggling.
+     */
+    _requestWithRetry(method, path, data, endpoint, { idempotent = false } = {}) {
         return withRetry(() => this._request(method, path, data, endpoint), {
             retryAttempts: this.retryAttempts,
-            retryDelay: this.retryDelay
+            retryDelay: this.retryDelay,
+            isFinal: retryPolicy({ retryServerErrors: idempotent })
         });
     }
 
@@ -232,11 +250,11 @@ class RemotePythonBridge extends EventEmitter {
      */
     async getStatus() {
         if (this.endpoints.length === 1) {
-            return this._requestWithRetry("GET", "/status", null, this.endpoints[0]);
+            return this._requestWithRetry("GET", "/status", null, this.endpoints[0], { idempotent: true });
         }
         const replicas = await Promise.all(
             this.endpoints.map((ep) =>
-                this._requestWithRetry("GET", "/status", null, ep)
+                this._requestWithRetry("GET", "/status", null, ep, { idempotent: true })
                     .then((s) => ({ url: ep.url, ...s }))
                     .catch((e) => ({ url: ep.url, error: e.message }))
             )

@@ -18,7 +18,12 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+      # Mirror the required CI jobs: no optional ML runtimes, so a tfjs-node
+      # build failure on the runner cannot block a release (ci.yml marks the
+      # optional-runtimes job as allowed to fail for the same reason).
+      - run: npm ci --omit=optional --no-audit --no-fund
+      - name: Install the test resolver's native binding
+        run: node -e "try { require('unrs-resolver') } catch (e) { console.log('binding installed on first use') }"
       # Coverage run enforces the jest coverageThreshold gate before publish
       - run: npm run test:coverage
       - run: npm run lint
@@ -45,7 +50,7 @@ jobs:
       - name: Upgrade npm (trusted publishing needs npm >= 11.5.1)
         run: npm install -g npm@^11
 
-      - run: npm ci
+      - run: npm ci --omit=optional --no-audit --no-fund
 
       - name: Verify tag matches package.json version
         run: |

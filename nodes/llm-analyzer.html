@@ -9,9 +9,10 @@
 
             // provider & model
             provider:            { value: "anthropic" },
-            model:               { value: "claude-haiku-4-5-20251001" },
+            model:               { value: "claude-haiku-5-5" },
             apiUrl:              { value: "" },
             allowMsgApiUrl:      { value: false },
+            allowMsgOverrides:   { value: false },
 
             // trigger
             triggerMode:         { value: "batch" },
@@ -103,7 +104,7 @@
 
             // Provider-specific hints for the URL and API-key placeholder.
             const PROVIDER_HINTS = {
-                "anthropic":         { url: "(default: api.anthropic.com/v1/messages)",                                                            model: "claude-haiku-4-5-20251001",     keyHint: "sk-ant-..." },
+                "anthropic":         { url: "(default: api.anthropic.com/v1/messages)",                                                            model: "claude-haiku-5-5",              keyHint: "sk-ant-..." },
                 "openai":            { url: "(default: api.openai.com/v1/chat/completions)",                                                       model: "gpt-4o-mini",                   keyHint: "sk-..." },
                 "google":            { url: "(default: generativelanguage.googleapis.com/v1beta/models/{model}:generateContent)",                  model: "gemini-3.8-flash",              keyHint: "AIza..." },
                 "ollama":            { url: "(default: http://localhost:11434/api/chat)",                                                          model: "llama3.2",                      keyHint: "(usually none)" },
@@ -495,7 +496,7 @@
             </div>
             <div class="cm-checkbox-row" style="margin-top: 6px;">
                 <input type="checkbox" id="node-input-persistState">
-                <label for="node-input-persistState">Persist buffer &amp; counters across restarts (saved every 30 s + on close)</label>
+                <label for="node-input-persistState">Persist buffer &amp; counters across restarts (saved every 30 s + on close; the newest 100 000 samples at most)</label>
             </div>
         </div>
     </div>
@@ -559,8 +560,18 @@
             <div class="cm-tip">
                 <b>Placeholders:</b> <code>{sensor}</code>, <code>{unit}</code>, <code>{count}</code>, <code>{stats}</code>, <code>{samples}</code>.
                 In <i>record</i> mode add: <code>{columns}</code>, <code>{records}</code>; <code>{stats}</code> becomes a per-column block.
-                A flow can override per-message via <code>msg.prompt</code>, <code>msg.systemPrompt</code> or <code>msg.model</code>
+                With the override below enabled, a flow can replace the prompts or the model per message via
+                <code>msg.prompt</code>, <code>msg.systemPrompt</code> or <code>msg.model</code>
                 (and <code>msg.apiUrl</code>, if enabled under <i>Provider</i>).
+            </div>
+            <div class="cm-checkbox-row" style="margin-top: 10px;">
+                <input type="checkbox" id="node-input-allowMsgOverrides">
+                <label for="node-input-allowMsgOverrides">Allow <code>msg.prompt</code> / <code>msg.systemPrompt</code> / <code>msg.model</code> overrides</label>
+            </div>
+            <div class="cm-help-text">
+                Off by default: any upstream message that forwards its fields (MQTT JSON, http-in body) could otherwise
+                replace the system prompt or switch to a more expensive model. When off, such fields are ignored and
+                reported once as a warning.
             </div>
 
             <div style="margin-top: 12px; display: flex; align-items: center; gap: 8px;">
@@ -591,13 +602,14 @@
         <dd>Manual mode only — set <code>true</code> to trigger an analysis now.</dd>
 
         <dt class="optional">prompt <span class="property-type">string</span></dt>
-        <dd>Replaces the user-prompt template. Placeholders (<code>{sensor}</code> etc.) are still substituted.</dd>
+        <dd>Replaces the user-prompt template. Placeholders (<code>{sensor}</code> etc.) are still substituted.
+            Ignored (with one warning) unless <i>Allow msg.prompt / msg.systemPrompt / msg.model overrides</i> is ticked under <i>Prompts</i>.</dd>
 
         <dt class="optional">systemPrompt <span class="property-type">string</span></dt>
-        <dd>Replaces the system prompt for this call only.</dd>
+        <dd>Replaces the system prompt for this call only. Same opt-in as <code>msg.prompt</code>.</dd>
 
         <dt class="optional">model <span class="property-type">string</span></dt>
-        <dd>Per-message model override.</dd>
+        <dd>Per-message model override. Same opt-in as <code>msg.prompt</code>.</dd>
 
         <dt class="optional">apiUrl <span class="property-type">string</span></dt>
         <dd>Per-message API endpoint override. Ignored unless <i>Allow msg.apiUrl override</i> is ticked, and then only accepted
@@ -637,7 +649,9 @@
     The node never emits a payload-bearing output on failure.</p>
     <p>After a <b>transient</b> failure (timeout, network error, HTTP 429 or 5xx) the batch is put back into the buffer
     and the call is retried with exponential backoff (2 s doubling up to 5 min, honouring <code>Retry-After</code>);
-    in <i>manual</i> mode the next <code>msg.flush</code> retries it. Other failures (4xx, bad JSON) drop the batch.
+    in <i>manual</i> mode the next <code>msg.flush</code> retries it. Other failures (4xx, bad JSON, a refused
+    request) drop the batch. A redeploy during a call aborts it and keeps the batch in the buffer (and in the
+    persisted state, when enabled).
     Successful outputs carry <code>msg.finishReason</code>, and <code>msg.truncated = true</code> when the answer was cut
     off at <i>max output tokens</i>.</p>
 

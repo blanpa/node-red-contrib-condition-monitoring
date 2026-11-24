@@ -220,6 +220,40 @@ describe("condition-monitoring-source hardening", function () {
         });
     });
 
+    it("reports an input-handler failure exactly once (handleNodeError, no second done(err))", function (done) {
+        const flow = [
+            { id: "n1", type: "condition-monitoring-source", name: "src", wires: [["n2"]] },
+            { id: "n2", type: "helper" }
+        ];
+        helper.load(cmSourceNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const errors = [];
+            n1.error = function (err, msg) {
+                errors.push({ text: String(err && err.message ? err.message : err), msg });
+            };
+            // applyOverrides reads cfg.rpm → the getter throws inside the handler.
+            const cfg = {};
+            Object.defineProperty(cfg, "rpm", {
+                enumerable: true,
+                get() {
+                    throw new Error("boom");
+                }
+            });
+            n1.receive({ config: cfg, topic: "t" });
+            setTimeout(function () {
+                try {
+                    expect(errors).toHaveLength(1);
+                    expect(errors[0].text).toBe("CM source error: boom");
+                    // Correlated to the triggering message for a catch node.
+                    expect(errors[0].msg).toMatchObject({ topic: "t" });
+                    done();
+                } catch (err) {
+                    done(err);
+                }
+            }, 40);
+        });
+    });
+
     it("a seeded stream replays identically after a reset", function (done) {
         const flow = [
             { id: "n1", type: "condition-monitoring-source", seed: 42, noise: 1, wires: [["n2"]] },

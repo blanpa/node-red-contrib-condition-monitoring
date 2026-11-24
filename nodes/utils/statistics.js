@@ -528,6 +528,206 @@ class RunningStats {
 }
 
 /**
+ * Online mean vector and covariance matrix of a stream of rows (the
+ * multivariate Welford update), with a reverse update for sliding windows.
+ *
+ * Replaces recomputing the covariance of a whole window on every sample
+ * (O(n·p²)) with an O(p²) update. The same stability caveat as
+ * RunningStats.remove applies: callers that slide a window should rebuild
+ * from the buffer once per window turnover and when the variance collapses.
+ *
+ * @example
+ * const c = new RunningCovariance(2);
+ * c.push([1, 2]); c.push([2, 4]); c.push([3, 7]);
+ * c.means();       // [2, 4.333]
+ * c.covariance();  // sample covariance (1/(n-1))
+ */
+class RunningCovariance {
+    /** @param {number} dimensions - Row length */
+    constructor(dimensions) {
+        if (!Number.isInteger(dimensions) || dimensions < 1) {
+            throw new Error("RunningCovariance needs a positive number of dimensions");
+        }
+        this.p = dimensions;
+        this.n = 0;
+        this._mean = new Float64Array(dimensions);
+        // Co-moment matrix Σ (x_i − mean_i)(x_j − mean_j), row-major, symmetric
+        this._c = new Float64Array(dimensions * dimensions);
+    }
+
+    /** Add a row. Rows of the wrong length or with non-finite entries are ignored. */
+    push(row) {
+        const p = this.p;
+        if (!row || row.length !== p) return;
+        for (let i = 0; i < p; i++) {
+            if (typeof row[i] !== "number" || !Number.isFinite(row[i])) return;
+        }
+        this.n++;
+        const delta = new Float64Array(p);
+        for (let i = 0; i < p; i++) {
+            delta[i] = row[i] - this._mean[i];
+            this._mean[i] += delta[i] / this.n;
+        }
+        // C += (x − mean_old) ⊗ (x − mean_new) = (n−1)/n · δ ⊗ δ
+        const scale = (this.n - 1) / this.n;
+        for (let i = 0; i < p; i++) {
+            const di = delta[i] * scale;
+            for (let j = i; j < p; j++) {
+                const v = di * delta[j];
+                this._c[i * p + j] += v;
+                if (j !== i) this._c[j * p + i] += v;
+            }
+        }
+    }
+
+    /** Remove a previously pushed row (reverse update). */
+    remove(row) {
+        const p = this.p;
+        if (!row || row.length !== p) return;
+        for (let i = 0; i < p; i++) {
+            if (typeof row[i] !== "number" || !Number.isFinite(row[i])) return;
+        }
+        if (this.n <= 1) {
+            this.reset();
+            return;
+        }
+        const newN = this.n - 1;
+        const delta = new Float64Array(p);
+        for (let i = 0; i < p; i++) {
+            delta[i] = row[i] - this._mean[i];
+            this._mean[i] = (this._mean[i] * this.n - row[i]) / newN;
+        }
+        // C −= (x − mean_old) ⊗ (x − mean_new) = n/(n−1) · δ ⊗ δ
+        const scale = this.n / newN;
+        for (let i = 0; i < p; i++) {
+            const di = delta[i] * scale;
+            for (let j = i; j < p; j++) {
+                const v = di * delta[j];
+                this._c[i * p + j] -= v;
+                if (j !== i) this._c[j * p + i] -= v;
+            }
+            // Guard the variances against floating-point drift below zero
+            if (this._c[i * p + i] < 0) this._c[i * p + i] = 0;
+        }
+        this.n = newN;
+    }
+
+    count() {
+        return this.n;
+    }
+
+    /** @returns {number[]} Mean of each dimension */
+    means() {
+        return Array.from(this._mean);
+    }
+
+    /** Population variance of one dimension (1/n). */
+    variance(i) {
+        return this.n === 0 ? 0 : this._c[i * this.p + i] / this.n;
+    }
+
+    /** @returns {number[][]|null} Sample covariance matrix (1/(n−1)), null below 2 rows */
+    covariance() {
+        if (this.n < 2) return null;
+        const p = this.p;
+        const cov = new Array(p);
+        for (let i = 0; i < p; i++) {
+            cov[i] = new Array(p);
+            for (let j = 0; j < p; j++) {
+                cov[i][j] = this._c[i * p + j] / (this.n - 1);
+            }
+        }
+        return cov;
+    }
+
+    reset() {
+        this.n = 0;
+        this._mean.fill(0);
+        this._c.fill(0);
+    }
+}
+
+/**
+ * Fixed-capacity sliding window of numbers.
+ *
+ * The detector nodes used to keep their window as an array of
+ * `{timestamp, value}` objects and `shift()` the oldest one out — a memmove
+ * of the whole window plus ~80 bytes per sample, for a timestamp nothing
+ * ever read. This is a ring over a Float64Array: push is O(1) and the window
+ * costs 8 bytes per sample. The backing store starts small and grows towards
+ * `capacity`, so a 100 000-sample window does not reserve 800 kB up front.
+ *
+ * @param {number} capacity - Maximum number of samples kept (>= 1)
+ * @returns {{
+ *   capacity: number,
+ *   length: number,
+ *   push: function(number): (number|undefined),
+ *   get: function(number): (number|undefined),
+ *   last: function(): (number|undefined),
+ *   toArray: function(): number[],
+ *   clear: function(): void,
+ *   toJSON: function(): number[]
+ * }} `push` returns the sample it evicted, if any. `get(i)` is the i-th
+ *    oldest sample; `toArray()` lists oldest first.
+ */
+function createRingBuffer(capacity) {
+    if (!Number.isInteger(capacity) || capacity < 1) {
+        throw new Error("Ring buffer capacity must be a positive integer");
+    }
+    let data = new Float64Array(Math.min(capacity, 64));
+    let head = 0; // index of the oldest sample
+    let size = 0;
+
+    function toArray() {
+        const out = new Array(size);
+        for (let i = 0; i < size; i++) {
+            out[i] = data[(head + i) % data.length];
+        }
+        return out;
+    }
+
+    return {
+        capacity: capacity,
+        get length() {
+            return size;
+        },
+        push: function (value) {
+            if (size === data.length && size < capacity) {
+                // Grow geometrically, re-laying the samples out from index 0
+                const grown = new Float64Array(Math.min(capacity, data.length * 2));
+                for (let i = 0; i < size; i++) {
+                    grown[i] = data[(head + i) % data.length];
+                }
+                data = grown;
+                head = 0;
+            }
+            if (size < data.length) {
+                data[(head + size) % data.length] = value;
+                size++;
+                return undefined;
+            }
+            const evicted = data[head];
+            data[head] = value;
+            head = (head + 1) % data.length;
+            return evicted;
+        },
+        get: function (index) {
+            if (index < 0 || index >= size) return undefined;
+            return data[(head + index) % data.length];
+        },
+        last: function () {
+            return size === 0 ? undefined : data[(head + size - 1) % data.length];
+        },
+        toArray: toArray,
+        clear: function () {
+            head = 0;
+            size = 0;
+        },
+        toJSON: toArray
+    };
+}
+
+/**
  * Validate that a value is a finite number
  * @param {*} value - Value to validate
  * @returns {boolean} True if value is a finite number
@@ -581,6 +781,8 @@ module.exports = {
 
     // Streaming
     RunningStats,
+    RunningCovariance,
+    createRingBuffer,
 
     // Validation
     isValidNumber,

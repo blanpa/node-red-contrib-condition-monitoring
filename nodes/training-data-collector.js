@@ -65,12 +65,24 @@ module.exports = function (RED) {
     }
 
     // RFC 4180 quoting: a label or feature name containing a comma, quote or
-    // newline must not shift the columns of every row after it.
+    // newline must not shift the columns of every row after it. String cells
+    // that a spreadsheet would evaluate as a formula (leading = + - @, tab or
+    // CR — the DDE / CSV-injection shapes) get a leading apostrophe; numbers
+    // and plain numeric strings ("-1", "+3.5") are left alone, as they stay
+    // numbers in a spreadsheet. Labels and feature names come from the
+    // message, so the file an operator opens in Excel is attacker-writable.
     function csvCell(value) {
         if (value === null || value === undefined) return "";
-        const text = String(value);
+        let text = String(value);
+        if (typeof value === "string" && /^[=+\-@\t\r]/.test(text) && !Number.isFinite(Number(text))) {
+            text = "'" + text;
+        }
         return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
     }
+
+    // Distinct label strings remembered for the metadata file. A device that
+    // labels with ids would otherwise grow the set without bound.
+    const MAX_LABEL_CLASSES = 10000;
 
     // The editor stores the split as three percentages (splitTrain / splitVal
     // / splitTest); a `splitRatio` object ({train,val,test} as 0..1 fractions)
@@ -287,6 +299,8 @@ module.exports = function (RED) {
         // 2x bufferSize, then drop the oldest samples — loudly, so the
         // operator knows data is being lost and can export or enable autoSave.
         let bufferCapWarned = false;
+        // One warning when the label-class set hits MAX_LABEL_CLASSES.
+        let labelClassesCapWarned = false;
         function enforceBufferCap() {
             const hardCap = node.bufferSize * 2;
             if (node.dataBuffer.length <= hardCap) return;
@@ -842,8 +856,17 @@ module.exports = function (RED) {
                 }
             };
 
+            // Same .part + rename path as the datasets: a crash mid-write must
+            // not leave a truncated metadata file next to a complete export.
             const filePath = safeDataPath(RED, path.join(outputDir, filename));
-            await fs.promises.writeFile(filePath, JSON.stringify(metadata, null, 2), "utf8");
+            const partial = safeDataPath(RED, filePath + ".part");
+            try {
+                await fs.promises.writeFile(partial, JSON.stringify(metadata, null, 2), "utf8");
+                await fs.promises.rename(partial, filePath);
+            } catch (err) {
+                fs.promises.unlink(partial).catch(function () {});
+                throw err;
+            }
 
             return filePath;
         }
@@ -1144,6 +1167,7 @@ module.exports = function (RED) {
                             // cleared collector rejects any differently shaped data.
                             node.featureNames = [];
                             bufferCapWarned = false;
+                            labelClassesCapWarned = false;
                             autoSaveFailures = 0;
                             autoSaveNotBefore = 0;
                             updateStatus();
@@ -1188,6 +1212,17 @@ module.exports = function (RED) {
                             });
                             done();
                             return;
+
+                        default:
+                            // A control message with a typo used to fall through
+                            // and be collected as a sample.
+                            node.warn(
+                                "Unknown msg.action '" +
+                                    String(msg.action).slice(0, 40) +
+                                    "' ignored (expected export, clear, stats, pause, resume or resetRul)"
+                            );
+                            done();
+                            return;
                     }
                 }
 
@@ -1225,9 +1260,20 @@ module.exports = function (RED) {
                 const label = extractLabel(msg);
                 const severity = extractSeverity(msg);
 
-                // Track label classes
+                // Track label classes (bounded; see MAX_LABEL_CLASSES)
                 if (label !== null && label !== undefined) {
-                    node.labelClasses.add(String(label));
+                    const labelText = String(label);
+                    if (node.labelClasses.size < MAX_LABEL_CLASSES || node.labelClasses.has(labelText)) {
+                        node.labelClasses.add(labelText);
+                    } else if (!labelClassesCapWarned) {
+                        labelClassesCapWarned = true;
+                        node.warn(
+                            "More than " +
+                                MAX_LABEL_CLASSES +
+                                " distinct labels seen; further new labels are stored with their samples " +
+                                "but no longer listed in the metadata classes (is msg.label an id rather than a class?)"
+                        );
+                    }
                 }
 
                 // Create sample

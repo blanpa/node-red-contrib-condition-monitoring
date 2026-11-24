@@ -6,6 +6,7 @@
  * is seeded and assertions are either structural or leave a wide margin.
  */
 const isolationForestNode = require("../nodes/isolation-forest-anomaly.js");
+const stats = require("../nodes/utils/statistics");
 const { buildStubbedNode, feed, output, closeNode, settle, seededRandom } = require("./stub-runtime");
 
 function build(config, seeded) {
@@ -176,6 +177,110 @@ describe("isolation-forest-anomaly hardening", function () {
         });
     });
 
+    describe("input parsing (utils/sensor-value)", function () {
+        it("rejects what parseFloat used to accept", function () {
+            const stub = build({ windowSize: 20 });
+
+            ["123abc", [7], true, "2024-05-01T12:00:00Z", null, NaN, "", "65 °C", { value: 7 }].forEach(
+                function (payload) {
+                    const res = feed(stub, { payload: payload });
+                    expect(res.error).toBe("Payload is not a valid finite number");
+                    expect(res.all).toEqual([]);
+                }
+            );
+            expect(stub.node.groups.size).toBe(0);
+            expect(stub.node.dataBuffer.length).toBe(0);
+
+            expect(feed(stub, { payload: " 7 " }).out1.payload).toBe(7);
+            expect(feed(stub, { payload: "-1.5e1" }).out1.payload).toBe(-15);
+        });
+    });
+
+    describe("warm-up", function () {
+        it("emits a warm-up result for the first sample instead of forwarding the raw message", function () {
+            const stub = build({ windowSize: 20 });
+
+            const res = feed(stub, { payload: 50, topic: "t", deviceId: "d1" });
+
+            expect(res.out2).toBeUndefined();
+            expect(res.out1.payload).toBe(50);
+            expect(res.out1.isAnomaly).toBe(false);
+            expect(res.out1.severity).toBe("warmup");
+            expect(res.out1.bufferSize).toBe(1);
+            expect(res.out1.minRequired).toBe(2);
+            expect(res.out1.method).toBe("isolation-forest");
+            expect(res.out1.topic).toBe("t");
+            expect(res.out1.deviceId).toBe("d1");
+            expect(typeof res.out1.timestamp).toBe("number");
+            expect(stub.statuses[stub.statuses.length - 1].text).toBe("warm-up 1/2");
+
+            // From the second sample on the z-score fallback scores
+            const second = output(feed(stub, { payload: 51 }));
+            expect(second.method).toBe("fallback-zscore");
+            expect(second.severity).toBeUndefined();
+        });
+
+        it("uses the output topic and group on the warm-up message", function () {
+            const stub = build({ windowSize: 20, outputTopic: "alarms", groupBy: "topic" });
+            const res = feed(stub, { payload: 1, topic: "pump-01" });
+
+            expect(res.out1.topic).toBe("alarms");
+            expect(res.out1.group).toBe("pump-01");
+        });
+    });
+
+    describe("ring-buffer window", function () {
+        it("scores the z-score fallback exactly as the array window did", function () {
+            // Window below the 10-sample training minimum: the fallback runs
+            // throughout, across many turnovers
+            const stub = build({ windowSize: 5 });
+            const rng = seededRandom(20);
+            const window = [];
+            for (let i = 0; i < 200; i++) {
+                const v = 10 + rng.gauss();
+                window.push(v);
+                if (window.length > 5) window.shift();
+
+                const msg = output(feed(stub, { payload: v }));
+                if (window.length < 2) {
+                    expect(msg.severity).toBe("warmup");
+                    continue;
+                }
+                const ref = stats.calculateZScore(v, window);
+                expect(msg.method).toBe("fallback-zscore");
+                expect(msg.zScore).toBeCloseTo(ref.zScore, 12);
+                expect(msg.isAnomaly).toBe(Math.abs(ref.zScore) > 3);
+            }
+            expect(stub.node.dataBuffer.toArray()).toEqual(window);
+            expect(stub.node.isTrained).toBe(false);
+        });
+
+        it("builds the training features from the window exactly as before", function () {
+            const stub = build({ windowSize: 50, learningMode: "batch" });
+            const rng = seededRandom(21);
+            const series = [];
+            for (let i = 0; i < 120; i++) {
+                const v = rng.gauss();
+                series.push(v);
+                feed(stub, { payload: v });
+            }
+
+            expect(stub.node.dataBuffer.length).toBe(50);
+            expect(stub.node.dataBuffer.toArray()).toEqual(series.slice(-50));
+
+            // Last fit at sample 100, on samples 51..100: value and step ranges
+            expect(stub.node.lastRetrainCount).toBe(100);
+            const fitted = series.slice(50, 100);
+            const steps = fitted.map(function (v, i) {
+                return i > 0 ? v - fitted[i - 1] : 0;
+            });
+            expect(stub.node.model.featureMin[0]).toBe(Math.min.apply(null, fitted));
+            expect(stub.node.model.featureMax[0]).toBe(Math.max.apply(null, fitted));
+            expect(stub.node.model.featureMin[1]).toBe(Math.min.apply(null, steps));
+            expect(stub.node.model.featureMax[1]).toBe(Math.max.apply(null, steps));
+        });
+    });
+
     describe("message handling", function () {
         it("keeps topic and extra properties on the z-score fallback output", function () {
             const stub = build({});
@@ -312,7 +417,9 @@ describe("isolation-forest-anomaly hardening", function () {
 
             expect(second.node.groups.get("pump-01").dataBuffer.length).toBe(30);
             expect(second.node.groups.get("pump-02").isTrained).toBe(true);
-            expect(second.node.groups.get("pump-02").dataBuffer[0].value).toBeGreaterThan(90);
+            expect(second.node.groups.get("pump-02").dataBuffer.get(0)).toBeGreaterThan(90);
+            // Windows are stored as plain numbers (no per-sample timestamps)
+            expect(typeof first.store.isolationForestState.groups["pump-01"].dataBuffer[0]).toBe("number");
 
             await closeNode(second.node);
         });

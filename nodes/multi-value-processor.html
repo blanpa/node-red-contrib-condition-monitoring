@@ -378,9 +378,15 @@
         <dd>Number of sensors with anomalies</dd>
 
         <dt>msg.skippedValues <span class="property-type">array</span></dt>
-        <dd>Names of entries that were not finite numbers (<code>NaN</code>, <code>null</code>, text) and were
-        left out of the analysis. Only present when something was skipped.</dd>
+        <dd>Names of entries that were not sensor values — <code>NaN</code>, <code>null</code>, text, text with a
+        numeric prefix (<code>"123abc"</code>) and ISO timestamps (<code>"2024-05-01T12:00:00Z"</code>) — and were
+        left out of the analysis. Only present when something was skipped. A field that earlier releases did read
+        as a number is reported once in the log.</dd>
     </dl>
+    <p><b>Baseline:</b> z-score and IQR score each sample against the window as it stood <i>before</i> the sample,
+    once that window holds min(window size, 10) &minus; 1 values (IQR: at least 4). Until then the entry carries
+    <code>severity: "warmup"</code> with <code>bufferSize</code> / <code>minRequired</code> and is never anomalous.
+    A departure from a perfectly flat baseline is a large, finite z-score.</p>
     <p><b>Mahalanobis:</b> each sample is scored against the mean and covariance of the samples <i>before</i>
     it (at least 10 complete ones). <b>Threshold</b> and <b>Warning Threshold</b> are sigma-like confidence
     levels (3 &asymp; 99.87%); the distance limit derived from them accounts for the number of sensors and the
@@ -421,7 +427,16 @@
         
         <dt>msg.stats <span class="property-type">object</span></dt>
         <dd>Statistics including sensor means and buffer size</dd>
+
+        <dt>msg.severity <span class="property-type">string</span></dt>
+        <dd><code>"warmup"</code> on the first two messages (fewer than 3 pairs): <code>correlation</code> is
+        <code>null</code>, <code>isAnomalous</code> is <code>false</code>, <code>bufferSize</code> /
+        <code>minRequired</code> report the progress. The message leaves on the first output.</dd>
     </dl>
+
+    <h3>Output Topic</h3>
+    <p><b>Output Topic</b> (Advanced Settings) replaces <code>msg.topic</code> on every outgoing message in every
+    mode. Leave it empty to keep the inbound topic.</p>
     
     <h3>Per-device grouping</h3>
     <p>Set <b>Group By</b> to a message property (e.g. <code>topic</code>, or a nested path such as

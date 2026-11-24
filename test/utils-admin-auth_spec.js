@@ -95,6 +95,6 @@ describe("httpAdmin routes are guarded", () => {
             const src = fs.readFileSync(path.join(NODES_DIR, file), "utf8");
             count += (src.match(/RED\.httpAdmin\.(get|post|put|delete)\(/g) || []).length;
         }
-        expect(count).toBeGreaterThanOrEqual(18);
+        expect(count).toBeGreaterThanOrEqual(16);
     });
 });

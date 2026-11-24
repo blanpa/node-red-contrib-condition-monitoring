@@ -314,7 +314,9 @@
     <h3>Inputs</h3>
     <dl class="message-properties">
         <dt>payload <span class="property-type">number</span></dt>
-        <dd>The numeric value to be checked for anomalies.</dd>
+        <dd>The numeric value to be checked for anomalies. A purely numeric string (<code>"12.5"</code>) is
+        accepted too; anything else (<code>"123abc"</code>, arrays, booleans, timestamps) is rejected with an
+        error.</dd>
         <dt class="optional">reset <span class="property-type">boolean</span></dt>
         <dd>Set to <code>true</code> to clear the buffer and retrain the model.</dd>
     </dl>
@@ -343,6 +345,10 @@
         <dd>Sample count at last model retrain</dd>
         <dt>method <span class="property-type">string</span></dt>
         <dd>"isolation-forest" or "fallback-zscore" if library unavailable</dd>
+        <dt>severity <span class="property-type">string</span></dt>
+        <dd><code>"warmup"</code> on the very first sample of a window (nothing to score against yet):
+        <code>isAnomaly</code> is <code>false</code>, <code>bufferSize</code> / <code>minRequired</code> report the
+        progress.</dd>
         <dt>timestamp <span class="property-type">number</span></dt>
         <dd>Unix timestamp in milliseconds</dd>
     </dl>

@@ -510,8 +510,8 @@ msg.action = "resetRul"; // Reset RUL counter
 // Inputs
 msg.payload    // number / number[] (scalar) or object / object[] (record)
 msg.flush      // true → fire now (manual mode)
-msg.prompt     // per-message override of user prompt template
-msg.systemPrompt, msg.model             // per-message overrides
+msg.prompt, msg.systemPrompt, msg.model // per-message overrides — only with "Allow msg overrides"
+                                        // enabled (otherwise ignored with one warning)
 msg.apiUrl                              // only with "Allow msg.apiUrl override" enabled (same origin)
 
 // Outputs
@@ -819,11 +819,22 @@ msg.config = {
   zscoreThreshold: 2.5,       // Override Z-score threshold
   zscoreWarning: 1.8,         // Override warning threshold
   iqrMultiplier: 1.5,         // Override IQR multiplier
+  iqrWarningMultiplier: 1.0,  // Override IQR warning multiplier (0 = off)
   minThreshold: 10,           // Override min threshold
   maxThreshold: 100,          // Override max threshold
+  lowerPercentile: 5,         // Percentile bounds (0-100)
+  upperPercentile: 95,
+  emaThreshold: 2.0,          // EMA critical / warning
+  emaWarning: 1.5,
+  cusumThreshold: 5.0,        // CUSUM critical / warning / drift
+  cusumWarning: 3.0,
+  cusumDrift: 0.5,
+  maThreshold: 2.0,           // Moving-average critical / warning
+  maWarning: 1.5,
   hysteresisEnabled: false,   // Enable/disable hysteresis
   consecutiveCount: 5         // Override consecutive count
 };
+// An unknown `method` is ignored with one warning; batch mode honours the same keys.
 msg.payload = 42.5;
 msg.regime = "high-load";     // selects the baseline when "Regime Property" is set to "regime"
 ```
@@ -837,7 +848,8 @@ msg.config = {
   rocThreshold: 5,            // Override rate of change threshold
   failureThreshold: 100,      // Override RUL failure threshold
   warningThreshold: 80,       // Override RUL warning threshold
-  predictionSteps: 10         // Override prediction horizon
+  predictionSteps: 10,        // Override prediction horizon
+  failureDirection: "falling" // "rising" (default) or "falling": which way is failure
 };
 msg.payload = 75.2;
 ```
@@ -847,9 +859,10 @@ msg.payload = 75.2;
 ```javascript
 msg.config = {
   mode: "vibration",          // Override mode (fft/vibration/peaks/envelope/cepstrum)
-  vibrationThreshold: 5,      // Override vibration threshold
-  peakThreshold: 0.3,         // Override peak detection threshold
-  shaftSpeed: 1450,           // RPM for this message (msg.rpm does the same)
+  samplingRate: 20000,        // Sampling rate of THIS message's frame (msg.samplingRate does the same)
+  vibrationThreshold: 5,      // Override the crest-factor alarm threshold
+  minPeakHeight: 0.3,         // Peaks mode: minimum peak height (peakThreshold is the legacy alias)
+  shaftSpeed: 1450,           // RPM for this message (msg.rpm / msg.shaftSpeed do the same)
   bearingBalls: 9,            // Bearing geometry overrides (envelope mode)
   bearingBallDiameter: 7.94,
   bearingPitchDiameter: 39.04,
@@ -1039,7 +1052,7 @@ node registers itself, so this is the node's own responsibility. If you use
 
 | Permission | Grants |
 |---|---|
-| `ml-inference.read` | Runtime/bridge probing, model listing, registry browsing |
+| `ml-inference.read` | Runtime/bridge probing, model listing |
 | `ml-inference.write` | Model upload and deletion |
 | `training-data-collector.read` | Dataset listing and download |
 | `signal-analyzer.read`, `isolation-forest-anomaly.read` | Library availability probes |
@@ -1065,12 +1078,9 @@ module.exports = {
     // Default: 134217728 (128 MB). Bodies above this get a 413.
     mlInferenceMaxUploadBytes: 128 * 1024 * 1024,
 
-    // When set, the MLflow registry proxy only accepts these hostnames.
-    // Leave unset to allow any http/https host (schemes other than
-    // http/https and URL-embedded credentials are always rejected).
-    mlInferenceAllowedRegistryHosts: ["mlflow.internal.example.com"],
-
-    // Restricts which directories model paths may resolve into.
+    // Directories model paths may resolve into, in addition to the
+    // package's model store (<userDir>/ml-models) and its bundled models.
+    // The Node-RED userDir and the process cwd are NOT allowlisted.
     conditionMonitoring: {
         allowedModelPaths: ["/data/models"]
     }
@@ -1081,9 +1091,14 @@ module.exports = {
 
 Store API keys in a node's **credential** field, never in the plain config
 field. Credentials are kept out of `flows.json` and out of flow exports;
-`llm-analyzer` warns at startup if it finds a key in the config instead. S3
-credentials for `training-data-collector` come from `AWS_ACCESS_KEY_ID` /
-`AWS_SECRET_ACCESS_KEY` only — values in the node config are ignored.
+`llm-analyzer` and `ml-inference` (URL, Hugging Face, MLflow and registry
+tokens) warn at startup if they find a key in the config instead. S3
+credentials for `training-data-collector` are resolved in this order: the
+node's credential fields, then `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`,
+then the AWS SDK default chain (shared config, IAM role); keys left in the
+plain config by an old editor are ignored with a warning. The WebSocket auth
+token of `anomaly-detector` is a credential too, next to a comma-separated
+Origin allowlist in the node's WebSocket panel.
 
 See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
 

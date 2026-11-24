@@ -1,23 +1,26 @@
 const helper = require("node-red-node-test-helper");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const mlInferenceNode = require("../nodes/ml-inference.js");
 
 helper.init(require.resolve("node-red"));
 
+const FIXTURES = path.join(__dirname, "fixtures");
+
 // Check which runtimes and fixture models are available
 const hasTFJS = (() => {
     try {
         require("@tensorflow/tfjs-node");
-        return fs.existsSync(path.join(__dirname, "fixtures", "tfjs_model", "model.json"));
+        return fs.existsSync(path.join(FIXTURES, "tfjs_model", "model.json"));
     } catch {
         return false;
     }
 })();
-const _hasONNX = (() => {
+const hasONNX = (() => {
     try {
         require("onnxruntime-node");
-        return fs.existsSync(path.join(__dirname, "fixtures", "model.onnx"));
+        return fs.existsSync(path.join(FIXTURES, "model.onnx"));
     } catch {
         return false;
     }
@@ -37,6 +40,19 @@ const canLoadTFJS = canRequire("@tensorflow/tfjs-node") || canRequire("@tensorfl
 const canLoadONNX = canRequire("onnxruntime-node");
 
 describe("ml-inference Node", function () {
+    // The runtime allowlists only the model store, the bundled models and
+    // `conditionMonitoring.allowedModelPaths` — not the cwd or the user dir.
+    // Give it a throw-away user dir (so the store is created there, not in
+    // $HOME) and allowlist the fixtures explicitly.
+    let userDir;
+    beforeAll(function () {
+        userDir = fs.mkdtempSync(path.join(os.tmpdir(), "ncm-mlspec-"));
+        helper.settings({ userDir: userDir, conditionMonitoring: { allowedModelPaths: [FIXTURES] } });
+    });
+    afterAll(function () {
+        fs.rmSync(userDir, { recursive: true, force: true });
+    });
+
     beforeEach(function (done) {
         helper.startServer(done);
     });
@@ -82,6 +98,52 @@ describe("ml-inference Node", function () {
         node.modelFormat = "keras";
         node.modelLoaded = true;
         return received;
+    }
+
+    /**
+     * Install a stand-in ONNX session: records the feeds it is run with and
+     * answers a 1x1 output. The shape check runs before the runtime is
+     * touched, so the mismatch cases need no onnxruntime; building the feed
+     * tensor does (hasONNX).
+     */
+    function installOnnxStub(node, session) {
+        const feeds = [];
+        node.model = Object.assign(
+            {
+                run: async function (f) {
+                    feeds.push(f);
+                    return { out: { data: Float32Array.from([0.25]), dims: [1, 1] } };
+                }
+            },
+            session || {}
+        );
+        node.modelFormat = "onnx";
+        node.inputNames = ["input"];
+        node.outputNames = ["out"];
+        node.modelLoaded = true;
+        return feeds;
+    }
+
+    /** Messages node.warn() logged during helper.load() (constructor-time warnings). */
+    function loggedWarnings() {
+        const log = helper.log();
+        return log.args.filter((a) => a[0] && a[0].level === log.WARN).map((a) => String(a[0].msg));
+    }
+
+    /** Wait until `node` has finished its startup load, one way or the other. */
+    function whenSettled(node, timeoutMs) {
+        return new Promise((resolve, reject) => {
+            const start = Date.now();
+            const poll = setInterval(function () {
+                if (node.modelLoaded || node.loadError) {
+                    clearInterval(poll);
+                    resolve();
+                } else if (Date.now() - start > timeoutMs) {
+                    clearInterval(poll);
+                    reject(new Error("model load did not settle within " + timeoutMs + "ms"));
+                }
+            }, 25);
+        });
     }
 
     it("should report 'no model configured' and reject messages when nothing is configured", function (done) {
@@ -249,8 +311,49 @@ describe("ml-inference Node", function () {
         });
     });
 
+    it("should refuse a path under the cwd or the user dir that is not allowlisted", async function () {
+        // Both used to be allowlisted wholesale. The cwd is "/" under systemd's
+        // defaults (= everything); the user dir holds flows_cred.json.
+        const flow = [
+            { id: "n1", type: "ml-inference", modelPath: path.join(process.cwd(), "does-not-exist.onnx") },
+            { id: "n2", type: "ml-inference", modelPath: path.join(userDir, "secret.onnx") },
+            // Relative: resolves against the cwd (not in the store, not bundled).
+            { id: "n3", type: "ml-inference", modelPath: path.join("nodes", "does-not-exist.onnx") }
+        ];
+        await new Promise((resolve) => helper.load(mlInferenceNode, flow, resolve));
+        for (const id of ["n1", "n2", "n3"]) {
+            const n = helper.getNode(id);
+            await whenSettled(n, 2000);
+            expect(n.modelLoaded).toBe(false);
+            expect(n.loadError && n.loadError.code).toBe("EPATHFORBIDDEN");
+        }
+    });
+
+    it("should resolve a bare file name against the model store and models/<file> against the bundled models", async function () {
+        // Both forms are what the editor writes into modelPath (model list / catalog).
+        const store = path.join(userDir, "ml-models");
+        fs.mkdirSync(store, { recursive: true });
+        fs.copyFileSync(path.join(FIXTURES, "model.onnx"), path.join(store, "store.onnx"));
+        const flow = [
+            { id: "n1", type: "ml-inference", modelPath: "store.onnx", modelType: "onnx" },
+            { id: "n2", type: "ml-inference", modelPath: "models/bearing_fault_clf.onnx", modelType: "onnx" }
+        ];
+        await new Promise((resolve) => helper.load(mlInferenceNode, flow, resolve));
+        for (const id of ["n1", "n2"]) {
+            const n = helper.getNode(id);
+            await whenSettled(n, 5000);
+            if (n.loadError) {
+                // Resolved and found; only the optional runtime is missing.
+                expect(n.loadError.message).toMatch(/^ONNX Runtime not available/);
+            } else {
+                expect(n.modelLoaded).toBe(true);
+            }
+        }
+    });
+
     it("should detect the model type from the file extension", function (done) {
-        // Inside the allowlist (cwd) but absent: the error shows which loader was chosen.
+        // Inside the allowlist (the fixtures dir is allowlisted above) but absent:
+        // the error shows which loader was chosen.
         const flow = [
             {
                 id: "n1",
@@ -419,6 +522,227 @@ describe("ml-inference Node", function () {
         });
     });
 
+    it("should accept typed arrays and Buffers, directly and under features/values/input", async function () {
+        // `.values` is a METHOD on these; the property probe used to pick it up
+        // and fail with "inputArray.flat is not a function".
+        const flow = [
+            { id: "n1", type: "ml-inference", name: "ML Model", wires: [["n2"]] },
+            { id: "n2", type: "helper" }
+        ];
+        await new Promise((resolve) => helper.load(mlInferenceNode, flow, resolve));
+        const n1 = helper.getNode("n1");
+        const n2 = helper.getNode("n2");
+        const received = installStubModel(n1, () => [0]);
+        const outputs = [];
+        n2.on("input", (msg) => outputs.push(msg));
+
+        const inputs = [
+            Float32Array.from([1, 2, 3]),
+            Buffer.from([4, 5]),
+            { values: Float32Array.from([6, 7]) },
+            { features: [8, 9], values: "not the data" },
+            // `values` is not an array here: every value of the object is used
+            { values: 10, other: 11 }
+        ];
+        for (const payload of inputs) {
+            n1.receive({ payload: payload });
+        }
+        await new Promise((r) => setTimeout(r, 200));
+
+        expect(outputs).toHaveLength(inputs.length);
+        expect(received).toEqual([
+            [1, 2, 3],
+            [4, 5],
+            [6, 7],
+            [8, 9],
+            [10, 11]
+        ]);
+    });
+
+    it("should still deliver the prediction when MLflow stats run over image-sized tensors", async function () {
+        // Math.max(...flat) threw RangeError at ~150k elements — inside the
+        // inference try, so the already computed prediction was dropped.
+        const flow = [
+            { id: "n1", type: "ml-inference", name: "ML Model", wires: [["n2"]] },
+            { id: "n2", type: "helper" }
+        ];
+        await new Promise((resolve) => helper.load(mlInferenceNode, flow, resolve));
+        const n1 = helper.getNode("n1");
+        const n2 = helper.getNode("n2");
+        const big = Array.from({ length: 200000 }, (_, i) => i % 10);
+        installStubModel(n1, () => big.slice());
+        const logged = [];
+        n1.mlflowTracker = { runId: "run-1", logMetrics: (m) => logged.push(m) };
+        n1.mlflowTrackingEnabled = true;
+        n1.mlflowLogPredictions = true;
+        n1.mlflowLogInputStats = true;
+        const outputs = [];
+        n2.on("input", (msg) => outputs.push(msg));
+
+        n1.receive({ payload: big });
+        await new Promise((r) => setTimeout(r, 500));
+
+        expect(outputs).toHaveLength(1);
+        expect(outputs[0].prediction).toHaveLength(200000);
+        expect(outputs[0].mlInference.mlflowTracking).toEqual({
+            experimentName: "node-red-ml-inference",
+            runId: "run-1"
+        });
+        expect(logged).toHaveLength(1);
+        expect(logged[0]).toMatchObject({
+            input_min: 0,
+            input_max: 9,
+            input_mean: 4.5,
+            prediction_min: 0,
+            prediction_max: 9
+        });
+        expect(logged[0].input_std).toBeCloseTo(2.872, 3);
+    });
+
+    it("should not let a failing MLflow tracker veto a prediction", async function () {
+        const flow = [
+            { id: "n1", type: "ml-inference", name: "ML Model", wires: [["n2"]] },
+            { id: "n2", type: "helper" }
+        ];
+        await new Promise((resolve) => helper.load(mlInferenceNode, flow, resolve));
+        const n1 = helper.getNode("n1");
+        const n2 = helper.getNode("n2");
+        const calls = recordCalls(n1);
+        const warnings = [];
+        n1.on("call:warn", (call) => warnings.push(String(call.args[0])));
+        installStubModel(n1, () => [0.5]);
+        n1.mlflowTracker = {
+            runId: "run-2",
+            logMetrics: () => {
+                throw new Error("tracking server went away");
+            }
+        };
+        n1.mlflowTrackingEnabled = true;
+        const outputs = [];
+        n2.on("input", (msg) => outputs.push(msg));
+
+        n1.receive({ payload: [1, 2, 3] });
+        await new Promise((r) => setTimeout(r, 200));
+
+        expect(outputs).toHaveLength(1);
+        expect(outputs[0].prediction).toEqual([0.5]);
+        expect(calls.errors).toEqual([]);
+        expect(warnings).toEqual(["[MLflowTracker] Failed to log metrics: tracking server went away"]);
+    });
+
+    describe("ONNX input shape", function () {
+        it("fails the message when a fixed input shape does not match the input", async function () {
+            // Used to warn and run the model on a [1,N] tensor instead.
+            const flow = [
+                { id: "n1", type: "ml-inference", name: "ML Model", inputShape: "1,5", wires: [["n2"]] },
+                { id: "n2", type: "helper" }
+            ];
+            await new Promise((resolve) => helper.load(mlInferenceNode, flow, resolve));
+            const n1 = helper.getNode("n1");
+            const n2 = helper.getNode("n2");
+            const calls = recordCalls(n1);
+            const feeds = installOnnxStub(n1);
+            let forwarded = 0;
+            n2.on("input", () => forwarded++);
+
+            n1.receive({ payload: [1, 2, 3, 4, 5, 6] });
+            await new Promise((r) => setTimeout(r, 200));
+
+            expect(forwarded).toBe(0);
+            expect(feeds).toEqual([]);
+            expect(calls.errors).toEqual([
+                "Input shape [1,5] expects 5 values, got 6. Fix the node's Input Shape (use -1 for a dynamic dimension) or the input."
+            ]);
+        });
+
+        conditionalIt(hasONNX)(
+            "fills a dynamic dimension and takes the element type from the session",
+            async function () {
+                const flow = [
+                    { id: "n1", type: "ml-inference", name: "Dyn", inputShape: "-1,5", wires: [["n3"]] },
+                    { id: "n2", type: "ml-inference", name: "Int", inputShape: "1,5", wires: [["n3"]] },
+                    { id: "n3", type: "helper" }
+                ];
+                await new Promise((resolve) => helper.load(mlInferenceNode, flow, resolve));
+                const n1 = helper.getNode("n1");
+                const n2 = helper.getNode("n2");
+                const n3 = helper.getNode("n3");
+                const dynFeeds = installOnnxStub(n1);
+                const intFeeds = installOnnxStub(n2, {
+                    inputMetadata: [{ name: "input", isTensor: true, type: "int64", shape: [1, 5] }]
+                });
+                const outputs = [];
+                n3.on("input", (msg) => outputs.push(msg));
+
+                n1.receive({ payload: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] });
+                n2.receive({ payload: [1.7, 2.2, 3, 4, 5] });
+                await new Promise((r) => setTimeout(r, 300));
+
+                expect(outputs).toHaveLength(2);
+                expect(dynFeeds).toHaveLength(1);
+                expect(dynFeeds[0].input.dims).toEqual([2, 5]);
+                expect(dynFeeds[0].input.type).toBe("float32");
+                expect(intFeeds).toHaveLength(1);
+                expect(intFeeds[0].input.type).toBe("int64");
+                expect(Array.from(intFeeds[0].input.data, Number)).toEqual([1, 2, 3, 4, 5]);
+            }
+        );
+    });
+
+    describe("credentials", function () {
+        const CREDENTIALS = ["urlAuthToken", "hfToken", "mlflowAuthToken", "customApiKey"];
+
+        it("keeps the tokens out of the flow: editor defaults carry none, they are registered as credentials", function () {
+            const html = fs.readFileSync(path.join(__dirname, "../nodes/ml-inference.html"), "utf8");
+            const defaults = html.slice(html.indexOf("defaults: {"), html.indexOf("credentials: {"));
+            for (const name of CREDENTIALS) {
+                expect(defaults).not.toMatch(new RegExp("\\b" + name + "\\b"));
+                // One password field per credential, with the id Node-RED binds credentials to.
+                const inputs = html.match(new RegExp('id="node-input-' + name + '"', "g")) || [];
+                expect(inputs).toHaveLength(1);
+                expect(html).toMatch(new RegExp('<input type="password" id="node-input-' + name + '"'));
+            }
+            expect(html).toMatch(
+                /credentials: \{\s*urlAuthToken: \{ type: "password" \},\s*hfToken: \{ type: "password" \},\s*mlflowAuthToken: \{ type: "password" \},\s*customApiKey: \{ type: "password" \}\s*\}/
+            );
+        });
+
+        it("reads the tokens from the node credentials without warning", async function () {
+            const flow = [{ id: "n1", type: "ml-inference", name: "ML Model" }];
+            const creds = { urlAuthToken: "url-t", hfToken: "hf_x", mlflowAuthToken: "mlf-t", customApiKey: "key-x" };
+            await new Promise((resolve) => helper.load(mlInferenceNode, flow, { n1: creds }, resolve));
+            const n1 = helper.getNode("n1");
+            expect(n1.urlAuthToken).toBe("url-t");
+            expect(n1.hfToken).toBe("hf_x");
+            expect(n1.mlflowAuthToken).toBe("mlf-t");
+            expect(n1.customApiKey).toBe("key-x");
+            expect(loggedWarnings().filter((w) => /plain text/.test(w))).toEqual([]);
+        });
+
+        it("still honours a token an old flow carries inline, and says so once", async function () {
+            // Flows saved before the fields were credentials.
+            const flow = [
+                { id: "n1", type: "ml-inference", name: "Old", hfToken: "hf_plain", customApiKey: "k-plain" }
+            ];
+            await new Promise((resolve) => helper.load(mlInferenceNode, flow, resolve));
+            const n1 = helper.getNode("n1");
+            expect(n1.hfToken).toBe("hf_plain");
+            expect(n1.customApiKey).toBe("k-plain");
+            expect(n1.urlAuthToken).toBe("");
+            const warnings = loggedWarnings().filter((w) => /plain text/.test(w));
+            expect(warnings).toHaveLength(2);
+            expect(warnings[0]).toMatch(/^ml-inference: hfToken is set in the node config/);
+            expect(warnings[1]).toMatch(/^ml-inference: customApiKey is set in the node config/);
+        });
+
+        it("prefers the credential over an inline leftover", async function () {
+            const flow = [{ id: "n1", type: "ml-inference", name: "Both", hfToken: "hf_plain" }];
+            await new Promise((resolve) => helper.load(mlInferenceNode, flow, { n1: { hfToken: "hf_cred" } }, resolve));
+            expect(helper.getNode("n1").hfToken).toBe("hf_cred");
+            expect(loggedWarnings().filter((w) => /plain text/.test(w))).toEqual([]);
+        });
+    });
+
     it("should keep the configured input shape and URL model path", function (done) {
         const flow = [
             { id: "n1", type: "ml-inference", name: "ML Model", inputShape: "1,10,5" },
@@ -476,6 +800,9 @@ describe("ml-inference Node", function () {
 
     it("should expose models list API endpoint", function (done) {
         const flow = [{ id: "n1", type: "ml-inference", name: "ML Model" }];
+        const store = path.join(userDir, "ml-models");
+        fs.mkdirSync(store, { recursive: true });
+        fs.copyFileSync(path.join(FIXTURES, "model.onnx"), path.join(store, "listed.onnx"));
         helper.load(mlInferenceNode, flow, function () {
             helper
                 .request()
@@ -483,15 +810,14 @@ describe("ml-inference Node", function () {
                 .expect(200)
                 .end(function (err, res) {
                     if (err) return done(err);
-                    expect(Object.keys(res.body).sort()).toEqual(["models", "modelsDir"]);
-                    expect(Array.isArray(res.body.models)).toBe(true);
-                    expect(path.basename(res.body.modelsDir)).toBe("ml-models");
-                    expect(path.isAbsolute(res.body.modelsDir)).toBe(true);
-                    // The route creates the store on first use.
-                    expect(fs.statSync(res.body.modelsDir).isDirectory()).toBe(true);
+                    // No server paths in the response: models are named relative to the store.
+                    expect(Object.keys(res.body)).toEqual(["models"]);
+                    expect(JSON.stringify(res.body)).not.toContain(userDir);
+                    expect(res.body.models.map((m) => m.name)).toContain("listed.onnx");
                     res.body.models.forEach(function (model) {
                         expect(typeof model.name).toBe("string");
-                        expect(path.dirname(model.path)).toBe(res.body.modelsDir);
+                        expect(model.path).toBe(model.name);
+                        expect(path.isAbsolute(model.path)).toBe(false);
                         expect(["onnx", "tflite", "keras", "sklearn", "tfjs"]).toContain(model.type);
                     });
                     done();

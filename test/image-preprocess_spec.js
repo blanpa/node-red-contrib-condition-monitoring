@@ -20,6 +20,16 @@ function png2x2() {
     return PNG.sync.write(p);
 }
 
+// A real 1x1 PNG whose IHDR is patched to claim w x h. The CRC no longer
+// matches, which never matters: the size guard must refuse it before pngjs
+// gets to read a chunk.
+function pngClaiming(w, h) {
+    const buf = PNG.sync.write(new PNG({ width: 1, height: 1 }));
+    buf.writeUInt32BE(w, 16);
+    buf.writeUInt32BE(h, 20);
+    return buf;
+}
+
 describe("image-preprocess Node", function () {
     beforeEach(function (done) {
         helper.startServer(done);
@@ -147,6 +157,53 @@ describe("image-preprocess hardening", function () {
             } catch (e) {
                 done(e);
             }
+        });
+    });
+
+    it("refuses a PNG whose header claims 20000x20000 before decoding it (no 1.6 GB allocation)", function (done) {
+        const flow = [
+            { id: "n1", type: "image-preprocess", wires: [["n2"]] },
+            { id: "n2", type: "helper" }
+        ];
+        helper.load(ipNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const statuses = [];
+            n1.status = (s) => statuses.push(s);
+            const before = process.memoryUsage().arrayBuffers;
+            const started = Date.now();
+            n1.error = function (err) {
+                try {
+                    expect(String(err.message || err)).toMatch(/image too large: 20000x20000 \(400\.0 MP\)/);
+                    expect(Date.now() - started).toBeLessThan(500);
+                    expect(process.memoryUsage().arrayBuffers - before).toBeLessThan(16 * 1024 * 1024);
+                    // Short class in the status line, the full text goes to node.error.
+                    expect(statuses[statuses.length - 1]).toMatchObject({ fill: "red", text: "image too large" });
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            };
+            n1.receive({ payload: pngClaiming(20000, 20000) });
+        });
+    });
+
+    it("keeps the status text short for any failure", function (done) {
+        const flow = [{ id: "n1", type: "image-preprocess", wires: [[]] }];
+        helper.load(ipNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const statuses = [];
+            n1.status = (s) => statuses.push(s);
+            n1.error = function (err) {
+                try {
+                    expect(String(err.message || err)).toBe("input is not a Buffer (expected a PNG/JPEG image)");
+                    expect(statuses[statuses.length - 1].text).toBe("not an image");
+                    expect(statuses[statuses.length - 1].text.length).toBeLessThanOrEqual(25);
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            };
+            n1.receive({ payload: { not: "an image" } });
         });
     });
 });

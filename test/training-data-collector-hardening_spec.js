@@ -174,6 +174,82 @@ describe("training-data-collector hardening", () => {
         expect(lines[1]).toBe('1,"hot, ""very""",0');
     });
 
+    it("neutralises spreadsheet formulas in string cells; numbers and numeric strings stay as they are", async () => {
+        const { n1 } = await load({ autoSave: false, exportFormat: "csv", includeTimestamp: false });
+        // Feature names (payload keys) end up in the header row, labels in every row.
+        n1.receive({ payload: { "=cmd": 1, temp: -2 }, label: '=HYPERLINK("http://x","open")' });
+        n1.receive({ payload: { "=cmd": 3, temp: 4 }, label: "-2+3+cmd|' /C calc'!A0" });
+        n1.receive({ payload: { "=cmd": 5, temp: 6 }, label: "@SUM(A1)" });
+        n1.receive({ payload: { "=cmd": 7, temp: 8 }, label: "-1" });
+        n1.receive({ payload: { "=cmd": 9, temp: 10 }, label: "\tTab" });
+        await sleep(30);
+        n1.receive({ action: "export" });
+        await sleep(200);
+        const lines = readText(dataFiles()[0]).trim().split("\n");
+        expect(lines[0]).toBe("'=cmd,temp,label,severity");
+        expect(lines[1]).toBe('1,-2,"\'=HYPERLINK(""http://x"",""open"")",0');
+        expect(lines[2]).toBe("3,4,'-2+3+cmd|' /C calc'!A0,0");
+        expect(lines[3]).toBe("5,6,'@SUM(A1),0");
+        // A negative numeric string is a number to a spreadsheet, not a formula.
+        expect(lines[4]).toBe("7,8,-1,0");
+        expect(lines[5]).toBe("9,10,'\tTab,0");
+    });
+
+    it("writes the metadata file through .part + rename, like the datasets", async () => {
+        const renames = [];
+        const realRename = fs.promises.rename;
+        const spy = jest.spyOn(fs.promises, "rename").mockImplementation((from, to) => {
+            renames.push([path.basename(from), path.basename(to)]);
+            return realRename(from, to);
+        });
+        try {
+            const { n1 } = await load({ autoSave: false, includeMetadata: true });
+            n1.receive({ payload: { temp: 1 }, label: "ok" });
+            await sleep(20);
+            n1.receive({ action: "export" });
+            await sleep(250);
+            const meta = dataFiles().find((f) => f.endsWith("_metadata.json"));
+            expect(meta).toBeDefined();
+            expect(JSON.parse(readText(meta)).labels.classes).toEqual(["ok"]);
+            expect(renames).toContainEqual([meta + ".part", meta]);
+            expect(fs.readdirSync(dataDir).some((f) => f.endsWith(".part"))).toBe(false);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it("bounds the label-class set at 10 000 distinct labels with one warning; samples are still kept", async () => {
+        const { n1 } = await load({ autoSave: false, bufferSize: 20000 });
+        const warnings = [];
+        n1.warn = (w) => warnings.push(String(w));
+        for (let i = 0; i < 10005; i++) n1.receive({ payload: { temp: i }, label: "id-" + i });
+        await sleep(400);
+        expect(n1.dataBuffer).toHaveLength(10005);
+        expect(n1.labelClasses.size).toBe(10000);
+        expect(n1.labelClasses.has("id-9999")).toBe(true);
+        expect(n1.labelClasses.has("id-10000")).toBe(false);
+        expect(warnings.filter((w) => /10000 distinct labels/.test(w))).toHaveLength(1);
+        // The sample itself still carries its label.
+        expect(n1.dataBuffer[10004].label).toBe("id-10004");
+    }, 20000);
+
+    it("an unknown msg.action is warned about and not collected as a sample", async () => {
+        const { n1, seen } = await load({ autoSave: false });
+        const warnings = [];
+        n1.warn = (w) => warnings.push(String(w));
+        n1.receive({ action: "exprot", payload: { temp: 1 } });
+        await sleep(30);
+        expect(n1.dataBuffer).toHaveLength(0);
+        expect(seen).toHaveLength(0);
+        expect(warnings).toEqual([expect.stringMatching(/Unknown msg\.action 'exprot' ignored/)]);
+        // Known actions still work, and plain samples are still collected.
+        n1.receive({ action: "stats" });
+        n1.receive({ payload: { temp: 2 } });
+        await sleep(30);
+        expect(seen).toHaveLength(1);
+        expect(n1.dataBuffer).toHaveLength(1);
+    });
+
     it("honours the editor's splitTrain/splitVal/splitTest percentages", async () => {
         const { n1, seen } = await load({ autoSave: false, splitTrain: 50, splitVal: 50, splitTest: 0 });
         for (let i = 0; i < 10; i++) n1.receive({ payload: i });

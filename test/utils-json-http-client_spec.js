@@ -2,7 +2,15 @@
 
 const http = require("http");
 
-const { requestJson, withRetry, isClientError } = require("../nodes/utils/json-http-client");
+const {
+    requestJson,
+    withRetry,
+    retryPolicy,
+    isClientError,
+    isServerError,
+    isConnectionError,
+    isTimeoutError
+} = require("../nodes/utils/json-http-client");
 
 describe("utils/json-http-client", () => {
     let server;
@@ -112,9 +120,94 @@ describe("utils/json-http-client", () => {
             onSettled: (ms, ok) => settled.push(ok)
         }).catch((e) => e);
         expect(err.message).toBe("Request timeout: POST /x");
+        // The code is what lets the retry policy refuse to repeat it.
+        expect(err.code).toBe("EREQUESTTIMEOUT");
+        expect(isTimeoutError(err)).toBe(true);
+        expect(isConnectionError(err)).toBe(false);
         await new Promise((resolve) => setTimeout(resolve, 50));
         // destroy() also raises a socket error — that must not count twice.
         expect(settled).toEqual([false]);
+    });
+
+    it("forwards extra headers (the bridges' bearer token)", async () => {
+        await call({ headers: { Authorization: "Bearer s3cret" } });
+        expect(seen[0].headers.authorization).toBe("Bearer s3cret");
+        expect(seen[0].headers.accept).toBe("application/json");
+    });
+
+    it("rejects a response above maxResponseBytes, drops the connection and reports once", async () => {
+        handler = (req, res) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            // Well above the cap, in several chunks.
+            const chunk = Buffer.alloc(64 * 1024, 0x61);
+            for (let i = 0; i < 8; i++) res.write(chunk);
+            res.end('"');
+        };
+        const settled = [];
+        const err = await call({ maxResponseBytes: 100 * 1024, onSettled: (ms, ok) => settled.push(ok) }).catch(
+            (e) => e
+        );
+        expect(err).toBeInstanceOf(Error);
+        expect(err.code).toBe("ERESPONSETOOLARGE");
+        expect(err.message).toMatch(/exceeds 102400 bytes/);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(settled).toEqual([false]);
+    });
+
+    it("applies a 16 MiB response cap by default", async () => {
+        handler = (req, res) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.write("[");
+            const chunk = Buffer.alloc(1024 * 1024, 0x31);
+            for (let i = 0; i < 17; i++) res.write(chunk);
+            res.end("]");
+        };
+        const err = await call().catch((e) => e);
+        expect(err.code).toBe("ERESPONSETOOLARGE");
+    });
+
+    it("classifies a refused connection as a connection error", async () => {
+        const probe = http.createServer();
+        await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+        const deadPort = probe.address().port;
+        await new Promise((resolve) => probe.close(resolve));
+
+        const err = await call({ port: deadPort }).catch((e) => e);
+        expect(err.code).toBe("ECONNREFUSED");
+        expect(isConnectionError(err)).toBe(true);
+        expect(isTimeoutError(err)).toBe(false);
+    });
+
+    describe("retryPolicy", () => {
+        const refused = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+        const timeout = Object.assign(new Error("Request timeout"), { code: "EREQUESTTIMEOUT" });
+        const badRequest = Object.assign(new Error("bad"), { statusCode: 400 });
+        const serverErr = Object.assign(new Error("boom"), { statusCode: 500 });
+        const garbage = new Error("Invalid JSON response: <html>");
+
+        it("retries only connection errors for non-idempotent calls (predict)", () => {
+            const isFinal = retryPolicy();
+            expect(isFinal(refused)).toBe(false);
+            expect(isFinal(timeout)).toBe(true);
+            expect(isFinal(badRequest)).toBe(true);
+            expect(isFinal(serverErr)).toBe(true);
+            expect(isFinal(garbage)).toBe(true);
+        });
+
+        it("also retries 5xx for idempotent calls (health/status), but still never a timeout", () => {
+            const isFinal = retryPolicy({ retryServerErrors: true });
+            expect(isFinal(refused)).toBe(false);
+            expect(isFinal(serverErr)).toBe(false);
+            expect(isFinal(timeout)).toBe(true);
+            expect(isFinal(badRequest)).toBe(true);
+            expect(isServerError(serverErr)).toBe(true);
+            expect(isServerError(badRequest)).toBe(false);
+        });
+
+        it("does not mistake an HTTP error for a connection error", () => {
+            const withStatus = Object.assign(new Error("x"), { code: "ECONNRESET", statusCode: 502 });
+            expect(isConnectionError(withStatus)).toBe(false);
+        });
     });
 
     describe("withRetry", () => {

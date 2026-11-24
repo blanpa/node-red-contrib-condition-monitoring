@@ -9,6 +9,7 @@
             fftSize: { value: 256 },
             samplingRate: { value: 1000 },
             peakThreshold: { value: 0.1 },
+            vibrationThreshold: { value: 6 },
             outputFormat: { value: "peaks" },
             windowFunction: { value: "hann" },
             overlapPercent: { value: 50 },
@@ -64,6 +65,12 @@
             });
             
             showModeConfig(this.mode || "fft");
+
+            // Nodes saved before the crest-factor field existed have no value for
+            // it; show the 6 the runtime applies instead of an empty box.
+            if (!$("#node-input-vibrationThreshold").val()) {
+                $("#node-input-vibrationThreshold").val(6);
+            }
 
             // The shaft speed is one setting shown in two mode panels. Only one
             // element may carry the node-input id (a duplicate id is never read
@@ -124,7 +131,7 @@
             <div class="cm-config-item" style="margin-top: 12px;">
                 <label for="node-input-windowSize"><i class="fa fa-window-maximize"></i> Window Size (default: 256)</label>
                 <input type="number" id="node-input-windowSize" min="8" value="256">
-                <div class="cm-help-text">Number of samples to analyze</div>
+                <div class="cm-help-text">Vibration and peak detection modes: number of recent samples analysed from a sample-by-sample stream. An array payload (frame) of 16 or more samples is analysed whole, regardless of this value. FFT, envelope and cepstrum use the FFT size instead.</div>
             </div>
             
             <!-- FFT Config -->
@@ -140,6 +147,8 @@
                             <option value="512">512</option>
                             <option value="1024">1024</option>
                             <option value="2048">2048</option>
+                            <option value="4096">4096</option>
+                            <option value="8192">8192</option>
                         </select>
                     </div>
                     <div class="cm-config-item">
@@ -210,12 +219,18 @@
                         </select>
                         <div class="cm-help-text">Zone table for the vibration severity rating. Rigid: foundation natural frequency above the main excitation; flexible: below.</div>
                     </div>
+                    <div class="cm-config-item">
+                        <label><i class="fa fa-bolt"></i> Crest Factor Threshold (default: 6)</label>
+                        <input type="number" id="node-input-vibrationThreshold" min="0" step="any" placeholder="6">
+                        <div class="cm-help-text">A crest factor above this (impulsive signal) routes the result to output 2. Override per message with <code>msg.config.vibrationThreshold</code>.</div>
+                    </div>
                 </div>
                 <div class="cm-info-box" style="margin-top: 10px;">
                     <i class="fa fa-info-circle"></i>
                     <b>ISO 20816-3:</b> Vibration severity evaluation based on broadband RMS velocity (mm/s, 10–1000 Hz), zones A–D.
-                    Select the correct input unit above.
-                    <br><b>Acceleration input:</b> waveform frames (array payloads of at least 16 samples, sampling rate above 20 Hz) are integrated to velocity bin-wise in the frequency domain; scalar streams use the single-frequency relation v = a / (2πf) at the shaft frequency.
+                    Select the correct input unit above. Zone D (<code>isAlarm</code>) routes to output 2.
+                    <br><b>Frames:</b> an array payload of at least 16 samples is analysed whole and centred (its mean is reported as <code>dcOffset</code>); the window size applies to scalar streams only.
+                    <br><b>Acceleration input:</b> frames (sampling rate above 20 Hz) are integrated to velocity bin-wise in the frequency domain; scalar streams use the single-frequency relation v = a / (2πf) at the shaft frequency.
                     </div>
             </div>
             
@@ -437,13 +452,15 @@
         <br><b>Use case:</b> Detect rotating machinery faults (imbalance, misalignment, bearing defects)</dd>
         
         <dt><b>Vibration Features</b></dt>
-        <dd>Calculates ISO 10816-compliant vibration metrics.
-        <br><b>Outputs:</b> RMS, Peak-to-Peak, Crest Factor, Kurtosis, Skewness
+        <dd>Calculates time-domain vibration indicators and the ISO 20816-3 severity zone.
+        <br><b>Outputs:</b> RMS, Peak-to-Peak, Crest Factor, Kurtosis, Skewness, ISO zone
+        <br><b>Input:</b> a frame (array of 16 or more samples) is analysed whole and centred; a stream of
+        single readings is analysed over the last <b>Window Size</b> samples, mean included
         <br><b>Use case:</b> Machine health monitoring, predictive maintenance</dd>
-        
+
         <dt><b>Peak Detection</b></dt>
         <dd>Identifies local maxima and minima with configurable thresholds.
-        <br><b>Outputs:</b> Peak locations, values, and statistics
+        <br><b>Outputs:</b> Peak locations, values, and statistics; a peak is reported on the sample that follows it
         <br><b>Use case:</b> Detect spikes, impacts, or cyclic patterns</dd>
         
         <dt><b>Envelope Analysis (Bearing Faults)</b></dt>
@@ -468,8 +485,9 @@
     
     <h3>FFT Configuration</h3>
     <ul>
-        <li><b>FFT Size:</b> Number of samples (power of 2: 64, 128, 256, 512, 1024, 2048)</li>
-        <li><b>Sample Rate:</b> Samples per second (Hz) for frequency calculation</li>
+        <li><b>FFT Size:</b> Number of samples (power of 2: 64 … 8192). A frame longer than this is cut to its last
+        FFT-size samples; shorter frames are concatenated until the size is reached.</li>
+        <li><b>Sample Rate:</b> Samples per second (Hz) for frequency calculation; <code>msg.samplingRate</code> overrides it per message</li>
         <li><b>Window Function:</b>
             <ul>
                 <li><b>Hann:</b> Good general-purpose, reduced spectral leakage</li>
@@ -484,11 +502,17 @@
     <h3>Inputs</h3>
     <dl>
         <dt>msg.payload <span class="property-type">number | array</span></dt>
-        <dd>Single sample value (streaming) or array of samples (batch)
-        <br>Values are accumulated until window size is reached</dd>
-        
+        <dd>Single sample value (streaming) or array of samples (frame)
+        <br>Single values are accumulated until the window / FFT size is reached</dd>
+
         <dt>msg.timestamp <span class="property-type">number</span></dt>
         <dd>Optional timestamp for peak detection (ms)</dd>
+
+        <dt>msg.samplingRate <span class="property-type">number</span></dt>
+        <dd>Optional sampling rate (Hz) of this message's signal; overrides the configured one for the analysis of
+        this message in every mode (FFT bins, envelope band, cepstrum quefrencies, acceleration integration).
+        <code>msg.config.samplingRate</code> works the same way. The rate used is reported as
+        <code>msg.samplingRate</code> on the output.</dd>
         
         <dt>msg.reset <span class="property-type">boolean | string</span></dt>
         <dd>Set to <code>true</code> to clear the sample buffer of the group this message
@@ -499,12 +523,15 @@
         <dd>Optional runtime configuration override. Allows dynamic adjustment of parameters per message:
         <pre>msg.config = {
   mode: "vibration",        // Override mode (fft/vibration/peaks/envelope/cepstrum)
-  fftSize: 1024,            // Override FFT size
-  sampleRate: 1000,         // Override sample rate
-  vibrationThreshold: 5,    // Override vibration crest factor threshold
-  peakThreshold: 0.3        // Override peak detection threshold
+  samplingRate: 10000,      // Sampling rate of this message's signal (Hz)
+  vibrationThreshold: 5,    // Vibration mode: crest factor threshold for output 2
+  minPeakHeight: 0.3,       // Peaks mode: minimum peak height
+                            // (peakThreshold is accepted as a legacy alias)
+  shaftSpeed: 1800,         // Shaft speed in RPM (see below)
+  envelopePeakFloor: 6      // Envelope mode: peak significance (× noise floor)
 };</pre>
-        <b>Use cases:</b> Adaptive analysis based on operating conditions or equipment type.</dd>
+        The FFT size cannot be changed per message (the buffer is sized by it).
+        <br><b>Use cases:</b> Adaptive analysis based on operating conditions or equipment type.</dd>
     </dl>
     
     <p><b>Shaft speed per message:</b> in vibration, envelope and cepstrum mode <code>msg.rpm</code> (or <code>msg.shaftSpeed</code>,
@@ -516,8 +543,12 @@
     <h3>Outputs</h3>
     <ol>
         <li><b>Output 1 (Normal)</b> - Regular analysis results</li>
-        <li><b>Output 2 (Anomaly/Peak)</b> - Anomalous vibration or detected peaks</li>
+        <li><b>Output 2 (Anomaly/Peak)</b> - Vibration mode: crest factor above the <b>Crest Factor Threshold</b>,
+        |kurtosis| above 4, or ISO zone D (<code>iso20816.isAlarm</code>). Peaks mode: the message that confirms a
+        peak (<code>msg.isPeak</code>). Envelope / cepstrum: a detected fault.</li>
     </ol>
+    <p><b>Output Topic</b> (Advanced Settings) is applied in every mode; when it is empty the incoming topic is kept
+    (vibration mode falls back to <code>vibration-features</code> when there is none).</p>
 
     <h3>Multiple Devices per Node (Group By)</h3>
     <p>By default the node keeps <b>one</b> sample buffer, so an interleaved stream from
@@ -565,10 +596,16 @@ pump-03/vibration --+     groupBy: "topic"</pre>
     </dl>
     
     <h3>Vibration Mode Output</h3>
-    <p>All features in <code>msg.payload</code> object:</p>
+    <p>All features in <code>msg.payload</code> object (<code>msg.windowSize</code> is the number of samples
+    analysed, <code>msg.samplingRate</code> the rate used):</p>
     <dl>
         <dt>rms <span class="property-type">number</span></dt>
-        <dd>Root Mean Square - overall vibration level (ISO 10816)</dd>
+        <dd>Root Mean Square - overall vibration level. For a frame the mean is removed first (AC RMS).</dd>
+
+        <dt>dcOffset <span class="property-type">number | null</span></dt>
+        <dd>Mean removed from a frame before rms, peak, crest factor, form and impulse factor were computed
+        (gravity on an accelerometer, a live zero). <code>null</code> for a scalar stream, whose readings keep
+        their level (<code>mean</code> then carries it).</dd>
         
         <dt>peakToPeak <span class="property-type">number</span></dt>
         <dd>Maximum range of vibration</dd>
@@ -649,8 +686,14 @@ pump-03/vibration --+     groupBy: "topic"</pre>
     <h3>Peak Detection Output</h3>
     <dl>
         <dt>msg.isPeak <span class="property-type">boolean</span></dt>
-        <dd>True if current sample is a detected peak</dd>
-        
+        <dd>True when the <i>previous</i> sample is a detected peak. A peak needs a lower (or higher) neighbour on
+        both sides, so it can only be confirmed by the sample that follows it: <code>isPeak</code> has a latency of
+        one sample, and the message that confirms a peak goes to output 2.</dd>
+
+        <dt>msg.peak <span class="property-type">object | null</span></dt>
+        <dd>The confirmed peak (<code>{ index, value, timestamp, direction }</code>) when <code>isPeak</code> is
+        true, otherwise <code>null</code>. <code>msg.payload</code> is the current sample, not the peak.</dd>
+
         <dt>msg.peaks <span class="property-type">array</span></dt>
         <dd>All detected peaks in window:
         <pre>[{

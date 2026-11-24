@@ -85,6 +85,16 @@ module.exports = function (RED) {
                 node.debug(message);
             }
         };
+
+        // Warn once per kind of problem (clock step, seconds timestamps), not
+        // once per message — the stream keeps flowing while the user reads it.
+        const warnedKeys = new Set();
+        function warnOnce(key, text) {
+            if (!warnedKeys.has(key) && warnedKeys.size < 50) {
+                warnedKeys.add(key);
+                node.warn(text);
+            }
+        }
         this.timestamps = [];
         this.previousValue = null;
         this.previousTimestamp = null;
@@ -157,6 +167,11 @@ module.exports = function (RED) {
             stateKey: "trendPredictorState",
             saveInterval: 30000,
             debug: node.debugEnabled,
+            // The blob shape has not changed since the unversioned (pre-0.4.1)
+            // writes, so those are adopted as they are.
+            migrate: function (state, fromVersion) {
+                return fromVersion === 0 ? state : null;
+            },
             onStateLoaded: function (state) {
                 // The flat keys describe the group that was active when the
                 // state was saved (the only one, without Group By).
@@ -217,6 +232,50 @@ module.exports = function (RED) {
 
         node.status({ fill: "blue", shape: "ring", text: node.mode + " mode" });
 
+        /**
+         * Whether the window shows a trend at all, and which way. The least-
+         * squares slope over the sample index is compared with its standard
+         * error: a trend counts when |slope| > 2 SE, i.e. it is distinguishable
+         * from the noise around the line. The test is scale-free — the old
+         * absolute cut-off (|slope| > 0.01 per sample) called a 0-1 health index
+         * falling 0.005 per sample "stable" and a noisy flat signal in large
+         * units "increasing" — and it is the same test RUL mode applies.
+         *
+         * `reported` is the slope the caller publishes (the Holt trend for
+         * exponential smoothing); the label follows its sign, and only when the
+         * regression agrees on that sign.
+         */
+        function trendLabel(data, reported) {
+            const n = data.length;
+            if (n < 3) return "stable";
+            const meanX = (n - 1) / 2;
+            let meanY = 0;
+            for (let i = 0; i < n; i++) meanY += data[i];
+            meanY /= n;
+            let sxy = 0;
+            let sxx = 0;
+            for (let i = 0; i < n; i++) {
+                sxy += (i - meanX) * (data[i] - meanY);
+                sxx += (i - meanX) * (i - meanX);
+            }
+            const slope = sxx !== 0 ? sxy / sxx : 0;
+            const intercept = meanY - slope * meanX;
+            let ssRes = 0;
+            for (let i = 0; i < n; i++) {
+                const r = data[i] - (slope * i + intercept);
+                ssRes += r * r;
+            }
+            const varSlope = ssRes / Math.max(1, n - 2) / sxx;
+            // A change over the window below floating-point resolution of the
+            // level is no trend either (a constant series has σ = 0)
+            const scale = Math.max(Math.abs(meanY), Number.MIN_VALUE);
+            const negligible = Math.abs(slope) * (n - 1) <= 1e-12 * scale;
+            const significant = !negligible && Math.abs(slope) > 2 * Math.sqrt(varSlope);
+            const ref = reported === undefined ? slope : reported;
+            if (!significant || !(ref * slope > 0)) return "stable";
+            return ref > 0 ? "increasing" : "decreasing";
+        }
+
         // Linear Regression
         function linearRegression(data, steps) {
             const n = data.length;
@@ -249,16 +308,11 @@ module.exports = function (RED) {
                 predictedValues.push(slope * futureX + intercept);
             }
 
-            let trend = "stable";
-            if (Math.abs(slope) > 0.01) {
-                trend = slope > 0 ? "increasing" : "decreasing";
-            }
-
             return {
                 slope: slope,
                 intercept: intercept,
                 predictedValues: predictedValues,
-                trend: trend
+                trend: trendLabel(data, slope)
             };
         }
 
@@ -281,16 +335,11 @@ module.exports = function (RED) {
                 predictedValues.push(level + i * trend);
             }
 
-            let trendDirection = "stable";
-            if (Math.abs(trend) > 0.01) {
-                trendDirection = trend > 0 ? "increasing" : "decreasing";
-            }
-
             return {
                 slope: trend,
                 intercept: level,
                 predictedValues: predictedValues,
-                trend: trendDirection
+                trend: trendLabel(data, trend)
             };
         }
 
@@ -401,6 +450,10 @@ module.exports = function (RED) {
             return den !== 0 ? num / den : 0;
         }
 
+        // An interval this many times the median interval is not a sampling
+        // interval: either the data stopped (gap) or the clock moved (step).
+        const INTERVAL_OUTLIER_FACTOR = 10;
+
         /**
          * Positions of the samples on a "steps" axis: elapsed time divided by
          * the mean sampling interval, so evenly spaced samples sit at 0, 1, 2, …
@@ -408,27 +461,174 @@ module.exports = function (RED) {
          * against the sample index instead treats a ten-minute gap like a
          * one-second one and bends the trend accordingly.
          *
+         * An interval more than INTERVAL_OUTLIER_FACTOR times the median one is
+         * either a data gap (the device was offline, the process kept running)
+         * or a clock step (an NTP correction: the process did not notice). The
+         * two look the same on the time axis and opposite on the value axis, so
+         * the jump in value across the interval decides: close to what the
+         * trend would have produced over that much time it is a gap and counts
+         * in full; otherwise it is a step and counts as one ordinary interval
+         * (a reset of the time base). Extrapolating the pre-step line over an
+         * hour that never happened put the crossing in the past and the RUL
+         * negative.
+         *
          * Falls back to the plain index when the timestamps do not increase
          * strictly (duplicates, a clock step backwards).
          *
-         * @returns {{x:number[], avgInterval:number, timeBased:boolean}}
+         * @param {number[]} timestamps - ms
+         * @param {number[]} [values] - the series, for the gap/step decision
+         * @returns {{x:number[], avgInterval:number, timeBased:boolean, intervalOutliers:number, timeBaseResets:number}}
          */
-        function samplePositions(timestamps) {
+        function samplePositions(timestamps, values) {
             const n = timestamps.length;
             const index = function (avgInterval) {
-                const x = new Array(n);
-                for (let i = 0; i < n; i++) x[i] = i;
-                return { x: x, avgInterval: avgInterval, timeBased: false };
+                return indexPositions(n, avgInterval);
             };
             const span = timestamps[n - 1] - timestamps[0];
             if (!(span > 0)) return index(1000); // Default 1 second
-            const avgInterval = span / (n - 1);
-            const x = new Array(n);
-            for (let i = 0; i < n; i++) {
-                if (i > 0 && !(timestamps[i] > timestamps[i - 1])) return index(avgInterval);
-                x[i] = (timestamps[i] - timestamps[0]) / avgInterval;
+            const intervals = new Array(n - 1);
+            for (let i = 1; i < n; i++) {
+                const d = timestamps[i] - timestamps[i - 1];
+                if (!(d > 0)) return index(span / (n - 1));
+                intervals[i - 1] = d;
             }
-            return { x: x, avgInterval: avgInterval, timeBased: true };
+
+            const sorted = intervals.slice().sort(function (a, b) {
+                return a - b;
+            });
+            const median = sorted[Math.floor(sorted.length / 2)];
+            const limit = INTERVAL_OUTLIER_FACTOR * median;
+            let outliers = 0;
+            let resets = 0;
+            // Three intervals are the least a median can be trusted on
+            if (intervals.length >= 3 && Array.isArray(values) && values.length === n) {
+                // Rate of change per ms over the ordinary intervals
+                const rates = [];
+                for (let i = 0; i < intervals.length; i++) {
+                    if (intervals[i] <= limit) rates.push((values[i + 1] - values[i]) / intervals[i]);
+                }
+                rates.sort(function (a, b) {
+                    return a - b;
+                });
+                const rate = rates.length ? rates[Math.floor(rates.length / 2)] : 0;
+                for (let i = 0; i < intervals.length; i++) {
+                    if (!(intervals[i] > limit)) continue;
+                    outliers++;
+                    const jump = values[i + 1] - values[i];
+                    const asGap = Math.abs(jump - rate * intervals[i]);
+                    const asStep = Math.abs(jump - rate * median);
+                    if (asStep <= asGap) {
+                        intervals[i] = median;
+                        resets++;
+                    }
+                }
+            }
+
+            let total = 0;
+            for (let i = 0; i < intervals.length; i++) total += intervals[i];
+            const avgInterval = total / (n - 1);
+            const x = new Array(n);
+            x[0] = 0;
+            for (let i = 1; i < n; i++) x[i] = x[i - 1] + intervals[i - 1] / avgInterval;
+            return {
+                x: x,
+                avgInterval: avgInterval,
+                timeBased: true,
+                intervalOutliers: outliers,
+                timeBaseResets: resets
+            };
+        }
+
+        // Plain sample index as positions (unit spacing), `avgInterval` ms a step
+        function indexPositions(n, avgInterval) {
+            const x = new Array(n);
+            for (let i = 0; i < n; i++) x[i] = i;
+            return { x: x, avgInterval: avgInterval, timeBased: false, intervalOutliers: 0, timeBaseResets: 0 };
+        }
+
+        // Report what samplePositions found about the time base, once
+        function reportTimeBase(positions) {
+            if (positions.timeBaseResets > 0) {
+                warnOnce(
+                    "clock-step",
+                    "Timestamps: an interval more than " +
+                        INTERVAL_OUTLIER_FACTOR +
+                        "× the usual sampling interval, with the value continuing where it left off - " +
+                        "treated as a clock step (time base reset), not as elapsed time. Check the device clock / NTP."
+                );
+            } else if (positions.intervalOutliers > 0) {
+                warnOnce(
+                    "data-gap",
+                    "Timestamps: an interval more than " +
+                        INTERVAL_OUTLIER_FACTOR +
+                        "× the usual sampling interval - fitted as a data gap (the value moved on meanwhile)."
+                );
+            }
+        }
+
+        /**
+         * Trend line through the window over positions `x`: a Theil-Sen /
+         * least-squares blend for the slope, the lag-free Theil-Sen level at the
+         * last sample, and the residual statistics the confidence band needs.
+         *
+         * The slope runs on the median-filtered (not the moving-average-smoothed)
+         * series: the centred moving average is truncated at both ends of the
+         * buffer, which pulls the end points inward and biases the slope low —
+         * and a low slope means an optimistic RUL. Theil-Sen is robust on its own.
+         * The level is the Theil-Sen intercept at the last position (median of
+         * data[i] + slope·(xLast − x[i])): the smoothed series lags the trend by
+         * roughly half a window there, which would bias the RUL late.
+         *
+         * @param {number[]} filtered - median-filtered series (fit input)
+         * @param {number[]} raw - the series the residuals are measured on
+         * @param {number[]} x - sample positions
+         */
+        function fitTrend(filtered, raw, x) {
+            const n = filtered.length;
+            const xLast = x[n - 1];
+            const robustSlopeValue = robustSlope(filtered, x);
+            const linearSlopeValue = leastSquaresSlope(filtered, x);
+            // Robust slope is more reliable but linear gives better R-squared
+            const slope = 0.7 * robustSlopeValue + 0.3 * linearSlopeValue;
+
+            const levelOffsets = [];
+            for (let i = 0; i < n; i++) levelOffsets.push(filtered[i] + slope * (xLast - x[i]));
+            levelOffsets.sort(function (a, b) {
+                return a - b;
+            });
+            const currentLevel =
+                n % 2 === 1 ? levelOffsets[(n - 1) / 2] : (levelOffsets[n / 2 - 1] + levelOffsets[n / 2]) / 2;
+
+            // Residuals of the data around the robust line -> noise σ and R²
+            const yMean = raw.reduce((a, b) => a + b, 0) / n;
+            const ssTot = raw.reduce((sum, y) => sum + Math.pow(y - yMean, 2), 0);
+            let ssRes = 0;
+            for (let i = 0; i < n; i++) {
+                const predicted = currentLevel - slope * (xLast - x[i]);
+                ssRes += Math.pow(raw[i] - predicted, 2);
+            }
+            const rSquared = ssTot > 0 ? Math.max(0, 1 - ssRes / ssTot) : 0;
+
+            //   var(level) = σ² (1/n + x̄²/Sxx)   (level is the fit at the last index)
+            //   var(slope) = σ² / Sxx,  Sxx = Σ(x − x̄)²  (n(n²-1)/12 for unit spacing)
+            const sigma2 = ssRes / Math.max(1, n - 2);
+            let xMean = 0;
+            for (let i = 0; i < n; i++) xMean += x[i];
+            xMean /= n;
+            let sxx = 0;
+            for (let i = 0; i < n; i++) sxx += (x[i] - xMean) * (x[i] - xMean);
+            const xBarDist = xLast - xMean;
+
+            return {
+                slope: slope,
+                currentLevel: currentLevel,
+                xLast: xLast,
+                rSquared: rSquared,
+                varLevel: sigma2 * (1 / n + (xBarDist * xBarDist) / sxx),
+                varSlope: sigma2 / sxx,
+                linearSlopeValue: linearSlopeValue,
+                robustSlopeValue: robustSlopeValue
+            };
         }
 
         // Weibull distribution functions
@@ -582,8 +782,16 @@ module.exports = function (RED) {
                 return Number.isFinite(ratio) ? Math.max(0, Math.min(100, ratio * 100)) : null;
             };
 
-            // Already failed?
-            if (data[n - 1] >= threshold) {
+            // Already failed? Decided on the median of the last three samples:
+            // the raw last sample alone turned a single spike at the threshold
+            // (a sensor glitch) into "failed, confidence 1.0" and "stable" one
+            // sample later. The price is one sample of latency on a genuine
+            // crossing, during which the RUL reads ~0 and "critical" anyway.
+            const recent = data.slice(-3).sort(function (a, b) {
+                return a - b;
+            });
+            const recentLevel = recent[Math.floor(recent.length / 2)];
+            if (recentLevel >= threshold) {
                 return {
                     rul: 0,
                     rulSteps: 0,
@@ -625,40 +833,36 @@ module.exports = function (RED) {
             const smoothingWindow = Math.max(3, Math.floor(n / 10));
             const smoothedData = smoothData(filteredData, smoothingWindow);
 
-            // Step 3: Calculate robust slope using Theil-Sen estimator. It runs on
-            // the median-filtered (not the moving-average-smoothed) series: the
-            // centred moving average is truncated at both ends of the buffer,
-            // which pulls the end points inward and biases the slope low — and a
-            // low slope means an optimistic RUL. Theil-Sen is robust on its own.
-            // All fits run over the sample *positions in time* (see
+            // Step 3: Fit the trend over the sample *positions in time* (see
             // samplePositions), which equal the indices for even sampling.
-            const positions = samplePositions(timestamps);
-            const x = positions.x;
-            const xLast = x[n - 1];
-            const robustSlopeValue = robustSlope(filteredData, x);
+            let positions = samplePositions(timestamps, filteredData);
+            reportTimeBase(positions);
+            let fit = fitTrend(filteredData, data, positions.x);
 
-            // Step 4: Also calculate standard linear regression for comparison
-            const result = linearRegression(filteredData, 1); // index-based, for the trend label
-            const linearSlopeValue = leastSquaresSlope(filteredData, x);
+            // The fitted level sits at or above the threshold although the recent
+            // samples do not: the time axis is lying (a clock step the interval
+            // test let through, a device clock set forward). Refit over the sample
+            // index rather than place the crossing in the past.
+            let timeBaseFallback = false;
+            if (positions.timeBased && fit.slope > 0 && threshold - fit.currentLevel <= 0) {
+                positions = indexPositions(n, positions.avgInterval);
+                fit = fitTrend(filteredData, data, positions.x);
+                timeBaseFallback = true;
+                debugLog("RUL: time-based fit put the crossing in the past - refitted over the sample index");
+            }
+            const xLast = fit.xLast;
+            const slope = fit.slope;
+            const currentLevel = fit.currentLevel;
+            const rSquared = fit.rSquared;
+            const varLevel = fit.varLevel;
+            const varSlope = fit.varSlope;
+            const linearSlopeValue = fit.linearSlopeValue;
+            const robustSlopeValue = fit.robustSlopeValue;
 
-            // Use weighted average of robust and linear slope
-            // Robust slope is more reliable but linear gives better R-squared
-            const slope = 0.7 * robustSlopeValue + 0.3 * linearSlopeValue;
+            // Step 4: index-based regression, for the trend label
+            const result = linearRegression(filteredData, 1);
 
-            // Current level of the trend line at the last sample. The centred
-            // smoothing above is truncated at the end of the buffer, so
-            // smoothedData[n-1] lags the trend by roughly half a window — which
-            // biases the RUL *late* (optimistic). The Theil-Sen intercept at the
-            // last index (median of data[i] + slope·(n-1-i)) has no lag and stays
-            // robust to outliers.
             const smoothedCurrentValue = toOriginal(smoothedData[n - 1]);
-            const levelOffsets = [];
-            for (let i = 0; i < n; i++) levelOffsets.push(filteredData[i] + slope * (xLast - x[i]));
-            levelOffsets.sort(function (a, b) {
-                return a - b;
-            });
-            const currentLevel =
-                n % 2 === 1 ? levelOffsets[(n - 1) / 2] : (levelOffsets[n / 2 - 1] + levelOffsets[n / 2]) / 2;
             const currentLevelOriginal = toOriginal(currentLevel);
 
             debugLog(
@@ -669,28 +873,6 @@ module.exports = function (RED) {
                     ", combined=" +
                     slope.toFixed(4)
             );
-
-            // Residuals of the data around the robust line -> noise σ and R²
-            const yMean = data.reduce((a, b) => a + b, 0) / n;
-            const ssTot = data.reduce((sum, y) => sum + Math.pow(y - yMean, 2), 0);
-            let ssRes = 0;
-            for (let i = 0; i < n; i++) {
-                const predicted = currentLevel - slope * (xLast - x[i]);
-                ssRes += Math.pow(data[i] - predicted, 2);
-            }
-            const rSquared = ssTot > 0 ? Math.max(0, 1 - ssRes / ssTot) : 0;
-
-            //   var(level) = σ² (1/n + x̄²/Sxx)   (level is the fit at the last index)
-            //   var(slope) = σ² / Sxx,  Sxx = Σ(x − x̄)²  (n(n²-1)/12 for unit spacing)
-            const sigma2 = ssRes / Math.max(1, n - 2);
-            let xMean = 0;
-            for (let i = 0; i < n; i++) xMean += x[i];
-            xMean /= n;
-            let sxx = 0;
-            for (let i = 0; i < n; i++) sxx += (x[i] - xMean) * (x[i] - xMean);
-            const xBarDist = xLast - xMean;
-            const varLevel = sigma2 * (1 / n + (xBarDist * xBarDist) / sxx);
-            const varSlope = sigma2 / sxx;
 
             // Slope in original units per sample (instantaneous for the exponential model)
             const slopeOriginal = sign * (logDomain ? slope * Math.exp(currentLevel) : slope);
@@ -778,17 +960,54 @@ module.exports = function (RED) {
                 }
             }
 
+            const finiteOrNull = function (v) {
+                return Number.isFinite(v) ? v : null;
+            };
+            const stepsOrNull = function (ms) {
+                return Number.isFinite(ms) ? ms / avgInterval : null;
+            };
+
             if (method !== "weibull") {
                 // Linear or exponential method: extrapolate the trend line from
                 // its lag-free current level.
-                const stepsToFailure = (threshold - currentLevel) / slope;
+                const gap = threshold - currentLevel;
+                if (gap <= 0) {
+                    // Even over the sample index the fitted level is at or past
+                    // the threshold while the recent samples are not. A negative
+                    // RUL is not an estimate — say the model and the data disagree
+                    // instead of routing a crossing "in the past" to the critical
+                    // output.
+                    return {
+                        rul: null,
+                        rulLower: null,
+                        rulUpper: null,
+                        rulSteps: null,
+                        rulLowerSteps: null,
+                        rulUpperSteps: null,
+                        confidence: 0,
+                        confidenceLevel: effectiveConfidenceLevel,
+                        status: "inconsistent",
+                        percentDegraded: percentOf(currentLevelOriginal),
+                        degradationRate: finiteOrNull(slopeOriginal),
+                        trend: signalTrend,
+                        model: method,
+                        direction: falling ? "falling" : "rising",
+                        timeBased: positions.timeBased,
+                        timeBaseFallback: timeBaseFallback,
+                        intervalOutliers: positions.intervalOutliers,
+                        smoothedValue: finiteOrNull(smoothedCurrentValue),
+                        currentLevel: finiteOrNull(currentLevelOriginal),
+                        rawSlope: finiteOrNull(sign * linearSlopeValue),
+                        robustSlope: finiteOrNull(sign * robustSlopeValue)
+                    };
+                }
+                const stepsToFailure = gap / slope;
                 timeToFailure = stepsToFailure * avgInterval;
 
                 // Interval for the *crossing time*, not for the next observation:
                 // delta method on t = (T - level) / slope. The slope term grows
                 // with the distance to the threshold, which is what makes a
                 // far-off failure genuinely more uncertain.
-                const gap = threshold - currentLevel;
                 const varSteps = varLevel / (slope * slope) + (gap * gap * varSlope) / Math.pow(slope, 4);
                 const marginSteps = zScore * Math.sqrt(Math.max(0, varSteps));
 
@@ -799,13 +1018,6 @@ module.exports = function (RED) {
             let status = "healthy";
             if (timeToFailure < avgInterval * 10) status = "critical";
             else if (timeToFailure < avgInterval * 50) status = "warning";
-
-            const finiteOrNull = function (v) {
-                return Number.isFinite(v) ? v : null;
-            };
-            const stepsOrNull = function (ms) {
-                return Number.isFinite(ms) ? ms / avgInterval : null;
-            };
 
             // STABILITY: Ensure all returned values are valid numbers
             const rulResult = {
@@ -825,6 +1037,8 @@ module.exports = function (RED) {
                 model: method,
                 direction: falling ? "falling" : "rising",
                 timeBased: positions.timeBased,
+                timeBaseFallback: timeBaseFallback,
+                intervalOutliers: positions.intervalOutliers,
                 weibull: weibullInfo,
                 smoothedValue: finiteOrNull(smoothedCurrentValue),
                 currentLevel: finiteOrNull(currentLevelOriginal),
@@ -908,7 +1122,13 @@ module.exports = function (RED) {
                     confidenceLevel: rulResult.confidenceLevel,
                     status: rulResult.status,
                     model: rulResult.model,
-                    direction: rulResult.direction
+                    direction: rulResult.direction,
+                    // How the time axis was built: over the timestamps, or over the
+                    // sample index (no usable timestamps, or a fallback after the
+                    // time-based fit placed the crossing in the past)
+                    timeBased: rulResult.timeBased === true,
+                    timeBaseFallback: rulResult.timeBaseFallback === true,
+                    intervalOutliers: rulResult.intervalOutliers || 0
                 },
                 degradation: {
                     percent: rulResult.percentDegraded,
@@ -926,28 +1146,34 @@ module.exports = function (RED) {
                 outputMsg.weibull = rulResult.weibull;
             }
 
+            if (node.outputTopic) {
+                outputMsg.topic = node.outputTopic;
+            }
+
             copyPassthrough(outputMsg, msg);
 
             // Status display
             const statusColor =
                 rulResult.status === "critical"
                     ? "red"
-                    : rulResult.status === "warning"
+                    : rulResult.status === "warning" || rulResult.status === "inconsistent"
                       ? "yellow"
                       : rulResult.status === "failed"
                         ? "red"
                         : "green";
             const statusText =
-                rulResult.rul === Infinity
-                    ? "RUL: ∞ (stable)"
-                    : rulResult.rul === 0
-                      ? "FAILED"
-                      : "RUL: " +
-                        rulValue.toFixed(1) +
-                        unitLabel +
-                        " (" +
-                        (rulResult.confidence * 100).toFixed(0) +
-                        "%)";
+                rulResult.status === "inconsistent"
+                    ? "RUL: inconsistent (fit past threshold)"
+                    : rulResult.rul === Infinity
+                      ? "RUL: ∞ (stable)"
+                      : rulResult.rul === 0
+                        ? "FAILED"
+                        : "RUL: " +
+                          rulValue.toFixed(1) +
+                          unitLabel +
+                          " (" +
+                          (rulResult.confidence * 100).toFixed(0) +
+                          "%)";
 
             node.status({
                 fill: statusColor,
@@ -955,11 +1181,17 @@ module.exports = function (RED) {
                 text: statusText
             });
 
+            // The warning threshold is tested on the median of the last three
+            // samples, like the failure threshold: one spike is not a warning.
+            const recent = node.buffer.slice(-3).sort(function (a, b) {
+                return a - b;
+            });
+            const recentLevel = recent[Math.floor(recent.length / 2)];
             const isAnomaly =
                 rulResult.status === "critical" ||
                 rulResult.status === "failed" ||
                 (warningThreshold !== null &&
-                    (direction === "falling" ? value <= warningThreshold : value >= warningThreshold));
+                    (direction === "falling" ? recentLevel <= warningThreshold : recentLevel >= warningThreshold));
 
             return { normal: isAnomaly ? null : outputMsg, anomaly: isAnomaly ? outputMsg : null };
         }
@@ -998,15 +1230,11 @@ module.exports = function (RED) {
             if (threshold !== null && prediction) {
                 stepsToThreshold = calculateStepsToThreshold(prediction.predictedValues, threshold, value);
                 if (stepsToThreshold !== null && node.timestamps.length >= 2) {
-                    const timeDiffs = [];
-                    for (let i = 1; i < node.timestamps.length; i++) {
-                        timeDiffs.push(node.timestamps[i] - node.timestamps[i - 1]);
-                    }
-                    const avgTimeDiff =
-                        timeDiffs.reduce(function (a, b) {
-                            return a + b;
-                        }, 0) / timeDiffs.length;
-                    timeToThreshold = stepsToThreshold * avgTimeDiff;
+                    // Mean sampling interval with clock steps taken out (a one-hour
+                    // NTP correction is not an hour between two samples)
+                    const positions = samplePositions(node.timestamps, node.buffer);
+                    reportTimeBase(positions);
+                    timeToThreshold = stepsToThreshold * positions.avgInterval;
                 }
             }
 
@@ -1021,6 +1249,10 @@ module.exports = function (RED) {
                 method: node.method,
                 timestamp: timestamp
             };
+
+            if (node.outputTopic) {
+                outputMsg.topic = node.outputTopic;
+            }
 
             copyPassthrough(outputMsg, msg);
 
@@ -1109,6 +1341,10 @@ module.exports = function (RED) {
                 timestamp: timestamp
             };
 
+            if (node.outputTopic) {
+                outputMsg.topic = node.outputTopic;
+            }
+
             copyPassthrough(outputMsg, msg);
 
             if (rateOfChange !== null) {
@@ -1129,18 +1365,40 @@ module.exports = function (RED) {
             return typeof n === "number" && Number.isFinite(n) ? n : null;
         }
 
+        // A numeric timestamp in this range is an epoch in *seconds* (1e9 s =
+        // 2001, 1e11 s = year 5138; in ms the same numbers are 1970-1973).
+        // Smaller numbers are left alone: a cycle counter or a relative clock
+        // is a legitimate monotonic time base.
+        const EPOCH_SECONDS_MIN = 1e9;
+        const EPOCH_SECONDS_MAX = 1e11;
+
         // msg.timestamp as ms: a number, a Date, or a parseable date string;
-        // anything else falls back to the arrival time.
+        // anything else falls back to the arrival time. Epoch seconds are
+        // converted (with a warning): taken as ms they put every interval a
+        // thousand times too short, and the RUL in hours a thousand times too.
         function resolveTimestamp(raw) {
-            if (typeof raw === "number" && Number.isFinite(raw)) return raw;
-            if (raw instanceof Date && Number.isFinite(raw.getTime())) return raw.getTime();
-            if (typeof raw === "string" && raw.trim() !== "") {
+            let ms = null;
+            if (typeof raw === "number" && Number.isFinite(raw)) ms = raw;
+            else if (raw instanceof Date && Number.isFinite(raw.getTime())) return raw.getTime();
+            else if (typeof raw === "string" && raw.trim() !== "") {
                 const n = Number(raw);
-                if (Number.isFinite(n)) return n;
-                const parsed = Date.parse(raw);
-                if (Number.isFinite(parsed)) return parsed;
+                if (Number.isFinite(n)) ms = n;
+                else {
+                    const parsed = Date.parse(raw);
+                    if (Number.isFinite(parsed)) return parsed;
+                }
             }
-            return Date.now();
+            if (ms === null) return Date.now();
+            if (ms >= EPOCH_SECONDS_MIN && ms < EPOCH_SECONDS_MAX) {
+                warnOnce(
+                    "epoch-seconds",
+                    "msg.timestamp looks like epoch seconds (" +
+                        ms +
+                        "); converted to milliseconds. Send ms to silence this."
+                );
+                return ms * 1000;
+            }
+            return ms;
         }
 
         // Per-message override that must be a finite number; a malformed one
@@ -1195,12 +1453,7 @@ module.exports = function (RED) {
                         const regression = linearRegression(node.sensorBuffers[sensorName], active.predictionSteps);
                         sensorResult = {
                             value: value,
-                            trend:
-                                regression.slope > 0.01
-                                    ? "increasing"
-                                    : regression.slope < -0.01
-                                      ? "decreasing"
-                                      : "stable",
+                            trend: regression.trend,
                             slope: regression.slope,
                             predictedValues: regression.predictedValues,
                             bufferSize: node.sensorBuffers[sensorName].length
@@ -1306,7 +1559,8 @@ module.exports = function (RED) {
                 outMsg.exceededSensors = exceededSensors;
             }
 
-            if (msg.topic) outMsg.topic = node.outputTopic || msg.topic;
+            if (node.outputTopic) outMsg.topic = node.outputTopic;
+            else if (msg.topic !== undefined) outMsg.topic = msg.topic;
 
             // Update status
             let statusText = sensorNames.length + " sensors";

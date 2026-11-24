@@ -5,8 +5,11 @@ const WebSocket = require("ws");
 const {
     WebSocketManager,
     getWebSocketManager,
+    releaseWebSocketManager,
+    getWebSocketManagerUsers,
     isWebSocketAvailable,
-    shutdownWebSocketManager
+    shutdownWebSocketManager,
+    timingSafeEqualStrings
 } = require("../nodes/websocket-manager");
 
 // Random per-suite base port plus a per-test counter so parallel Jest workers
@@ -190,6 +193,29 @@ describe("WebSocketManager", () => {
     });
 
     describe("token auth", () => {
+        it("compares tokens of unequal length without throwing (and without an early return)", () => {
+            expect(timingSafeEqualStrings("abc", "abcd")).toBe(false);
+            expect(timingSafeEqualStrings("", "x")).toBe(false);
+            expect(timingSafeEqualStrings("s3cret", "s3cret")).toBe(true);
+            expect(timingSafeEqualStrings("s3cret", "s3creT")).toBe(false);
+            // Multi-byte input: compared by content, not by JS string length.
+            expect(timingSafeEqualStrings("ü", "ü")).toBe(false);
+            expect(timingSafeEqualStrings(null, "x")).toBe(false);
+            expect(timingSafeEqualStrings("x", undefined)).toBe(false);
+        });
+
+        it("refuses a token that is a prefix or an extension of the real one", async () => {
+            await startManager({ authToken: "s3cret" });
+            for (const presented of ["s3cre", "s3cret!"]) {
+                const ws = new WebSocket(`ws://127.0.0.1:${manager.port}${WS_PATH}?token=${presented}`);
+                const code = await new Promise((resolve, reject) => {
+                    ws.once("close", resolve);
+                    ws.once("error", reject);
+                });
+                expect(code).toBe(4401);
+            }
+        });
+
         it("accepts the token from the query even when a subprotocol header is present", async () => {
             await startManager({ authToken: "s3cret" });
             const ws = new WebSocket(`ws://127.0.0.1:${manager.port}${WS_PATH}?token=s3cret`, "json");
@@ -386,6 +412,125 @@ describe("WebSocketManager", () => {
         });
     });
 
+    describe("broadcast backpressure", () => {
+        // A mocked socket: OPEN, with a controllable outbound buffer. ws.send()
+        // never throws while OPEN, so a stalled reader is only visible here.
+        function fakeSocket(bufferedAmount) {
+            return {
+                readyState: WebSocket.OPEN,
+                bufferedAmount,
+                send: jest.fn(),
+                terminate: jest.fn(function () {
+                    this.readyState = WebSocket.CLOSED;
+                }),
+                close: jest.fn()
+            };
+        }
+        function attach(mgr, id, ws) {
+            mgr.clients.set(id, {
+                ws,
+                id,
+                ip: "127.0.0.1",
+                subscriptions: new Set(["*"]),
+                lastPing: Date.now(),
+                connectedAt: Date.now(),
+                skippedMessages: 0,
+                consecutiveSkips: 0
+            });
+            mgr.stats.clientsCurrent = mgr.clients.size;
+        }
+
+        it("skips a client whose outbound buffer is above the threshold and counts it", () => {
+            manager = new WebSocketManager({ port: nextPort(), maxBufferedBytes: 1000 });
+            manager.isRunning = true;
+            const slow = fakeSocket(5000);
+            const fast = fakeSocket(0);
+            attach(manager, "slow", slow);
+            attach(manager, "fast", fast);
+
+            manager.broadcast("health", { n: 1 });
+            expect(fast.send).toHaveBeenCalledTimes(1);
+            expect(slow.send).not.toHaveBeenCalled();
+
+            const stats = manager.getStats({ includeClients: true });
+            expect(stats.messagesPublished).toBe(1);
+            expect(stats.messagesSent).toBe(1);
+            expect(stats.messagesSkipped).toBe(1);
+            expect(stats.clients.find((c) => c.id === "slow").skippedMessages).toBe(1);
+            expect(stats.clients.find((c) => c.id === "fast").skippedMessages).toBe(0);
+
+            // Once it drains, delivery resumes and the consecutive count restarts.
+            slow.bufferedAmount = 0;
+            manager.broadcast("health", { n: 2 });
+            expect(slow.send).toHaveBeenCalledTimes(1);
+            expect(manager.clients.get("slow").consecutiveSkips).toBe(0);
+            expect(manager.clients.get("slow").skippedMessages).toBe(1);
+        });
+
+        it("terminates a client after maxConsecutiveSkips skipped broadcasts in a row", () => {
+            manager = new WebSocketManager({ port: nextPort(), maxBufferedBytes: 1000, maxConsecutiveSkips: 3 });
+            manager.isRunning = true;
+            const slow = fakeSocket(5000);
+            attach(manager, "slow", slow);
+            const dropped = [];
+            manager.on("clientDropped", (info) => dropped.push(info));
+
+            manager.broadcast("health", { n: 1 });
+            manager.broadcast("health", { n: 2 });
+            expect(slow.terminate).not.toHaveBeenCalled();
+            expect(manager.clients.has("slow")).toBe(true);
+
+            manager.broadcast("health", { n: 3 });
+            expect(slow.terminate).toHaveBeenCalledTimes(1);
+            expect(manager.clients.has("slow")).toBe(false);
+            expect(slow.send).not.toHaveBeenCalled();
+            expect(dropped).toEqual([
+                { clientId: "slow", reason: "backpressure", skippedMessages: 3, bufferedAmount: 5000 }
+            ]);
+            const stats = manager.getStats();
+            expect(stats.messagesSkipped).toBe(3);
+            expect(stats.clientsDroppedBackpressure).toBe(1);
+            expect(stats.clientsCurrent).toBe(0);
+        });
+
+        it("uses a 1 MB threshold and 10 skips by default", () => {
+            manager = new WebSocketManager({ port: nextPort() });
+            expect(manager.maxBufferedBytes).toBe(1024 * 1024);
+            expect(manager.maxConsecutiveSkips).toBe(10);
+            expect(manager.closeGraceMs).toBe(1000);
+        });
+    });
+
+    describe("shutdown with unresponsive clients", () => {
+        it("stop() finishes well inside Node-RED's close timeout when a client never answers the close handshake", async () => {
+            await startManager({ closeGraceMs: 300 });
+            const { client } = await connect(manager);
+            // A deaf client: it stops reading, so it neither sees the server's
+            // close frame nor replies to it. ws alone would wait 30 s.
+            client.ws._socket.pause();
+
+            const started = Date.now();
+            await manager.stop();
+            const elapsed = Date.now() - started;
+
+            expect(manager.isRunning).toBe(false);
+            expect(elapsed).toBeLessThan(2000);
+            expect(elapsed).toBeGreaterThanOrEqual(250);
+            // The server socket is really gone: the port can be bound again.
+            const again = new WebSocketManager({ port: manager.port });
+            await expect(again.start()).resolves.toBeUndefined();
+            await again.stop();
+        }, 10000);
+
+        it("stop() does not wait for the grace period when every client closes cleanly", async () => {
+            await startManager({ closeGraceMs: 5000 });
+            await connect(manager);
+            const started = Date.now();
+            await manager.stop();
+            expect(Date.now() - started).toBeLessThan(1500);
+        });
+    });
+
     describe("hardening", () => {
         it("rejects connections above maxClients with code 4009", async () => {
             await startManager({ maxClients: 2 });
@@ -467,9 +612,63 @@ describe("WebSocketManager", () => {
 
             await shutdownWebSocketManager();
             expect(instance.isRunning).toBe(false);
+            expect(getWebSocketManagerUsers()).toBe(0);
 
             const fresh = getWebSocketManager({ port: nextPort() });
             expect(fresh).not.toBe(instance);
+        });
+
+        it("counts holders; the last release stops the server and drops the instance", async () => {
+            const port = nextPort();
+            const a = getWebSocketManager({ port, authToken: "old" });
+            const b = getWebSocketManager({ port, authToken: "old" });
+            expect(b).toBe(a);
+            expect(getWebSocketManagerUsers()).toBe(2);
+            await a.start();
+
+            await releaseWebSocketManager();
+            expect(getWebSocketManagerUsers()).toBe(1);
+            expect(a.isRunning).toBe(true);
+            expect(getWebSocketManager({ port, authToken: "old" })).toBe(a);
+            await releaseWebSocketManager();
+
+            await releaseWebSocketManager();
+            expect(getWebSocketManagerUsers()).toBe(0);
+            expect(a.isRunning).toBe(false);
+
+            // Releasing more often than acquiring is harmless.
+            await expect(releaseWebSocketManager()).resolves.toBeUndefined();
+            expect(getWebSocketManagerUsers()).toBe(0);
+        });
+
+        it("a redeploy with a new token takes effect: the next acquisition builds a fresh server", async () => {
+            const port = nextPort();
+            const first = getWebSocketManager({ port, authToken: "old-token" });
+            await first.start();
+            await releaseWebSocketManager(); // the node closes on redeploy …
+            expect(first.isRunning).toBe(false);
+
+            const second = getWebSocketManager({ port, authToken: "new-token" }); // … and comes back
+            expect(second).not.toBe(first);
+            expect(second.authToken).toBe("new-token");
+            await second.start(); // same port, free again
+            manager = second;
+
+            const probe = (token) =>
+                new Promise((resolve, reject) => {
+                    const ws = new WebSocket(`ws://127.0.0.1:${port}${WS_PATH}?token=${token}`);
+                    ws.once("message", () => {
+                        ws.terminate();
+                        resolve("welcome");
+                    });
+                    ws.once("close", (code) => resolve(code));
+                    ws.once("error", reject);
+                });
+            expect(await probe("old-token")).toBe(4401);
+            expect(await probe("new-token")).toBe("welcome");
+            await releaseWebSocketManager();
+            expect(second.isRunning).toBe(false);
+            manager = null;
         });
     });
 });

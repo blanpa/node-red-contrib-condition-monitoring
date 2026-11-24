@@ -33,27 +33,49 @@ module.exports = function (RED) {
     }
 
     const { clampInt, clampFloat } = require("./utils/config-validator");
+    const imageGuard = require("./utils/image-guard");
 
     // Upper bound for the target tensor side. 4096² × 3 channels is already
     // ~50M values; anything larger is a typo, not a model input.
     const MAX_TARGET_SIDE = 4096;
+    // Largest SOURCE image accepted (pixels). Checked against the file header
+    // before decoding: pngjs allocates width*height*4 from the IHDR chunk, so
+    // without this a 68-byte PNG claiming 20000x20000 costs 1.6 GB.
+    const MAX_IMAGE_PIXELS = imageGuard.DEFAULT_MAX_PIXELS;
 
     const IMAGENET_MEAN = [0.485, 0.456, 0.406];
     const IMAGENET_STD = [0.229, 0.224, 0.225];
 
+    // Errors carry a short `statusText` for the status line; the full
+    // message goes to node.error via done(err).
+    function fail(message, statusText) {
+        const err = new Error(message);
+        err.statusText = statusText;
+        return err;
+    }
+
     function decode(buf) {
-        if (!Buffer.isBuffer(buf)) throw new Error("input is not a Buffer (expected a PNG/JPEG image)");
-        if (buf.length > 3 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
-            if (!PNG) throw new Error("pngjs not available");
+        if (!Buffer.isBuffer(buf)) throw fail("input is not a Buffer (expected a PNG/JPEG image)", "not an image");
+        if (imageGuard.isPng(buf)) {
+            if (!PNG) throw fail("pngjs not available", "pngjs missing");
+            imageGuard.assertPngDimensions(buf, { maxPixels: MAX_IMAGE_PIXELS });
             const p = PNG.sync.read(buf);
             return { width: p.width, height: p.height, data: p.data };
         }
-        if (buf.length > 1 && buf[0] === 0xff && buf[1] === 0xd8) {
-            if (!jpeg) throw new Error("jpeg-js not available");
+        if (imageGuard.isJpeg(buf)) {
+            if (!jpeg) throw fail("jpeg-js not available", "jpeg-js missing");
+            imageGuard.assertJpegDimensions(buf, { maxPixels: MAX_IMAGE_PIXELS });
             const j = jpeg.decode(buf, { useTArray: true, formatAsRGBA: true });
             return { width: j.width, height: j.height, data: j.data };
         }
-        throw new Error("unsupported image format (need PNG or JPEG)");
+        throw fail("unsupported image format (need PNG or JPEG)", "unsupported format");
+    }
+
+    // Status line text for a failure: the error's short class when it has
+    // one, otherwise the message truncated the way utils/error-handler does.
+    function statusTextFor(err) {
+        const text = (err && (err.statusText || err.message)) || "error";
+        return text.length > 25 ? text.substring(0, 22) + "..." : text;
     }
 
     // bilinear / nearest resize over RGBA
@@ -231,7 +253,7 @@ module.exports = function (RED) {
                 send(msg);
                 done();
             } catch (err) {
-                node.status({ fill: "red", shape: "dot", text: err.message });
+                node.status({ fill: "red", shape: "dot", text: statusTextFor(err) });
                 done(err);
             }
         });

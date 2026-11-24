@@ -9,6 +9,186 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🔒 Security
+
+- **`ml-inference`: two unused editor routes removed.** `GET
+  /ml-inference/registries/mlflow/models` let any client with
+  `ml-inference.read` make the runtime fetch an arbitrary http(s) URL with a
+  caller-chosen bearer token (server-side request forgery); the editor never
+  called it, nor `GET /ml-inference/models/:name/versions`. Both now answer
+  404. The `mlInferenceAllowedRegistryHosts` setting has no effect any more.
+- **`ml-inference`: the model-path allowlist is the model store
+  (`<userDir>/ml-models`), the bundled models and
+  `conditionMonitoring.allowedModelPaths` only.** The Node-RED `userDir` and
+  the process working directory are no longer allowlisted (with cwd `/` the
+  old list covered the whole file system, and `userDir` put
+  `flows_cred.json` in reach of `msg.loadModel`). Models elsewhere need
+  `allowedModelPaths` in `settings.js`.
+- **`ml-inference`: `urlAuthToken`, `hfToken`, `mlflowAuthToken` and
+  `customApiKey` are Node-RED credentials** (encrypted, not part of a flow
+  export) instead of plain config. A value still sitting in the flow file
+  keeps working and logs a warning; re-enter it in the editor to migrate.
+  `/ml-inference/models` and the upload responses report names relative to
+  the model store instead of absolute server paths.
+- **`anomaly-detector`: the WebSocket auth token is configurable in the
+  editor**, as a credential, next to a comma-separated Origin allowlist. The
+  runtime read `websocketAuthToken` since 0.3.x but no field existed, so the
+  "no auth token" warning could not be acted on. A plain-config token keeps
+  working with a warning. Changing token, port or origins and redeploying now
+  takes effect (the shared server is stopped when its last node closes and
+  recreated on the next deploy; previously a Node-RED restart was needed).
+  Shutdown terminates clients that do not close within 1 s; slow readers are
+  skipped above 1 MB buffered and disconnected after 10 skipped broadcasts;
+  the token compare no longer leaks the token length.
+- **Python sidecars (`inference_server.py`, `max_bridge.py`) bind
+  `127.0.0.1` by default** (`CM_INFERENCE_HOST` / `MAX_BRIDGE_HOST=0.0.0.0`
+  for container use; the shipped Dockerfiles and compose files set it),
+  accept an optional shared secret (`CM_INFERENCE_TOKEN` /
+  `MAX_BRIDGE_TOKEN`, sent by the bridges as `Authorization: Bearer`;
+  `GET /health` stays open for container health checks), refuse
+  `model_path` outside `CM_INFERENCE_MODEL_ROOT` (default `/data/models`) /
+  `MAX_BRIDGE_MODEL_ROOT` (default `/models`) with 403, and no longer return
+  Python tracebacks.
+- **TF.js `modelSha256` now covers `model.json` *and* every weight shard** in
+  `weightsManifest` order (`cat model.json <shards> | sha256sum`). The old pin
+  over `model.json` alone left the weights unverified. **Existing TF.js pins
+  fail with `ESHAMISMATCH` and must be recomputed**; ONNX and the catalog are
+  unaffected.
+- A downloaded legacy Keras `.h5` is no longer auto-selected with model type
+  `auto` (it can run code on load, like a pickle); choose Keras explicitly.
+  Keras models load with `safe_mode=True` where the installed Keras supports
+  it.
+- **`image-preprocess`, `vision-annotator`: image dimensions are checked in
+  the PNG / JPEG header before decoding** (`nodes/utils/image-guard.js`,
+  50 megapixels by default). A 68-byte PNG claiming 20 000 × 20 000 pixels
+  made pngjs allocate 1.6 GB; it is now refused with `EIMAGETOOLARGE`.
+- **`llm-analyzer`: `msg.prompt`, `msg.systemPrompt` and `msg.model` are
+  honoured only with the new "Allow msg overrides" checkbox** (off by
+  default, also for existing flows — tick it once if a flow relies on them;
+  otherwise they are ignored with one warning). Any upstream message could
+  replace the operator's system prompt or switch to a far more expensive
+  model. Record-mode column names are sanitised before they are written into
+  the prompt (control characters and newlines stripped, 64 characters max;
+  keys that fail are not auto-detected).
+- **`training-data-collector`: CSV cells that start with `=`, `+`, `-`, `@`,
+  tab or CR are prefixed with `'`** so a label such as `=HYPERLINK(...)`
+  from `msg.label` cannot execute when the export is opened in a spreadsheet
+  (numbers are untouched). Metadata is written atomically (`.part` + rename)
+  like the datasets; the label-class list is capped at 10 000; an unknown
+  `msg.action` is warned about instead of being collected as a sample.
+
+### ✨ Added
+
+- **`signal-analyzer`:** per-message sampling rate (`msg.samplingRate` or
+  `msg.config.samplingRate`) in every mode; the crest-factor alarm threshold
+  is an editor field (it was only reachable via `msg.config`); FFT sizes 4096
+  and 8192; `dcOffset` and `samplingRate` in the vibration output; `msg.peak`
+  with the confirmed peak in peaks mode.
+- **`trend-predictor`:** `rul.timeBased`, `rul.timeBaseFallback` and
+  `rul.intervalOutliers` report how the time axis was treated; epoch-second
+  timestamps are converted (with one warning).
+- **`health-index`:** `msg.missingSensors` lists configured sensors absent
+  from the payload (warned once); `staleAfterMs` holds a missing sensor's last
+  score for that long (`heldSensors`); a per-sensor `direction`
+  (`"rising"`/`"falling"`, also `failureDirection` from `trend-predictor`)
+  makes a decreasing trend count against a falling-is-bad indicator.
+- **`anomaly-detector`:** `msg.config` covers every method
+  (`emaThreshold`/`emaWarning`, `cusumThreshold`/`cusumWarning`/`cusumDrift`,
+  `maThreshold`/`maWarning`, `lowerPercentile`/`upperPercentile`,
+  `iqrWarningMultiplier`); an unknown `method` is ignored with one warning
+  instead of scoring as z-score; batch mode honours the same keys
+  (`msg.method`/`msg.threshold` stay as aliases).
+- **`ml-inference`:** ONNX input dtype follows the model's input metadata
+  (int64/int32 inputs work); `-1` in `inputShape` marks an open dimension.
+- **Python bridge (subprocess):** no respawn for 30 s after a crash, and after
+  5 crashes in 10 min the bridge stays down with `EBRIDGELOCKOUT` until 10 min
+  after the last crash or a Node-RED restart (a model that segfaults on load
+  no longer spawns one interpreter per message); at most 64 in-flight
+  requests (`EBUSY` beyond that).
+- **HTTP bridges (MAX, remote inference):** connection errors are retried,
+  timeouts and 4xx never, 5xx only for `GET /status`; responses are capped at
+  16 MiB.
+- Publishing: the tag workflow installs without the optional ML runtimes like
+  CI's required jobs, so a `tfjs-node` build failure on the runner cannot block
+  a release; `npm publish` runs lint and the Prettier check first
+  (`prepublishOnly`).
+
+### ⚠️ Changed behaviour
+
+- **`signal-analyzer` vibration mode analyses an array payload (a frame) as a
+  whole and centred.** Previously only the last `windowSize` samples (default
+  256) were used, so a 4096-sample frame at 10 kHz had its ISO velocity
+  integrated on a 39 Hz grid and read about 40 % low (zone B instead of D),
+  and crest factor / kurtosis included the DC offset of a vertically mounted
+  accelerometer. `windowSize` now applies to scalar streams only. An ISO
+  alarm zone routes to output 2 (previously only crest factor / kurtosis
+  did). `isPeak` is reported on the sample that *confirms* a peak (one sample
+  of latency) — it was never `true` before, so output 2 of peaks mode never
+  fired. `outputTopic` applies in vibration and peaks mode too.
+- **FFT amplitude for a non-power-of-two `fftSize`** is normalised by the
+  windowed length, so a sine of amplitude A reads A (it read A·L/N).
+- **`trend-predictor`:** a negative time to failure is never emitted — the
+  result carries `status: "inconsistent"`, `rul: null` and goes to output 1
+  (a clock step used to produce "critical" with a negative RUL); an interval
+  more than 10× the median whose value does not continue the trend is
+  treated as a clock step (time base reset, warned once), not as a gap; the
+  "failed" and warning decisions use the median of the last three samples
+  (a single spike no longer reports `failed`); the prediction-mode trend
+  label uses the same two-standard-error test as RUL mode instead of an
+  absolute slope of 0.01 per sample; `outputTopic` applies to scalar
+  outputs too.
+- **`health-index`:** the coefficient-of-variation reliability penalty no
+  longer applies to zero-mean indicators (|mean| ≤ 2·σ/√n); output labels,
+  the `"minimum"` aggregation name and the status ladder (80/60/40/20) in the
+  help match the code.
+- **`anomaly-detector`:** the multi-sensor output carries the same envelope
+  as the single-value output (`topic` from Output Topic, passthrough
+  properties, `timestamp`, `hysteresis`); batch mode uses the configured
+  z-score warning threshold (the band was a fixed 67 % of the critical one).
+- **`ml-inference`:** an ONNX `inputShape` that does not match the input
+  length fails the message instead of being silently reshaped to `[1,N]`
+  (unless the shape has an open `-1` dimension); model metadata is written to
+  `<model store>/.meta/<sha1>.json` instead of `<model>_metadata.json` next to
+  the model (read-only model mounts and the test fixtures stay untouched;
+  legacy sidecars are still read), and only when something besides
+  `lastLoaded` changed.
+- **`llm-analyzer`:** the default model is `claude-haiku-5-5` (the dated
+  `claude-haiku-4-5-20251001` snapshot is retired; the example flow and docs
+  follow). An Anthropic `stop_reason: "refusal"` is reported as an error
+  instead of an empty payload. At most the newest 100 000 buffered samples
+  are persisted (only `maxBufferSize` above that with `persistState` is
+  affected).
+- **Persisted state is versioned** (`__v: 1`, `state-persistence.js`). Blobs
+  written by 0.4.0 carry no version and load unchanged; a blob with a
+  different version and no `migrate` hook, or a corrupt blob, starts fresh
+  with one warning instead of throwing. Nodes mark state dirty and the
+  manager flushes — `llm-analyzer` no longer runs a second 30 s timer for the
+  same blob.
+- `image-preprocess` and `vision-annotator` put a short error class in the
+  node status and the full text in `node.error`, like the other nodes.
+
+### 🐛 Fixed
+
+- **`anomaly-detector`:** EMA / CUSUM state of the *active* baseline is
+  restored after a restart — it was saved but only parked regimes were
+  loaded, so the status claimed a restore while the detector re-initialised;
+  rejected payloads no longer create regime / group states; "N sensors OK"
+  counts scored sensors; multi-sensor scoring uses running moments (O(1) per
+  sensor, identical results).
+- **`ml-inference`:** a prediction was dropped when MLflow statistics ran over
+  ~150 000 values (a 224×224 image): `Math.max(...array)` overflowed the call
+  stack; `Float32Array` / `Buffer` inputs failed with "flat is not a function"
+  because `.values` is a method on typed arrays; relative editor paths
+  (`models/<file>`, bare names from the model list) resolve regardless of the
+  working directory.
+- **`llm-analyzer`:** a redeploy during an in-flight call no longer loses the
+  batch (in-flight samples are persisted and restored); retries and queued
+  re-fires keep the triggering message's topic, `_msgid` and overrides.
+- **`vision-annotator`:** a NaN class index skips that box with one warning
+  instead of failing the whole frame with a TypeError.
+- **`condition-monitoring-source`:** an error was reported twice (once via
+  `node.error`, once via `done(err)`), so a catch node fired twice.
+
 ### 📚 Documentation
 
 - **`docs/RESEARCH-pdm-cm-followup.md`** (October 2026): answers the four
