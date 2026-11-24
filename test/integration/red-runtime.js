@@ -143,6 +143,16 @@ async function startRed(options = {}) {
         }
     }
 
+    // RED.start() resolves before the runtime has loaded and started the
+    // (empty) stored flows: `loadFlows().then(startFlows)` is fire-and-forget
+    // in @node-red/runtime. A deploy() that lands in that window is overwritten
+    // when the initial load finishes — the runtime then starts the empty flow,
+    // emits `flows:started`, and the test dies with "node not found". It only
+    // shows on a loaded machine, so subscribe before start and wait it out.
+    const initialFlowsStarted = new Promise((resolve) => {
+        RED.events.once("flows:started", resolve);
+    });
+
     await RED.start();
 
     // After RED.start() the runtime continues to load palette nodes
@@ -170,6 +180,18 @@ async function startRed(options = {}) {
                 throw new Error("condition-monitoring nodes never registered after RED.start()");
             }
             await new Promise((r) => setTimeout(r, 50));
+        }
+    }
+
+    {
+        let timer;
+        const timedOut = new Promise((resolve) => {
+            timer = setTimeout(() => resolve("timeout"), 10000);
+        });
+        const outcome = await Promise.race([initialFlowsStarted, timedOut]);
+        clearTimeout(timer);
+        if (outcome === "timeout") {
+            throw new Error("initial flows never started after RED.start()");
         }
     }
 
