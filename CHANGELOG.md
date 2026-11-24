@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-24 - Second hardening pass; first npm release of the 0.4 line
+
+0.4.0 was never published to npm: 0.4.1 is the first release after 0.3.3 and
+contains everything listed under 0.4.0 below as well.
+
 ### 🔒 Security
 
 - **`ml-inference`: two unused editor routes removed.** `GET
