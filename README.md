@@ -14,7 +14,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ## Table of Contents
 
-- [Project Status: v0.4.1 Beta](#project-status-v041-beta)
+- [Project Status: v0.4.2 Beta](#project-status-v042-beta)
 - [Important Disclaimer](#important-disclaimer)
 - [Background & Industry Context](#background--industry-context)
 - [Features](#features)
@@ -36,7 +36,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## Project Status: v0.4.1 Beta
+## Project Status: v0.4.2 Beta
 
 **Per-device state in every analysis node, corrected detection maths, LLM Analyzer, Vision Pipeline & Data-Source Simulators**
 
