@@ -181,9 +181,12 @@ module.exports = function registerAdminRoutes(RED, deps) {
         "try:",
         "    import tensorflow; packages.append('tensorflow')",
         "except Exception: pass",
-        "try:",
-        "    import tflite_runtime; packages.append('tflite')",
-        "except Exception: pass",
+        // LiteRT (ai-edge-litert) is the maintained TFLite runtime;
+        // tflite-runtime is the legacy package (no wheels for Python 3.12+).
+        "for name in ('ai_edge_litert', 'tflite_runtime'):",
+        "    try:",
+        "        __import__(name); packages.append('tflite'); break",
+        "    except Exception: pass",
         "print(json.dumps(packages))"
     ].join("\n");
 

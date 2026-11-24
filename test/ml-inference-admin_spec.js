@@ -168,6 +168,26 @@ describe("ml-inference admin routes", () => {
         expect(res.json.packages).toContain("sklearn");
     });
 
+    // LiteRT (ai_edge_litert) is the maintained TFLite runtime, tflite_runtime
+    // the legacy one: either makes the editor show TFLite as available, once.
+    (hasPython3 ? it.each : it.skip.each)([
+        ["LiteRT", ["ai_edge_litert"]],
+        ["the legacy tflite_runtime", ["tflite_runtime"]],
+        ["both runtimes", ["ai_edge_litert", "tflite_runtime"]]
+    ])("python-status reports tflite for %s", async (label, modules) => {
+        const fakeSite = fs.mkdtempSync(path.join(tmpRoot, "site-tflite-"));
+        for (const name of modules) {
+            fs.mkdirSync(path.join(fakeSite, name), { recursive: true });
+            fs.writeFileSync(path.join(fakeSite, name, "__init__.py"), "");
+        }
+        jest.spyOn(childProcess, "spawn").mockImplementation((cmd, args, options) =>
+            realSpawn(cmd, args, { ...options, env: { ...process.env, PYTHONPATH: fakeSite } })
+        );
+
+        const res = await request(port, "GET", "/ml-inference/python-status");
+        expect(res.json.packages.filter((name) => name === "tflite")).toEqual(["tflite"]);
+    });
+
     describe("upload", () => {
         it("refuses a multipart form instead of storing its envelope as the model", async () => {
             const boundary = "----testboundary";

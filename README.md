@@ -990,9 +990,9 @@ docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml \
 ### Optional - Python ML Runtimes (Docker or manual)
 For TFLite, Keras, and scikit-learn models:
 ```bash
-pip install numpy tensorflow scikit-learn joblib tflite-runtime
-# Use numpy<2 for tflite-runtime compatibility
-pip install "numpy<2"
+pip install numpy tensorflow scikit-learn joblib ai-edge-litert
+# TFLite runs on LiteRT (ai-edge-litert). An already installed tflite-runtime
+# still works, but that package has no wheels for Python 3.12 and newer.
 ```
 
 ---

@@ -71,6 +71,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # behave identically. These return (model, model_type) and do not touch stdout.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from python_bridge import (  # noqa: E402
+    has_tflite_runtime,
     load_keras_model,
     load_sklearn_model,
     load_tflite_model,
@@ -181,12 +182,14 @@ def _evict_lru_locked(protect_id):
 def _detect_packages():
     """Report which optional ML runtimes are importable (for /status)."""
     packages = []
-    for name in ("numpy", "sklearn", "tensorflow", "tflite_runtime", "joblib"):
+    for name in ("numpy", "sklearn", "tensorflow", "joblib"):
         try:
             __import__(name)
-            packages.append("tflite" if name == "tflite_runtime" else name)
+            packages.append(name)
         except ImportError:
             pass
+    if has_tflite_runtime():
+        packages.append("tflite")
     return packages
 
 
