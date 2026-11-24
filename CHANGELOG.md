@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🐛 Fixed
+
+- **`Dockerfile.inference` built an image without any ML package.** It installs
+  on Python 3.12, for which `tflite-runtime` has no wheel; the package sat in
+  the same `pip install` as `numpy`, `scikit-learn` and `joblib`, so the whole
+  command failed and the trailing `|| echo` let the build pass anyway. The
+  runtimes are installed in a step that must succeed, `tensorflow-cpu` in a
+  separate best-effort one. `Dockerfile` and `Dockerfile.gpu` are split the
+  same way.
+- **`Dockerfile` / `Dockerfile.gpu`: the images lacked five required
+  dependencies** — `fft.js`, `ml-matrix`, `ml-pca`, `jpeg-js` and `pngjs`. The
+  module is copied in without its own `node_modules` and the explicit
+  `npm install` list had not followed `package.json`, so the nodes loaded but
+  FFT, PCA, the multi-value matrix path and PNG/JPEG decoding failed when
+  used. All `dependencies` are installed now; `test/docker-deps_spec.js`
+  fails when the list or a pinned version drifts from `package.json` and the
+  lockfile again.
+
+### 🔄 Changed
+
+- **TFLite models run on LiteRT (`ai-edge-litert`).** `tflite-runtime` ended
+  at 2.14 (October 2023) and has no wheels for Python 3.12 and newer. The
+  Python bridge and the remote inference sidecar try `ai_edge_litert` first,
+  then an installed `tflite_runtime`, then `tensorflow.lite`, so existing
+  installs keep working. The editor's Python status reports `tflite` for
+  either standalone runtime. Dockerfiles and install instructions name
+  `ai-edge-litert`; the `numpy<2` pin that `tflite-runtime` needed is gone
+  from `Dockerfile`.
+
+### 🔒 Dependencies
+
+- `onnxruntime-node` 1.24.3 → 1.31.1 (range `^1.31.1`, lockfile, `Dockerfile`,
+  `Dockerfile.gpu`). The hold at 1.24.3 dated from 1.27.0 aborting the jest
+  worker on the CI runner; 1.31.1 passes the ONNX smoke test and the full
+  suite on Node 18, 20 and 22. A plain `npm install` already resolved to the
+  newest 1.x, so this is the version users were getting.
+- `Dockerfile` / `Dockerfile.gpu`: `simple-statistics` pin follows
+  `package.json` (7.8.9 → 8.0.0).
+
 ## [0.4.1] - 2026-11-24 - Second hardening pass; first npm release of the 0.4 line
 
 0.4.0 was never published to npm: 0.4.1 is the first release after 0.3.3 and

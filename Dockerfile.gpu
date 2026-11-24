@@ -39,15 +39,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Python ML-Pakete mit GPU-Unterstützung.
-# tensorflow[and-cuda] zieht die passenden CUDA-Wheels mit. tflite-runtime ist
-# nur als CPU verfügbar — bleibt als optionales Fallback.
+# tensorflow[and-cuda] zieht die passenden CUDA-Wheels mit. TFLite läuft über
+# LiteRT (ai-edge-litert, CPU); tflite-runtime endet bei 2.14 und hat keine
+# Wheels für Python 3.12+. Getrennte Schritte, damit ein fehlendes Wheel nicht
+# die übrigen Pakete mitreißt.
 RUN pip3 install --break-system-packages --no-cache-dir \
         "numpy<2" \
         "tensorflow[and-cuda]" \
         scikit-learn \
-        joblib \
-    && pip3 install --break-system-packages --no-cache-dir tflite-runtime || \
-       echo "tflite-runtime nicht verfügbar (CPU-only) — wird übersprungen"
+        joblib
+RUN pip3 install --break-system-packages --no-cache-dir ai-edge-litert || \
+       echo "ai-edge-litert nicht verfügbar — TFLite läuft über tensorflow.lite"
 
 # Node-RED + GPU-fähige JS-Runtimes installieren.
 # @tensorflow/tfjs-node-gpu nutzt die CUDA-Libs aus dem Base-Image.
@@ -62,9 +64,14 @@ WORKDIR /usr/src/node-red
 RUN npm install --omit=dev \
         node-red@${NODE_RED_VERSION} \
         @tensorflow/tfjs-node-gpu@4.22.0 \
-        onnxruntime-node@1.24.3 \
+        onnxruntime-node@1.31.1 \
+        fft.js@4.0.4 \
+        jpeg-js@0.4.4 \
         ml-isolation-forest@0.1.0 \
-        simple-statistics@7.8.9
+        ml-matrix@6.15.1 \
+        ml-pca@4.1.1 \
+        pngjs@7.0.0 \
+        simple-statistics@8.0.0
 
 # Modul-Code installieren
 COPY --chown=node-red:node-red . /data/node_modules/node-red-contrib-condition-monitoring/
