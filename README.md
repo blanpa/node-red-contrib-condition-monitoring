@@ -4,10 +4,11 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 [![npm version](https://img.shields.io/npm/v/node-red-contrib-condition-monitoring.svg)](https://www.npmjs.com/package/node-red-contrib-condition-monitoring)
 [![npm downloads](https://img.shields.io/npm/dm/node-red-contrib-condition-monitoring.svg)](https://www.npmjs.com/package/node-red-contrib-condition-monitoring)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Node-RED](https://img.shields.io/badge/Node--RED-%3E%3D2.0.0-red.svg)](https://nodered.org)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18.0.0-green.svg)](https://nodejs.org)
 [![Status: Beta](https://img.shields.io/badge/Status-Beta-yellow.svg)](CHANGELOG.md)
+[![Sponsor](https://img.shields.io/github/sponsors/blanpa?label=Sponsor&logo=githubsponsors&logoColor=white&color=EA4AAA)](https://github.com/sponsors/blanpa)
 
 ---
 
@@ -649,8 +650,8 @@ vision-annotator` chain.
 | Object detection (COCO) | YOLOv10n (NMS-free) | onnx-community | AGPL-3.0 |
 | Human pose / keypoints | YOLOv8n-pose | Xenova | AGPL-3.0 |
 | Monocular depth | Depth-Anything-v2-small | onnx-community | Apache-2.0 |
-| Surface defect segmentation | bundled (trained in-repo) | this package | MIT |
-| Vibration fault classification | bundled (trained in-repo) | this package | MIT |
+| Surface defect segmentation | bundled (trained in-repo) | this package | Apache-2.0 |
+| Vibration fault classification | bundled (trained in-repo) | this package | Apache-2.0 |
 
 - **Fetched on demand**, not redistributed: `url` models download on deploy into
   `ml-models/cache` and are verified against the catalog's SHA-256. Mind each
@@ -1119,15 +1120,36 @@ Contributions are welcome! Please:
 3. Add tests if applicable
 4. Submit a pull request
 
+## Sponsor this project
+
+This package is developed and maintained in my own time.
+If it saves you some, consider supporting it:
+
+<a href="https://github.com/sponsors/blanpa">
+  <img height="41" alt="Sponsor on GitHub" src="https://img.shields.io/badge/Sponsor%20on%20GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white">
+</a>
+<a href="https://buymeacoffee.com/blanpa">
+  <img height="41" alt="Buy Me a Coffee" src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png">
+</a>
+
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-## Author
+Copyright 2025-2026 blanpa
 
-**blanpa**
+## Contributing and forks
 
----
+Pull requests are welcome, including large ones. If you are planning a bigger
+change — a dependency migration, a restructure, new nodes — please open an issue
+first. We are happy to discuss it and to land substantial work here; that is
+usually less effort than maintaining a parallel package, and it keeps a single
+place for users to report bugs.
+
+If you do publish a fork under its own package name, please also rename the
+Node-RED node type IDs (for example `myprefix-condition-monitoring-*`) and use your own palette
+category. Node-RED refuses to register a node type that is already claimed, so
+identical type IDs make it impossible to install both packages side by side.
 
 ## Roadmap
 
