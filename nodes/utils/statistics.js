@@ -87,7 +87,14 @@ function calculateMedian(values) {
 }
 
 /**
- * Calculate quartiles (Q1, Q2/median, Q3) and IQR
+ * Calculate quartiles (Q1, Q2/median, Q3) and IQR.
+ *
+ * Uses the same linearly interpolated percentile as calculatePercentile (the
+ * "linear" / R-7 definition, the default of NumPy and Excel's QUARTILE.INC), so
+ * q2 equals calculateMedian and q1 / q3 equal the 25th / 75th percentile. An
+ * earlier version picked the element at floor(n·p), which disagreed with both:
+ * for [1, 2, 3, 4] it gave q1 = 2, median = 3, q3 = 4.
+ *
  * @param {number[]} values - Array of numeric values
  * @returns {{q1: number, q2: number, q3: number, iqr: number, median: number}} Quartile statistics
  */
@@ -96,17 +103,11 @@ function calculateQuartiles(values) {
         return { q1: 0, q2: 0, q3: 0, iqr: 0, median: 0 };
     }
     const sorted = values.slice().sort((a, b) => a - b);
-    const q1Index = Math.floor(sorted.length * 0.25);
-    const q2Index = Math.floor(sorted.length * 0.5);
-    const q3Index = Math.floor(sorted.length * 0.75);
+    const q1 = calculatePercentileSorted(sorted, 25);
+    const q2 = calculatePercentileSorted(sorted, 50);
+    const q3 = calculatePercentileSorted(sorted, 75);
 
-    return {
-        q1: sorted[q1Index],
-        q2: sorted[q2Index],
-        q3: sorted[q3Index],
-        iqr: sorted[q3Index] - sorted[q1Index],
-        median: sorted[q2Index]
-    };
+    return { q1: q1, q2: q2, q3: q3, iqr: q3 - q1, median: q2 };
 }
 
 /**
@@ -244,7 +245,13 @@ function calculateSpearmanCorrelation(x, y) {
 }
 
 /**
- * Calculate skewness of a distribution
+ * Calculate skewness of a distribution.
+ *
+ * Adjusted Fisher–Pearson coefficient G1 (what Excel SKEW / pandas `.skew()`
+ * report). The n/((n-1)(n-2)) factor belongs with the *sample* standard
+ * deviation; pairing it with the population one inflates the result by
+ * (n/(n-1))^1.5.
+ *
  * @param {number[]} values - Array of numeric values
  * @returns {number} Skewness value
  */
@@ -252,7 +259,7 @@ function calculateSkewness(values) {
     if (!values || values.length < 3) return 0;
     const n = values.length;
     const mean = calculateMean(values);
-    const stdDev = calculateStdDev(values, mean);
+    const stdDev = calculateSampleStdDev(values, mean);
     if (stdDev === 0) return 0;
 
     let sum = 0;
@@ -264,7 +271,11 @@ function calculateSkewness(values) {
 }
 
 /**
- * Calculate kurtosis of a distribution
+ * Calculate kurtosis of a distribution.
+ *
+ * Sample excess kurtosis G2 (Excel KURT / pandas `.kurt()`); like G1 above it
+ * is defined on the sample standard deviation.
+ *
  * @param {number[]} values - Array of numeric values
  * @returns {number} Kurtosis value (excess kurtosis, 0 for normal distribution)
  */
@@ -272,7 +283,7 @@ function calculateKurtosis(values) {
     if (!values || values.length < 4) return 0;
     const n = values.length;
     const mean = calculateMean(values);
-    const stdDev = calculateStdDev(values, mean);
+    const stdDev = calculateSampleStdDev(values, mean);
     if (stdDev === 0) return 0;
 
     let sum = 0;
@@ -286,6 +297,79 @@ function calculateKurtosis(values) {
     const correction = (3 * nm1 * nm1) / ((n - 2) * (n - 3));
 
     return factor * sum - correction;
+}
+
+/**
+ * Chi-squared quantile for a confidence level given as a one-sided normal
+ * z-score (Wilson–Hilferty approximation).
+ *
+ * The detector nodes expose a "sigma-like" threshold; this turns it into the
+ * matching control limit for a statistic that is chi-squared distributed with
+ * `df` degrees of freedom (squared Mahalanobis distance, Hotelling's T², SPE),
+ * so the same threshold means the same false-alarm rate regardless of how many
+ * dimensions are monitored. `df` may be fractional. Accurate to a few percent
+ * for df >= 1.
+ *
+ * @param {number} df - Degrees of freedom (> 0)
+ * @param {number} z - Normal quantile of the confidence level (e.g. 3 ≈ 99.87%)
+ * @returns {number} Chi-squared quantile (0 when df is not positive)
+ */
+function chiSquaredQuantileFromZ(df, z) {
+    if (!Number.isFinite(df) || df <= 0 || !Number.isFinite(z)) return 0;
+    const a = 2 / (9 * df);
+    const base = 1 - a + z * Math.sqrt(a);
+    return base <= 0 ? 0 : df * base * base * base;
+}
+
+/**
+ * F-distribution quantile for a confidence level given as a one-sided normal
+ * z-score (Paulson's approximation, the F counterpart of Wilson–Hilferty).
+ *
+ * @param {number} d1 - Numerator degrees of freedom (> 0)
+ * @param {number} d2 - Denominator degrees of freedom (> 0)
+ * @param {number} z - Normal quantile of the confidence level
+ * @returns {number} F quantile, or Infinity when d2 is too small for the
+ *          requested confidence to have a finite, trustworthy limit
+ */
+function fQuantileFromZ(d1, d2, z) {
+    if (!(d1 > 0) || !(d2 > 0) || !Number.isFinite(z)) return Infinity;
+    const a = 1 - 2 / (9 * d2);
+    const b = 1 - 2 / (9 * d1);
+    const c = 2 / (9 * d2);
+    const d = 2 / (9 * d1);
+    // Solve (a·w − b)² = z²(c·w² + d) for w = F^(1/3)
+    const qa = a * a - z * z * c;
+    if (qa <= 0) return Infinity;
+    const disc = a * a * b * b - qa * (b * b - z * z * d);
+    if (disc < 0) return Infinity;
+    const w = (a * b + Math.sqrt(disc)) / qa;
+    return w <= 0 ? 0 : w * w * w;
+}
+
+/**
+ * Control limit for the squared Mahalanobis distance / Hotelling's T² of a NEW
+ * observation against a mean and covariance estimated from `n` reference
+ * samples in `p` dimensions:
+ *
+ *     p (n + 1)(n − 1) / (n (n − p)) · F(p, n − p)
+ *
+ * With plenty of reference data this converges to the chi-squared quantile;
+ * with little data it is considerably wider, because the covariance estimate
+ * itself is uncertain — using the chi-squared limit there raises a steady
+ * stream of false alarms. Falls back to the chi-squared quantile when `n` is
+ * unknown, and returns Infinity when there are too few samples (n − p < 1 or
+ * the F quantile does not exist) for any finite limit to be justified.
+ *
+ * @param {number} p - Number of dimensions / retained components
+ * @param {number} n - Number of reference samples
+ * @param {number} z - Normal quantile of the confidence level (e.g. 3)
+ * @returns {number} Limit for the SQUARED distance
+ */
+function hotellingLimitFromZ(p, n, z) {
+    if (!(p > 0) || !Number.isFinite(z)) return 0;
+    if (!Number.isFinite(n)) return chiSquaredQuantileFromZ(p, z);
+    if (n - p < 1) return Infinity;
+    return ((p * (n + 1) * (n - 1)) / (n * (n - p))) * fQuantileFromZ(p, n - p, z);
 }
 
 /**
@@ -444,6 +528,206 @@ class RunningStats {
 }
 
 /**
+ * Online mean vector and covariance matrix of a stream of rows (the
+ * multivariate Welford update), with a reverse update for sliding windows.
+ *
+ * Replaces recomputing the covariance of a whole window on every sample
+ * (O(n·p²)) with an O(p²) update. The same stability caveat as
+ * RunningStats.remove applies: callers that slide a window should rebuild
+ * from the buffer once per window turnover and when the variance collapses.
+ *
+ * @example
+ * const c = new RunningCovariance(2);
+ * c.push([1, 2]); c.push([2, 4]); c.push([3, 7]);
+ * c.means();       // [2, 4.333]
+ * c.covariance();  // sample covariance (1/(n-1))
+ */
+class RunningCovariance {
+    /** @param {number} dimensions - Row length */
+    constructor(dimensions) {
+        if (!Number.isInteger(dimensions) || dimensions < 1) {
+            throw new Error("RunningCovariance needs a positive number of dimensions");
+        }
+        this.p = dimensions;
+        this.n = 0;
+        this._mean = new Float64Array(dimensions);
+        // Co-moment matrix Σ (x_i − mean_i)(x_j − mean_j), row-major, symmetric
+        this._c = new Float64Array(dimensions * dimensions);
+    }
+
+    /** Add a row. Rows of the wrong length or with non-finite entries are ignored. */
+    push(row) {
+        const p = this.p;
+        if (!row || row.length !== p) return;
+        for (let i = 0; i < p; i++) {
+            if (typeof row[i] !== "number" || !Number.isFinite(row[i])) return;
+        }
+        this.n++;
+        const delta = new Float64Array(p);
+        for (let i = 0; i < p; i++) {
+            delta[i] = row[i] - this._mean[i];
+            this._mean[i] += delta[i] / this.n;
+        }
+        // C += (x − mean_old) ⊗ (x − mean_new) = (n−1)/n · δ ⊗ δ
+        const scale = (this.n - 1) / this.n;
+        for (let i = 0; i < p; i++) {
+            const di = delta[i] * scale;
+            for (let j = i; j < p; j++) {
+                const v = di * delta[j];
+                this._c[i * p + j] += v;
+                if (j !== i) this._c[j * p + i] += v;
+            }
+        }
+    }
+
+    /** Remove a previously pushed row (reverse update). */
+    remove(row) {
+        const p = this.p;
+        if (!row || row.length !== p) return;
+        for (let i = 0; i < p; i++) {
+            if (typeof row[i] !== "number" || !Number.isFinite(row[i])) return;
+        }
+        if (this.n <= 1) {
+            this.reset();
+            return;
+        }
+        const newN = this.n - 1;
+        const delta = new Float64Array(p);
+        for (let i = 0; i < p; i++) {
+            delta[i] = row[i] - this._mean[i];
+            this._mean[i] = (this._mean[i] * this.n - row[i]) / newN;
+        }
+        // C −= (x − mean_old) ⊗ (x − mean_new) = n/(n−1) · δ ⊗ δ
+        const scale = this.n / newN;
+        for (let i = 0; i < p; i++) {
+            const di = delta[i] * scale;
+            for (let j = i; j < p; j++) {
+                const v = di * delta[j];
+                this._c[i * p + j] -= v;
+                if (j !== i) this._c[j * p + i] -= v;
+            }
+            // Guard the variances against floating-point drift below zero
+            if (this._c[i * p + i] < 0) this._c[i * p + i] = 0;
+        }
+        this.n = newN;
+    }
+
+    count() {
+        return this.n;
+    }
+
+    /** @returns {number[]} Mean of each dimension */
+    means() {
+        return Array.from(this._mean);
+    }
+
+    /** Population variance of one dimension (1/n). */
+    variance(i) {
+        return this.n === 0 ? 0 : this._c[i * this.p + i] / this.n;
+    }
+
+    /** @returns {number[][]|null} Sample covariance matrix (1/(n−1)), null below 2 rows */
+    covariance() {
+        if (this.n < 2) return null;
+        const p = this.p;
+        const cov = new Array(p);
+        for (let i = 0; i < p; i++) {
+            cov[i] = new Array(p);
+            for (let j = 0; j < p; j++) {
+                cov[i][j] = this._c[i * p + j] / (this.n - 1);
+            }
+        }
+        return cov;
+    }
+
+    reset() {
+        this.n = 0;
+        this._mean.fill(0);
+        this._c.fill(0);
+    }
+}
+
+/**
+ * Fixed-capacity sliding window of numbers.
+ *
+ * The detector nodes used to keep their window as an array of
+ * `{timestamp, value}` objects and `shift()` the oldest one out — a memmove
+ * of the whole window plus ~80 bytes per sample, for a timestamp nothing
+ * ever read. This is a ring over a Float64Array: push is O(1) and the window
+ * costs 8 bytes per sample. The backing store starts small and grows towards
+ * `capacity`, so a 100 000-sample window does not reserve 800 kB up front.
+ *
+ * @param {number} capacity - Maximum number of samples kept (>= 1)
+ * @returns {{
+ *   capacity: number,
+ *   length: number,
+ *   push: function(number): (number|undefined),
+ *   get: function(number): (number|undefined),
+ *   last: function(): (number|undefined),
+ *   toArray: function(): number[],
+ *   clear: function(): void,
+ *   toJSON: function(): number[]
+ * }} `push` returns the sample it evicted, if any. `get(i)` is the i-th
+ *    oldest sample; `toArray()` lists oldest first.
+ */
+function createRingBuffer(capacity) {
+    if (!Number.isInteger(capacity) || capacity < 1) {
+        throw new Error("Ring buffer capacity must be a positive integer");
+    }
+    let data = new Float64Array(Math.min(capacity, 64));
+    let head = 0; // index of the oldest sample
+    let size = 0;
+
+    function toArray() {
+        const out = new Array(size);
+        for (let i = 0; i < size; i++) {
+            out[i] = data[(head + i) % data.length];
+        }
+        return out;
+    }
+
+    return {
+        capacity: capacity,
+        get length() {
+            return size;
+        },
+        push: function (value) {
+            if (size === data.length && size < capacity) {
+                // Grow geometrically, re-laying the samples out from index 0
+                const grown = new Float64Array(Math.min(capacity, data.length * 2));
+                for (let i = 0; i < size; i++) {
+                    grown[i] = data[(head + i) % data.length];
+                }
+                data = grown;
+                head = 0;
+            }
+            if (size < data.length) {
+                data[(head + size) % data.length] = value;
+                size++;
+                return undefined;
+            }
+            const evicted = data[head];
+            data[head] = value;
+            head = (head + 1) % data.length;
+            return evicted;
+        },
+        get: function (index) {
+            if (index < 0 || index >= size) return undefined;
+            return data[(head + index) % data.length];
+        },
+        last: function () {
+            return size === 0 ? undefined : data[(head + size - 1) % data.length];
+        },
+        toArray: toArray,
+        clear: function () {
+            head = 0;
+            size = 0;
+        },
+        toJSON: toArray
+    };
+}
+
+/**
  * Validate that a value is a finite number
  * @param {*} value - Value to validate
  * @returns {boolean} True if value is a finite number
@@ -476,6 +760,9 @@ module.exports = {
     // Anomaly detection helpers
     calculateZScore,
     calculateIQRBounds,
+    chiSquaredQuantileFromZ,
+    fQuantileFromZ,
+    hotellingLimitFromZ,
 
     // Correlation
     calculatePearsonCorrelation,
@@ -494,6 +781,8 @@ module.exports = {
 
     // Streaming
     RunningStats,
+    RunningCovariance,
+    createRingBuffer,
 
     // Validation
     isValidNumber,

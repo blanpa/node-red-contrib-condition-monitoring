@@ -15,6 +15,9 @@
             // RUL settings
             failureThreshold: { value: "" },
             warningThreshold: { value: "" },
+            failureDirection: { value: "rising" },
+            groupBy: { value: "" },
+            maxGroups: { value: 50 },
             rulUnit: { value: "hours" },
             degradationModel: { value: "linear" },
             confidenceLevel: { value: 0.95 },
@@ -58,6 +61,21 @@
             
             showModeConfig(this.mode || "prediction");
             showWeibullParams();
+
+            // Nodes saved before this setting existed have no value for it; show
+            // the behaviour they actually get instead of an empty select.
+            if (!$("#node-input-failureDirection").val()) {
+                $("#node-input-failureDirection").val("rising");
+            }
+
+            // The window size is one setting shown in two mode panels. Only one
+            // element may carry the node-input id (a duplicate id is never read
+            // back on save), so the RUL panel mirrors the real field.
+            var windowSize = $("#node-input-windowSize");
+            var windowSizeMirror = $("#cm-rul-windowSize");
+            windowSizeMirror.val(windowSize.val());
+            windowSizeMirror.on("change input", function() { windowSize.val($(this).val()); });
+            windowSize.on("change input", function() { windowSizeMirror.val($(this).val()); });
             
             $(".cm-section-header").on("click", function() {
                 var $content = $(this).next(".cm-section-content");
@@ -175,6 +193,14 @@
                         <div class="cm-help-text">Early warning level (optional)</div>
                     </div>
                     <div class="cm-config-item">
+                        <label>Failure Direction</label>
+                        <select id="node-input-failureDirection">
+                            <option value="rising" selected>Rising to threshold</option>
+                            <option value="falling">Falling to threshold</option>
+                        </select>
+                        <div class="cm-help-text">Which way the value moves as the asset degrades: rising (vibration, temperature) or falling (pressure, health index)</div>
+                    </div>
+                    <div class="cm-config-item">
                         <label>RUL Unit</label>
                         <select id="node-input-rulUnit">
                             <option value="hours">Hours</option>
@@ -198,7 +224,7 @@
                     </div>
                     <div class="cm-config-item">
                         <label>Window Size (default: 50)</label>
-                        <input type="number" id="node-input-windowSize" min="5" value="50">
+                        <input type="number" id="cm-rul-windowSize" min="5" placeholder="50">
                         <div class="cm-help-text">Number of samples for trend analysis</div>
                     </div>
                 </div>
@@ -225,7 +251,7 @@
                 
                 <div style="margin-top: 12px; padding: 10px; background: #e8f5e9; border-radius: 4px; font-size: 11px;">
                     <i class="fa fa-lightbulb" style="color: #4caf50;"></i>
-                    <strong>Output:</strong> msg.rul contains value, unit, confidence, and status (healthy/warning/critical/failed)
+                    <strong>Output:</strong> msg.rul contains value, unit, confidence, and status (healthy/warning/critical/failed/stable/inconsistent)
                 </div>
             </div>
         </div>
@@ -247,6 +273,20 @@
                     <div class="cm-help-text">Set msg.topic on output (empty = keep original)</div>
                 </div>
                 
+                <div class="cm-config-item">
+                    <label for="node-input-groupBy">
+                        <i class="fa fa-object-group"></i> Group By
+                    </label>
+                    <input type="text" id="node-input-groupBy" placeholder="e.g. topic or payload.deviceId (empty = one shared state)">
+                    <div class="cm-help-text">Message property naming the device. One independent buffer is kept per value, so one node can serve several machines.</div>
+                </div>
+                <div class="cm-config-item">
+                    <label for="node-input-maxGroups">
+                        <i class="fa fa-database"></i> Max Groups
+                    </label>
+                    <input type="number" id="node-input-maxGroups" min="1" step="1" placeholder="50">
+                    <div class="cm-help-text">Devices kept in memory; the least recently used one is evicted beyond this (default 50)</div>
+                </div>
                 <div class="cm-config-item">
                     <label for="node-input-debug">
                         <i class="fa fa-bug"></i> Debug Mode
@@ -283,9 +323,10 @@
         <br><b>Features:</b>
         <ul>
             <li>Configurable failure and warning thresholds</li>
-            <li>Confidence intervals based on R-squared</li>
+            <li>Confidence band for the crossing time (delta method on the fitted level and slope, at the
+            configured confidence level); <code>rul.confidence</code> is the R² of the fit</li>
             <li>Multiple time units: hours, minutes, days, cycles</li>
-            <li>Status output: healthy, warning, critical, failed</li>
+            <li>Status output: healthy, warning, critical, failed, stable, inconsistent</li>
         </ul>
         <br><b>Use case:</b> Predictive maintenance, remaining lifetime estimation</dd>
         
@@ -311,7 +352,11 @@ msg.payload = {
         
         <dt>msg.timestamp <span class="property-type">number</span></dt>
         <dd>Optional timestamp in milliseconds. If not provided, uses <code>Date.now()</code>.
-        <br><b>Important:</b> Consistent timestamps improve RUL accuracy.</dd>
+        <br><b>Important:</b> Consistent timestamps improve RUL accuracy. A value between 10<sup>9</sup> and
+        10<sup>11</sup> is read as epoch <i>seconds</i> and converted to ms (warned once). An interval more than
+        10× the usual sampling interval is checked against the value change across it: a data gap (the value moved
+        on) counts as elapsed time, a clock step (the value continued where it left off) is treated as one ordinary
+        interval — both are warned once and counted in <code>rul.intervalOutliers</code>.</dd>
         
         <dt>msg.reset <span class="property-type">boolean</span></dt>
         <dd>Set to <code>true</code> to clear history and reset calculations</dd>
@@ -350,14 +395,20 @@ msg.payload = {
     <h3>Outputs</h3>
     <ol>
         <li><b>Output 1 (Normal)</b> - Regular trend data</li>
-        <li><b>Output 2 (Threshold/Anomaly)</b> - When threshold will be reached or rate is anomalous</li>
+        <li><b>Output 2 (Threshold/Anomaly)</b> - RUL status <code>critical</code> or <code>failed</code>, the
+        warning threshold reached (median of the last three samples), a multi-sensor threshold within the prediction
+        horizon, or an anomalous rate of change. An <code>inconsistent</code> RUL goes to output 1.</li>
     </ol>
-    
+    <p><b>Output Topic</b> (Advanced Settings) is applied to every output message in every mode; when it is empty
+    the incoming topic is kept.</p>
+
     <h3>Trend Prediction Output</h3>
     <dl>
         <dt>msg.trend <span class="property-type">string</span></dt>
         <dd><code>"increasing"</code> | <code>"decreasing"</code> | <code>"stable"</code>
-        <br>Based on slope magnitude (threshold: ±0.01)</dd>
+        <br>A trend counts when the regression slope over the window is distinguishable from the noise around the
+        line (|slope| &gt; 2 standard errors) — the same test RUL mode uses. The decision is scale-free: a 0-1 index
+        drifting 0.005 per sample is "decreasing", a noisy flat signal in large units is "stable".</dd>
         
         <dt>msg.slope <span class="property-type">number</span></dt>
         <dd>Rate of change per sample step
@@ -416,9 +467,21 @@ msg.payload = {
     <ol>
         <li>Set a <b>Failure Threshold</b> (e.g., vibration > 10 mm/s)</li>
         <li>Node predicts when this threshold will be reached</li>
-        <li><code>timeToThreshold</code> gives estimated time remaining</li>
+        <li><code>msg.rul.value</code> gives the estimated time remaining in the configured unit</li>
     </ol>
     <p><b>Example:</b> If vibration is trending up at 0.5 mm/s per hour and threshold is 10 mm/s (current: 6 mm/s), RUL ≈ 8 hours.</p>
+    <p><b>msg.rul</b> fields: <code>value</code>, <code>lower</code> / <code>upper</code> (confidence band for the
+    crossing time, delta method on the fitted level and slope at <code>confidenceLevel</code>), <code>confidence</code>
+    (R² of the fit), <code>status</code>, <code>model</code>, <code>direction</code>, <code>timeBased</code> (fitted
+    over the timestamps rather than the sample index), <code>timeBaseFallback</code> (the time-based fit placed the
+    crossing in the past, so the window was refitted over the sample index), <code>intervalOutliers</code> (intervals
+    more than 10× the usual one in the window).</p>
+    <p><b>Statuses:</b> <code>healthy</code> / <code>warning</code> / <code>critical</code> (more than 50 / 10 / fewer
+    than 10 sampling intervals to the crossing), <code>failed</code> (the median of the last three samples is at or
+    past the threshold — a single spike does not fail the asset), <code>stable</code> (no significant trend towards
+    the threshold, RUL ∞) and <code>inconsistent</code> (the fitted level is already past the threshold although the
+    recent samples are not; <code>rul.value</code> is <code>null</code>, never negative, and the message goes to
+    output 1).</p>
     
     <h3>Use Cases</h3>
     <ul>

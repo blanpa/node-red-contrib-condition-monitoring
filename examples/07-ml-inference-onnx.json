@@ -85,7 +85,6 @@
         "inputProperty": "payload",
         "outputProperty": "prediction",
         "preprocessMode": "array",
-        "batchSize": 1,
         "warmup": true,
         "x": 570,
         "y": 120,

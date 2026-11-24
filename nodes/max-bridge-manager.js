@@ -17,11 +17,17 @@
  *   const bridge = getMaxBridge();
  *   await bridge.loadModel('/models/anomaly.onnx', 'anomaly-detector');
  *   const result = await bridge.predict('anomaly-detector', [0.5, 1.2, 0.8]);
+ *
+ * Authentication: when `MAX_BRIDGE_TOKEN` is set in the Node-RED environment
+ * (or `options.authToken` is passed), every request carries it as
+ * `Authorization: Bearer <token>`. The server (nodes/python/max_bridge.py)
+ * requires exactly that header when the same variable is set on its side.
  */
 
 const http = require("http");
 const https = require("https");
 const EventEmitter = require("events");
+const { requestJson, withRetry, retryPolicy } = require("./utils/json-http-client");
 
 class MaxBridgeManager extends EventEmitter {
     constructor(options = {}) {
@@ -33,6 +39,12 @@ class MaxBridgeManager extends EventEmitter {
         this.healthCheckInterval = options.healthCheckInterval || 30000;
         this.retryAttempts = options.retryAttempts || 3;
         this.retryDelay = options.retryDelay || 1000;
+
+        // Shared secret for the server, read once: a token that appears in the
+        // environment after the bridge was created is picked up on the next
+        // deploy (the singleton is recreated), not mid-flight.
+        this.authToken =
+            options.authToken !== undefined ? options.authToken || null : process.env.MAX_BRIDGE_TOKEN || null;
 
         // Parse URL
         const url = new URL(this.serverUrl);
@@ -58,67 +70,18 @@ class MaxBridgeManager extends EventEmitter {
     /**
      * Make HTTP request to MAX bridge server
      */
-    async _request(method, path, data = null) {
-        return new Promise((resolve, reject) => {
-            const startTime = Date.now();
-
-            const options = {
-                hostname: this.hostname,
-                port: this.port,
-                path: path,
-                method: method,
-                headers: {
-                    "Content-Type": "application/json",
-                    Accept: "application/json"
-                },
-                timeout: this.requestTimeout
-            };
-
-            const req = this.protocol.request(options, (res) => {
-                let responseData = "";
-
-                res.on("data", (chunk) => {
-                    responseData += chunk;
-                });
-
-                res.on("end", () => {
-                    const responseTime = Date.now() - startTime;
-                    this._updateStats(responseTime, res.statusCode < 400);
-
-                    try {
-                        const parsed = JSON.parse(responseData);
-
-                        if (res.statusCode >= 400) {
-                            const httpErr = new Error(parsed.error || `HTTP ${res.statusCode}`);
-                            // Carry the status so retry logic doesn't have to
-                            // guess it from a body-dependent message string.
-                            httpErr.statusCode = res.statusCode;
-                            reject(httpErr);
-                        } else {
-                            resolve(parsed);
-                        }
-                    } catch (e) {
-                        reject(new Error(`Invalid JSON response: ${responseData.substring(0, 100)}`));
-                    }
-                });
-            });
-
-            req.on("error", (err) => {
-                this._updateStats(Date.now() - startTime, false);
-                reject(err);
-            });
-
-            req.on("timeout", () => {
-                req.destroy();
-                this._updateStats(Date.now() - startTime, false);
-                reject(new Error("Request timeout"));
-            });
-
-            if (data) {
-                req.write(JSON.stringify(data));
-            }
-
-            req.end();
+    _request(method, path, data = null) {
+        return requestJson({
+            protocol: this.protocol,
+            hostname: this.hostname,
+            port: this.port,
+            method: method,
+            path: path,
+            data: data,
+            headers: this.authToken ? { Authorization: "Bearer " + this.authToken } : undefined,
+            timeoutMs: this.requestTimeout,
+            contentTypeAlways: true,
+            onSettled: (responseTime, success) => this._updateStats(responseTime, success)
         });
     }
 
@@ -140,35 +103,20 @@ class MaxBridgeManager extends EventEmitter {
     }
 
     /**
-     * Make request with retry
+     * Make request with retry.
+     *
+     * Connection errors are always retried (the server never saw the
+     * request). Timeouts and 4xx never are. A 5xx is retried only when
+     * `idempotent` is set — i.e. for GET status: a 5xx from /predict is the
+     * model failing, and a timed-out predict is still running on the server,
+     * so repeating either just multiplies the load.
      */
-    async _requestWithRetry(method, path, data = null) {
-        let lastError;
-
-        for (let attempt = 0; attempt < this.retryAttempts; attempt++) {
-            try {
-                return await this._request(method, path, data);
-            } catch (err) {
-                lastError = err;
-
-                // Don't retry on client errors (4xx). Prefer the structured
-                // statusCode; the message check stays as a fallback for
-                // errors raised without one.
-                const status = err.statusCode;
-                if (
-                    (typeof status === "number" && status >= 400 && status < 500) ||
-                    (err.message && err.message.includes("HTTP 4"))
-                ) {
-                    throw err;
-                }
-
-                if (attempt < this.retryAttempts - 1) {
-                    await new Promise((resolve) => setTimeout(resolve, this.retryDelay * (attempt + 1)));
-                }
-            }
-        }
-
-        throw lastError;
+    _requestWithRetry(method, path, data = null, { idempotent = false } = {}) {
+        return withRetry(() => this._request(method, path, data), {
+            retryAttempts: this.retryAttempts,
+            retryDelay: this.retryDelay,
+            isFinal: retryPolicy({ retryServerErrors: idempotent })
+        });
     }
 
     /**
@@ -193,7 +141,7 @@ class MaxBridgeManager extends EventEmitter {
      * Get server status and loaded models
      */
     async getStatus() {
-        return this._requestWithRetry("GET", "/status");
+        return this._requestWithRetry("GET", "/status", null, { idempotent: true });
     }
 
     /**
@@ -211,6 +159,10 @@ class MaxBridgeManager extends EventEmitter {
                 // Error already emitted via 'unhealthy' event
             }
         }, this.healthCheckInterval);
+        // A health probe must never be the thing that keeps the process alive.
+        if (this.healthCheckTimer.unref) {
+            this.healthCheckTimer.unref();
+        }
 
         // Initial check
         this.checkHealth().catch(() => {});

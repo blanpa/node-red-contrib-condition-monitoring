@@ -27,6 +27,10 @@ try {
  * @param {number} [options.saveInterval=30000] - Interval in ms to auto-save state
  * @param {Function} [options.onStateLoaded] - Callback when state is loaded: (state) => void
  * @param {Function} [options.getStateToSave] - Function returning state object to save: () => Object
+ * @param {Function} [options.migrate] - `(state, fromVersion) => state|null`: converts a blob written
+ *   under another schema version. Without it such a blob is discarded with a warning. Blobs without
+ *   a version marker (written by 0.4.0) count as version 1 and load unchanged.
+ * @param {number} [options.maxPersistedItems] - Cap on the length of any persisted array (newest kept)
  * @param {boolean} [options.debug=false] - Enable debug logging
  * @returns {Object|null} State manager instance or null if persistence unavailable
  *
@@ -47,6 +51,9 @@ try {
  *
  * // To manually trigger save:
  * if (persistence) persistence.saveNow();
+ *
+ * // Or let the manager's auto-save pull a snapshot when something changed:
+ * if (persistence) persistence.markDirty();
  */
 function initializeStatePersistence(node, options) {
     if (!options || !options.stateKey) {
@@ -75,10 +82,25 @@ function initializeStatePersistence(node, options) {
         }
     };
 
+    // Set by markDirty(): the next auto-save tick (or flush/close) pulls a
+    // fresh snapshot through getStateToSave() before the manager writes.
+    // Gives a node ONE writer for its blob instead of its own timer next to
+    // the manager's.
+    let snapshotPending = false;
+    let helper = null;
+    const pullSnapshot = function () {
+        if (!snapshotPending) return;
+        snapshotPending = false;
+        helper.saveNow();
+    };
+
     // Create state manager
     const stateManager = new StatePersistence.NodeStateManager(node, {
         stateKey: stateKey,
-        saveInterval: saveInterval
+        saveInterval: saveInterval,
+        migrate: options.migrate,
+        maxPersistedItems: options.maxPersistedItems,
+        onAutoSave: pullSnapshot
     });
 
     // Set node.stateManager for backward compatibility with tests
@@ -104,7 +126,7 @@ function initializeStatePersistence(node, options) {
         });
 
     // Return an enhanced state manager with helper methods
-    return {
+    helper = {
         /**
          * The underlying state manager instance
          */
@@ -114,6 +136,12 @@ function initializeStatePersistence(node, options) {
          * Save current state immediately
          */
         saveNow: function () {
+            // Until the persisted state has been read back, the node only
+            // holds the few samples that arrived since startup. Writing those
+            // now would overwrite the history we are about to restore.
+            if (!stateManager.isLoaded) {
+                return;
+            }
             try {
                 const state = getStateToSave();
                 if (state && typeof state === "object") {
@@ -122,6 +150,27 @@ function initializeStatePersistence(node, options) {
             } catch (err) {
                 debugLog("Error saving state: " + err.message);
             }
+        },
+
+        /**
+         * Note that the node's state changed. The manager's next auto-save
+         * tick snapshots it via getStateToSave() and writes it — no second
+         * timer needed in the node.
+         */
+        markDirty: function () {
+            snapshotPending = true;
+        },
+
+        /**
+         * Snapshot now and write to the store without waiting for the
+         * auto-save tick.
+         * @returns {Promise<boolean>} resolves false when nothing was written
+         */
+        flush: function () {
+            snapshotPending = false;
+            this.saveNow();
+            if (!stateManager.isLoaded || !stateManager.isDirty) return Promise.resolve(false);
+            return stateManager.save();
         },
 
         /**
@@ -159,6 +208,7 @@ function initializeStatePersistence(node, options) {
          */
         close: async function () {
             try {
+                snapshotPending = false;
                 this.saveNow();
                 await stateManager.close();
             } catch (err) {
@@ -166,6 +216,7 @@ function initializeStatePersistence(node, options) {
             }
         }
     };
+    return helper;
 }
 
 /**
@@ -197,9 +248,14 @@ function createCloseHandler(node, persistence, cleanupFn) {
             await persistence.close();
         }
 
-        // Run additional cleanup
-        if (typeof cleanupFn === "function") {
-            cleanupFn();
+        // Run additional cleanup. A throwing cleanup must not swallow done():
+        // Node-RED would then sit out its full close timeout on every deploy.
+        try {
+            if (typeof cleanupFn === "function") {
+                cleanupFn();
+            }
+        } catch (err) {
+            node.warn("Error during node cleanup: " + err.message);
         }
 
         if (done) done();

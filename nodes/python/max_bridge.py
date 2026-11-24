@@ -19,14 +19,31 @@ to ONNX Runtime for CPU inference if not.
 Usage:
     python max_bridge.py
 
+Network trust. The server opens whatever file a client names, so it must only
+be reachable by its Node-RED:
+- It binds to loopback unless MAX_BRIDGE_HOST says otherwise (in a container
+  set MAX_BRIDGE_HOST=0.0.0.0, as docker-compose.dev.yml does).
+- With MAX_BRIDGE_TOKEN set, every request except GET /health (left open for
+  container health checks) must carry `Authorization: Bearer <token>` or
+  `X-Bridge-Token: <token>`; anything else gets 401. The Node-RED side sends
+  the header automatically when the same variable is set there.
+- model_path must resolve below one of the MAX_BRIDGE_MODEL_ROOT directories
+  (os.pathsep-separated; default /models, where the supplied Dockerfile mounts
+  the models), else 403.
+- Backend failures return the exception class and message only; the traceback
+  goes to stderr.
+
 Environment Variables:
-    MAX_BRIDGE_PORT: Server port (default: 8765)
-    MAX_BRIDGE_HOST: Server host (default: 0.0.0.0)
+    MAX_BRIDGE_PORT:       Server port (default: 8765)
+    MAX_BRIDGE_HOST:       Server host (default: 127.0.0.1)
+    MAX_BRIDGE_TOKEN:      Shared secret; unset = no authentication
+    MAX_BRIDGE_MODEL_ROOT: Allowed model directories (default: /models)
 """
 
 import os
 import sys
 import json
+import hmac
 import time
 import traceback
 from typing import Dict, Any, Optional, List
@@ -62,6 +79,83 @@ except ImportError:
 
 
 app = Flask(__name__)
+
+# Shared secret. None = authentication off (backwards compatible); a token is
+# compared in constant time against the Bearer / X-Bridge-Token header.
+AUTH_TOKEN = os.environ.get("MAX_BRIDGE_TOKEN") or None
+
+DEFAULT_MODEL_ROOT = "/models"
+
+
+def _parse_model_roots(raw: Optional[str]) -> List[str]:
+    """Split MAX_BRIDGE_MODEL_ROOT into resolved directories."""
+    roots = []
+    for part in (raw or DEFAULT_MODEL_ROOT).split(os.pathsep):
+        part = part.strip()
+        if part:
+            roots.append(os.path.realpath(part))
+    return roots or [os.path.realpath(DEFAULT_MODEL_ROOT)]
+
+
+MODEL_ROOTS = _parse_model_roots(os.environ.get("MAX_BRIDGE_MODEL_ROOT"))
+
+
+def _resolve_allowed_model_path(model_path: str) -> str:
+    """Resolve a client-supplied path and require it below an allowed root.
+
+    Symlinks are resolved first so a link inside a root cannot point outside
+    it. Raises PermissionError (-> 403) otherwise; existence is checked by the
+    caller afterwards, so nothing is revealed about files outside the roots.
+    """
+    real = os.path.realpath(str(model_path))
+    for root in MODEL_ROOTS:
+        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+            return real
+    # The roots themselves are not echoed back: they are server configuration
+    # (printed at startup), and the client only needs to know it was refused.
+    raise PermissionError(
+        f"model_path is outside the allowed model root(s), see MAX_BRIDGE_MODEL_ROOT: {model_path}"
+    )
+
+
+def _log(msg: str) -> None:
+    print(f"[MAX Bridge] {msg}", file=sys.stderr, flush=True)
+
+
+def _backend_error(e: Exception):
+    """500 payload with class + message only; the traceback stays in the log."""
+    _stats["errors_total"] += 1
+    _log(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+    return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.before_request
+def _require_token():
+    """Reject every request without the shared secret once one is configured.
+
+    GET /health stays open: container HEALTHCHECKs probe it and it reveals
+    nothing but liveness, the backend name and a model count.
+    """
+    if AUTH_TOKEN is None:
+        return None
+    if request.method == 'GET' and request.path == '/health':
+        return None
+    supplied = None
+    auth = request.headers.get('Authorization', '')
+    if auth[:7].lower() == 'bearer ':
+        supplied = auth[7:].strip()
+    if supplied is None:
+        supplied = request.headers.get('X-Bridge-Token')
+    if supplied is not None and hmac.compare_digest(
+        supplied.encode('utf-8'), AUTH_TOKEN.encode('utf-8')
+    ):
+        return None
+    _stats["errors_total"] += 1
+    response = jsonify({"success": False, "error": "Unauthorized: missing or invalid bridge token"})
+    response.status_code = 401
+    response.headers['WWW-Authenticate'] = 'Bearer'
+    return response
+
 
 # Model storage
 _models: Dict[str, Any] = {}
@@ -127,7 +221,7 @@ def load_model_max(model_path: str, model_id: str) -> Dict:
             input_names = list(model.input_metadata.keys())
         if hasattr(model, 'output_metadata'):
             output_names = list(model.output_metadata.keys())
-    except:
+    except Exception:
         pass
     
     return {
@@ -150,7 +244,7 @@ def load_model_onnx(model_path: str, model_id: str) -> Dict:
     try:
         if 'CUDAExecutionProvider' in ort.get_available_providers():
             providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-    except:
+    except Exception:
         pass
     
     session = ort.InferenceSession(model_path, sess_options, providers=providers)
@@ -291,6 +385,14 @@ def load_model():
         if not model_path:
             return jsonify({"success": False, "error": "model_path required"}), 400
         
+        # Allowlist first: a path outside the roots is refused before anything
+        # (including whether it exists) is learned about it.
+        try:
+            model_path = _resolve_allowed_model_path(model_path)
+        except PermissionError as e:
+            _stats["errors_total"] += 1
+            return jsonify({"success": False, "error": str(e)}), 403
+        
         # Check if already loaded
         if model_id in _models:
             return jsonify({
@@ -329,12 +431,7 @@ def load_model():
         })
     
     except Exception as e:
-        _stats["errors_total"] += 1
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        return _backend_error(e)
 
 
 @app.route('/predict', methods=['POST'])
@@ -382,12 +479,7 @@ def predict():
         })
     
     except Exception as e:
-        _stats["errors_total"] += 1
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        return _backend_error(e)
 
 
 @app.route('/unload', methods=['POST'])
@@ -470,7 +562,9 @@ def batch_predict():
 
 def main():
     """Start the MAX Bridge server."""
-    host = os.environ.get('MAX_BRIDGE_HOST', '0.0.0.0')
+    # Loopback by default: the server trusts its clients with file paths, so
+    # exposing it beyond the host is an explicit decision (MAX_BRIDGE_HOST).
+    host = os.environ.get('MAX_BRIDGE_HOST', '127.0.0.1')
     port = int(os.environ.get('MAX_BRIDGE_PORT', 8765))
     
     print("=" * 60)
@@ -479,6 +573,8 @@ def main():
     print(f"Backend: {'MAX Engine' if MAX_AVAILABLE else 'ONNX Runtime'}")
     print(f"Listening on: http://{host}:{port}")
     print(f"Health check: http://{host}:{port}/health")
+    print(f"Auth token: {'required (MAX_BRIDGE_TOKEN)' if AUTH_TOKEN else 'none - set MAX_BRIDGE_TOKEN'}")
+    print(f"Model roots: {os.pathsep.join(MODEL_ROOTS)}")
     print("=" * 60)
     
     # Initialize MAX session if available

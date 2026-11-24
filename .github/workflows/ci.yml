@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# No job here writes to the repo, the API, or the package registry.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -24,7 +28,15 @@ jobs:
           cache: npm
 
       - name: Install (without optional ML runtimes)
-        run: npm install --ignore-optional --no-audit --no-fund
+        run: npm ci --omit=optional --no-audit --no-fund
+
+      # Jest 30 resolves modules through unrs-resolver, whose native binding is
+      # an *optional* dependency and therefore missing after --omit=optional. It
+      # installs itself on first use, but on Node 18 that first use still fails
+      # ("testRunner ... was not found") and only the next run works. Trigger
+      # the self-install here so the test step starts with the binding in place.
+      - name: Install the test resolver's native binding
+        run: node -e "try { require('unrs-resolver') } catch (e) { console.log('binding installed on first use') }"
 
       - name: Run unit tests
         run: npm test
@@ -40,7 +52,11 @@ jobs:
           cache: npm
 
       - name: Install (without optional ML runtimes)
-        run: npm install --ignore-optional --no-audit --no-fund
+        run: npm ci --omit=optional --no-audit --no-fund
+
+      # See the test job: the resolver binding must be in place before jest runs.
+      - name: Install the test resolver's native binding
+        run: node -e "try { require('unrs-resolver') } catch (e) { console.log('binding installed on first use') }"
 
       - name: Run coverage
         run: npm run test:coverage
@@ -64,7 +80,7 @@ jobs:
           cache: npm
 
       - name: Install (without optional ML runtimes)
-        run: npm install --ignore-optional --no-audit --no-fund
+        run: npm ci --omit=optional --no-audit --no-fund
 
       - name: ESLint
         run: npm run lint
@@ -87,7 +103,7 @@ jobs:
           cache: npm
 
       - name: Install (without optional ML runtimes)
-        run: npm install --ignore-optional --no-audit --no-fund
+        run: npm ci --omit=optional --no-audit --no-fund
 
       - name: npm audit (required deps, fail on high)
         run: npm audit --omit=dev --omit=optional --audit-level=high
@@ -106,7 +122,7 @@ jobs:
           cache: npm
 
       - name: Install (with optional ML runtimes)
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: ONNX smoke test
         run: npm run test:smoke-onnx

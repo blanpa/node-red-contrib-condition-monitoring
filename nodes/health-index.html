@@ -12,7 +12,11 @@
             warningThreshold: { value: 60 },
             degradedThreshold: { value: 40 },
             criticalThreshold: { value: 20 },
+            staleAfterMs: { value: 0 },
+            sensorDirections: { value: "{}" },
             outputTopic: { value: "" },
+            groupBy: { value: "" },
+            maxGroups: { value: 50 },
             debug: { value: false },
             persistState: { value: false }
         },
@@ -25,11 +29,20 @@
         labelStyle: function() {
             return this.name ? "node_label_italic" : "";
         },
-        outputLabels: ["healthy", "degraded/critical"],
+        outputLabels: ["healthy/attention", "warning/degraded/critical"],
         paletteLabel: "Health Index",
         oneditprepare: function() {
             var node = this;
-            
+
+            // Nodes saved before these settings existed have no value for them;
+            // show what the runtime applies instead of an empty field.
+            if ($("#node-input-staleAfterMs").val() === "" || $("#node-input-staleAfterMs").val() === undefined) {
+                $("#node-input-staleAfterMs").val(0);
+            }
+            if (!$("#node-input-sensorDirections").val()) {
+                $("#node-input-sensorDirections").val("{}");
+            }
+
             // Collapsible sections
             $(".cm-section-header").on("click", function() {
                 var $content = $(this).next(".cm-section-content");
@@ -318,8 +331,24 @@
             </div>
             
             <div class="cm-info-box">
-                <strong>Tip:</strong> Use the visual editor above or edit JSON directly. 
+                <strong>Tip:</strong> Use the visual editor above or edit JSON directly.
                 Weight 1.0 = normal importance, 2.0 = double importance.
+            </div>
+
+            <div class="cm-config-item" style="margin-top: 12px;">
+                <label for="node-input-sensorDirections">
+                    <i class="fa fa-arrows-v"></i> Sensor Directions (JSON)
+                </label>
+                <input type="text" id="node-input-sensorDirections" placeholder='{"pressure":"falling"}'>
+                <div class="cm-help-text">Which way a sensor degrades: "rising" (default: vibration, temperature) or "falling" (pressure, efficiency, a health index). A trend in that direction costs 10 points. <code>payload[sensor].direction</code> overrides per message.</div>
+            </div>
+
+            <div class="cm-config-item">
+                <label for="node-input-staleAfterMs">
+                    <i class="fa fa-clock-o"></i> Hold missing sensor (ms)
+                </label>
+                <input type="number" id="node-input-staleAfterMs" min="0" step="1000" placeholder="0">
+                <div class="cm-help-text">A configured sensor absent from the payload keeps its last score for this long (0 = off: it is not counted). Missing sensors are always listed in <code>msg.missingSensors</code>.</div>
             </div>
         </div>
     </div>
@@ -429,6 +458,22 @@
                 </div>
                 
                 <div class="cm-config-item">
+                    <label for="node-input-groupBy">
+                        <i class="fa fa-sitemap"></i> Group By (msg property)
+                    </label>
+                    <input type="text" id="node-input-groupBy" placeholder="e.g. topic (empty = single state)">
+                    <div class="cm-help-text">One separate history per value, so one node can serve many machines</div>
+                </div>
+
+                <div class="cm-config-item">
+                    <label for="node-input-maxGroups">
+                        <i class="fa fa-list-ol"></i> Max Groups
+                    </label>
+                    <input type="number" id="node-input-maxGroups" min="1" step="1" placeholder="50">
+                    <div class="cm-help-text">Limit when grouping; least recently used is dropped</div>
+                </div>
+
+                <div class="cm-config-item">
                     <label for="node-input-debug">
                         <i class="fa fa-bug"></i> Debug Mode
                     </label>
@@ -453,7 +498,7 @@
             <i class="fa fa-heartbeat"></i> 0-100 health score
         </span>
         <span class="cm-badge cm-badge-success">
-            <i class="fa fa-check-circle"></i> 2 outputs: Healthy | Degraded
+            <i class="fa fa-check-circle"></i> 2 outputs: Healthy/Attention | Warning/Degraded/Critical
         </span>
     </div>
 </script>
@@ -472,7 +517,7 @@
   warningThreshold: 70,     // Override warning threshold
   degradedThreshold: 50,    // Override degraded threshold
   criticalThreshold: 25,    // Override critical threshold
-  aggregationMethod: "min", // Override aggregation (weighted/min/average)
+  aggregationMethod: "minimum", // weighted / dynamic / minimum / average / geometric
   sensorWeights: {          // Override sensor weights
     "temp": 2.0,
     "vibration": 1.5
@@ -491,14 +536,23 @@
     "value": 0.5,
     "isAnomaly": true,
     "zScore": 3.5
+  },
+  "pressure": {
+    "value": 2.1,
+    "trend": "decreasing",   // from trend-predictor
+    "slope": -0.05,
+    "direction": "falling"   // optional: falling is the adverse direction here
   }
 }</pre>
+    <p>Optional per-sensor fields: <code>isAnomaly</code>, <code>zScore</code>, <code>deviationPercent</code>,
+    <code>trend</code> + <code>slope</code>, <code>confidence</code>, <code>direction</code> (or
+    <code>failureDirection</code>; falls back to the node's <b>Sensor Directions</b>, then "rising").</p>
     <h3>Outputs</h3>
     <dl class="message-properties">
-        <dt>Output 1 (top)</dt>
-        <dd>Healthy or attention status (health index ≥ warning threshold)</dd>
-        <dt>Output 2 (bottom)</dt>
-        <dd>Warning, degraded, or critical status (health index < warning threshold)</dd>
+        <dt>Output 1 (top) — healthy/attention</dt>
+        <dd>Health index ≥ warning threshold</dd>
+        <dt>Output 2 (bottom) — warning/degraded/critical</dt>
+        <dd>Health index < warning threshold</dd>
     </dl>
     <p><b>Output properties:</b></p>
     <dl class="message-properties">
@@ -514,6 +568,12 @@
         <dd>List of issues reducing health index</dd>
         <dt>thresholds <span class="property-type">object</span></dt>
         <dd>Configured threshold values: {healthy, warning, degraded, critical}</dd>
+        <dt>missingSensors <span class="property-type">array</span></dt>
+        <dd>Configured sensors (weight &gt; 0) absent from this payload — only present when there are any. A faulted
+        sensor that goes offline would otherwise silently make the asset healthier. Warned once.</dd>
+        <dt>heldSensors <span class="property-type">array</span></dt>
+        <dd>Missing sensors whose last score was still counted because it is younger than <b>Hold missing sensor</b>
+        (their <code>dynamicWeights</code> entry carries <code>held: true</code>).</dd>
     </dl>
     
     <h3>Configurable Thresholds</h3>
@@ -532,7 +592,7 @@
         <li>Deductions for anomalies (-30)</li>
         <li>Deductions for high Z-scores (-20 to -40)</li>
         <li>Deductions for high deviations (-15 to -30)</li>
-        <li>Deductions for negative trends (-10)</li>
+        <li>Deductions for an adverse trend (-10): increasing for a "rising" sensor, decreasing for a "falling" one</li>
     </ul>
     <p><b>Aggregation Methods:</b></p>
     <ul>
@@ -543,11 +603,42 @@
         <li><b>Geometric Mean:</b> Emphasizes poor sensors more than average</li>
     </ul>
     
+    <h3>Per-device grouping</h3>
+    <p>Set <b>Group By</b> to a message property (e.g. <code>topic</code>, or a nested path such as
+    <code>payload.deviceId</code>) to keep a separate health history and reliability record per value of that property, so one node can serve an
+    interleaved stream from several machines without mixing their baselines.</p>
+    <ul>
+        <li>Each result carries <code>msg.group</code> with the key it was computed from.</li>
+        <li>Messages whose group property is missing or empty share one "ungrouped" state.</li>
+        <li><b>Max Groups</b> caps memory: when exceeded, the least recently used group is dropped.</li>
+        <li><code>msg.reset</code> clears the group named by the message, or everything if it names none.</li>
+        <li>Leaving <b>Group By</b> empty keeps the single shared state of earlier releases.</li>
+    </ul>
+
+    <h3>Input handling</h3>
+    <ul>
+        <li>A weight of <code>0</code> excludes a sensor from the index (it is still listed in
+        <code>sensorScores</code>). Weights must be finite numbers &ge; 0; anything else is ignored with a warning.</li>
+        <li>Entries that carry no usable reading (<code>null</code>, <code>NaN</code>, free text) are left out and
+        listed in <code>msg.skippedSensors</code>.</li>
+        <li>Configured sensors absent from the payload are listed in <code>msg.missingSensors</code> and warned once.
+        With <b>Hold missing sensor</b> &gt; 0 their last score keeps counting for that long
+        (<code>msg.heldSensors</code>); otherwise they are not counted.</li>
+        <li>If no sensor is left, the node emits <b>nothing</b> and shows "no valid sensor data" &mdash; missing data
+        is not reported as a healthy 100.</li>
+        <li>Thresholds are applied in descending order (healthy &ge; warning &ge; degraded &ge; critical);
+        <code>msg.method</code> and <code>msg.thresholds</code> report what was applied, including
+        <code>msg.config</code> overrides.</li>
+    </ul>
+
     <h3>Dynamic Weighting</h3>
     <p>The <b>Dynamic Weighted</b> method automatically adjusts sensor weights based on:</p>
     <ul>
-        <li><b>Anomaly Rate:</b> Sensors with high anomaly rates (>30%) have reduced influence</li>
-        <li><b>Signal Variance:</b> Very noisy sensors (high coefficient of variation) are weighted lower</li>
+        <li><b>Anomaly Rate:</b> Reported per sensor as <code>anomalyRate</code>, but it does <i>not</i> reduce the
+        weight: a sensor that is anomalous all the time is the fault to surface, not a reading to mute</li>
+        <li><b>Signal Variance:</b> Very noisy sensors (coefficient of variation above 0.5) are weighted lower.
+        The factor is only applied when the sensor's mean is distinguishable from zero (|mean| &gt; 2 standard
+        errors): a zero-mean indicator such as a residual or a ΔT has no meaningful coefficient of variation</li>
         <li><b>Confidence:</b> If sensor provides a confidence value, it affects the weight</li>
     </ul>
     <p><b>Output (msg.dynamicWeights):</b></p>
@@ -564,12 +655,13 @@
   }
 }</pre>
     <p>This helps automatically downweight sensors that are unreliable or produce noisy data.</p>
-    <p><b>Health Status Thresholds:</b></p>
+    <p><b>Health Status Thresholds</b> (defaults; each boundary is configurable, see above):</p>
     <ul>
-        <li><b>Healthy:</b> 80-100 - Normal operation</li>
-        <li><b>Degraded:</b> 60-80 - Monitor closely</li>
-        <li><b>Warning:</b> 40-60 - Maintenance recommended</li>
-        <li><b>Critical:</b> 0-40 - Urgent maintenance required</li>
+        <li><b>Healthy:</b> 80-100 - Normal operation (output 1)</li>
+        <li><b>Attention:</b> 60-80 - Monitor closely (output 1)</li>
+        <li><b>Warning:</b> 40-60 - Maintenance recommended (output 2)</li>
+        <li><b>Degraded:</b> 20-40 - Maintenance required (output 2)</li>
+        <li><b>Critical:</b> 0-20 - Urgent maintenance required (output 2)</li>
     </ul>
     <p><b>Sensor Weights Example:</b></p>
     <pre>{"temp": 1.0, "vibration": 1.5, "pressure": 0.8}</pre>

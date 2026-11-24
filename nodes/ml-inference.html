@@ -10,18 +10,14 @@
             modelSha256: { value: "" },
             modelType: { value: "auto" },
             urlAuthType: { value: "" },
-            urlAuthToken: { value: "" },
             hfModelId: { value: "" },
             hfRevision: { value: "main" },
-            hfToken: { value: "" },
             mlflowRegistryUri: { value: "" },
             mlflowModelName: { value: "" },
             mlflowVersion: { value: "latest" },
             mlflowStage: { value: "production" },
-            mlflowAuthToken: { value: "" },
             customRegistryUrl: { value: "" },
             customModelId: { value: "" },
-            customApiKey: { value: "" },
             autoUpdate: { value: false },
             updateCheckInterval: { value: 3600 },
             modelStage: { value: "production" },
@@ -39,8 +35,16 @@
             inputProperty: { value: "payload" },
             outputProperty: { value: "prediction" },
             preprocessMode: { value: "array" },
-            batchSize: { value: 1 },
             warmup: { value: true }
+        },
+        // Tokens and API keys are credentials: encrypted in flows_cred.json,
+        // never in the flow file or a flow export. (They were plain defaults
+        // before 0.4.1; the runtime still reads those once and warns.)
+        credentials: {
+            urlAuthToken: { type: "password" },
+            hfToken: { type: "password" },
+            mlflowAuthToken: { type: "password" },
+            customApiKey: { type: "password" }
         },
         inputs: 1,
         outputs: 1,
@@ -142,7 +146,10 @@
                             }
                             var typeIcon = model.type === 'onnx' ? 'cube' : 'sitemap';
                             var typeColor = model.type === 'onnx' ? '#FF6F00' : '#1976D2';
-                            var isSelected = $("#node-input-modelPath").val() === model.path;
+                            // The list names models relative to the store; flows saved
+                            // earlier hold the absolute path, so match on the name too.
+                            var currentPath = $("#node-input-modelPath").val() || "";
+                            var isSelected = currentPath === model.path || currentPath.split(/[\\/]/).pop() === model.name;
                             
                             listHtml += '<div class="ml-model-item' + (isSelected ? ' ml-model-selected' : '') + '" data-path="' + model.path + '" data-name="' + model.name + '">';
                             listHtml += '<div class="ml-model-icon" style="background: ' + typeColor + ';">';
@@ -270,35 +277,45 @@
                     uploadGenericFile(file, 'keras');
                 } else if (ext === 'pkl' || ext === 'joblib') {
                     uploadGenericFile(file, 'sklearn');
-                } else if (file.name === 'model.json') {
+                } else if (fileList.some(function(f) { return f.name === 'model.json'; })) {
+                    // model.json need not be the first file of the selection
                     uploadTfjsFiles(fileList);
                 } else {
                     showUploadStatus('error', 'Unsupported file type: .' + ext);
                 }
             }
             
-            function uploadGenericFile(file, type) {
-                showUploadStatus('loading', 'Uploading ' + file.name + '...');
-                var formData = new FormData();
-                formData.append('file', file);
-                formData.append('type', type);
-                
-                $.ajax({
+            // POST one file to the model store as a raw body. The server writes the
+            // request body to disk verbatim, so it must be the file itself — never a
+            // multipart FormData (that stored the form envelope instead of the model).
+            // `modelDir` (optional) places the file in a sub-directory of the store.
+            function postModelFile(file, modelDir) {
+                var headers = { "X-Filename": file.name };
+                if (modelDir) headers["X-Model-Dir"] = modelDir;
+                return $.ajax({
                     url: "ml-inference/upload",
                     type: "POST",
-                    data: formData,
+                    data: file,
                     processData: false,
-                    contentType: false,
-                    success: function(response) {
-                        showUploadStatus('success', 'Uploaded: ' + response.name);
-                        loadModelList();
-                        if (response.path) {
-                            $("#node-input-modelPath").val(response.path);
-                        }
-                    },
-                    error: function(xhr) {
-                        showUploadStatus('error', 'Upload failed: ' + (xhr.responseJSON?.error || 'Unknown error'));
+                    contentType: "application/octet-stream",
+                    headers: headers
+                });
+            }
+            
+            function uploadErrorText(xhr) {
+                return (xhr && xhr.responseJSON && xhr.responseJSON.error) || 'Unknown error';
+            }
+            
+            function uploadGenericFile(file, type) {
+                showUploadStatus('loading', 'Uploading ' + file.name + '...');
+                postModelFile(file).done(function(response) {
+                    showUploadStatus('success', 'Uploaded: ' + response.name);
+                    loadModelList();
+                    if (response.path) {
+                        $("#node-input-modelPath").val(response.path);
                     }
+                }).fail(function(xhr) {
+                    showUploadStatus('error', 'Upload failed: ' + uploadErrorText(xhr));
                 });
             }
             
@@ -314,94 +331,47 @@
                 }
             }
             
-            function uploadOnnxFile(file) {
-                showUploadStatus('loading', 'Uploading ' + file.name + '...');
-                
-                var reader = new FileReader();
-                reader.onload = function(event) {
-                    $.ajax({
-                        url: "ml-inference/upload",
-                        type: "POST",
-                        data: event.target.result,
-                        processData: false,
-                        contentType: "application/octet-stream",
-                        headers: { "X-Filename": file.name },
-                        success: function(data) {
-                            showUploadStatus('success', 'Uploaded: ' + data.name);
-                            $("#node-input-modelPath").val(data.path);
-                            loadModelList();
-                        },
-                        error: function(xhr) {
-                            showUploadStatus('error', xhr.responseJSON?.error || "Upload failed");
-                        }
-                    });
-                };
-                reader.readAsArrayBuffer(file);
-            }
-            
+            // A TF.js model is model.json plus its weight shards. Each file goes up as
+            // its own raw request into one model directory: a single JSON document with
+            // base64 weights hits Node-RED's apiMaxLength (5 MB by default) very quickly.
             function uploadTfjsFiles(files) {
-                showUploadStatus('loading', 'Processing ' + files.length + ' files...');
-                
-                var modelJson = null;
-                var weights = [];
-                var modelName = "tfjs_model";
-                var processed = 0;
-                
-                files.forEach(function(file) {
-                    var reader = new FileReader();
-                    
-                    if (file.name === 'model.json') {
-                        reader.onload = function(event) {
-                            modelJson = event.target.result;
-                            processed++;
-                            checkComplete();
-                        };
-                        reader.readAsText(file);
-                    } else if (file.name.endsWith('.bin')) {
-                        reader.onload = function(event) {
-                            var bytes = new Uint8Array(event.target.result);
-                            var binary = '';
-                            for (var i = 0; i < bytes.length; i++) {
-                                binary += String.fromCharCode(bytes[i]);
-                            }
-                            weights.push({ name: file.name, data: btoa(binary) });
-                            processed++;
-                            checkComplete();
-                        };
-                        reader.readAsArrayBuffer(file);
-                    } else {
-                        processed++;
-                        checkComplete();
-                    }
+                var parts = files.filter(function(file) {
+                    return file.name === 'model.json' || /\.bin$/i.test(file.name);
+                });
+                var hasModelJson = parts.some(function(file) { return file.name === 'model.json'; });
+                if (!hasModelJson) {
+                    showUploadStatus('error', 'No model.json found');
+                    return;
+                }
+                // Weight shards first, model.json last: the model only shows up in
+                // the list once everything it references is in place.
+                parts.sort(function(a, b) {
+                    return (a.name === 'model.json' ? 1 : 0) - (b.name === 'model.json' ? 1 : 0);
                 });
                 
-                function checkComplete() {
-                    if (processed < files.length) return;
-                    
-                    if (!modelJson) {
-                        showUploadStatus('error', 'No model.json found');
+                var modelDir = 'tfjs_model_' + Date.now();
+                var index = 0;
+                var lastResponse = null;
+                
+                function next() {
+                    if (index >= parts.length) {
+                        showUploadStatus('success', 'Uploaded: ' + modelDir);
+                        if (lastResponse && lastResponse.dir) {
+                            $("#node-input-modelPath").val(lastResponse.dir);
+                        }
+                        loadModelList();
                         return;
                     }
-                    
-                    $.ajax({
-                        url: "ml-inference/upload-tfjs",
-                        type: "POST",
-                        data: JSON.stringify({
-                            name: modelName + '_' + Date.now(),
-                            modelJson: modelJson,
-                            weights: weights
-                        }),
-                        contentType: "application/json",
-                        success: function(data) {
-                            showUploadStatus('success', 'Uploaded: ' + data.name);
-                            $("#node-input-modelPath").val(data.path);
-                            loadModelList();
-                        },
-                        error: function(xhr) {
-                            showUploadStatus('error', xhr.responseJSON?.error || "Upload failed");
-                        }
+                    var file = parts[index++];
+                    showUploadStatus('loading', 'Uploading ' + file.name + ' (' + index + '/' + parts.length + ')...');
+                    postModelFile(file, modelDir).done(function(response) {
+                        lastResponse = response;
+                        next();
+                    }).fail(function(xhr) {
+                        showUploadStatus('error', 'Upload failed (' + file.name + '): ' + uploadErrorText(xhr));
                     });
                 }
+                next();
             }
             
             // Collapsible sections
@@ -1357,9 +1327,16 @@
     
     <h3>Configuration</h3>
     <ul>
-        <li><b>Model Path:</b> Local path, URL, or model ID (Hugging Face, MLflow)</li>
+        <li><b>Model Path:</b> Local path, URL, or model ID (Hugging Face, MLflow). A local path must lie inside the
+            model store (<code>&lt;userDir&gt;/ml-models</code>, where uploads land — a bare file name is resolved there),
+            the models bundled with this package (<code>models/&lt;file&gt;</code>), or a directory listed under
+            <code>conditionMonitoring.allowedModelPaths</code> in <code>settings.js</code>; anything else is refused.</li>
         <li><b>Model Type:</b> Auto-detect, TensorFlow.js, ONNX, TFLite, Keras, scikit-learn, or Coral</li>
-        <li><b>Input Shape:</b> Tensor dimensions (e.g., "1,10" for batch=1, features=10)</li>
+        <li><b>Input Shape:</b> Tensor dimensions (e.g., "1,10" for batch=1, features=10; "-1,10" for an open batch).
+            For ONNX models the input must fit the shape exactly — a mismatch fails the message instead of running
+            the model on a silently reshaped tensor.</li>
+        <li><b>Tokens / API keys:</b> stored as Node-RED credentials (encrypted), never in the flow file. A token
+            that an older flow still carries inline keeps working but logs a warning; re-enter it to move it over.</li>
         <li><b>Input Property:</b> Where to read input data (default: payload)</li>
         <li><b>Output Property:</b> Where to store prediction (default: prediction)</li>
         <li><b>Warmup:</b> Run dummy inference on load for faster first prediction</li>

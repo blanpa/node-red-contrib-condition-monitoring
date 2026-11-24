@@ -79,13 +79,12 @@ describe("integration: anomaly-detector Z-Score flow", () => {
         expect(last.isAnomaly).toBe(true);
         expect(last.severity).toBe("critical");
         expect(typeof last.zScore).toBe("number");
-        // The detector pushes the new sample into its sliding window *before*
-        // computing the z-score, so the outlier is itself part of the
-        // statistics. With a 30-element window of ~100s + one 1000 value:
-        //   mean ≈ 130, stddev ≈ 161, z ≈ 5.4
-        // — well above both warning (2) and critical (3) thresholds.
-        expect(Math.abs(last.zScore)).toBeGreaterThan(3);
-        expect(Math.abs(last.zScore)).toBeLessThan(15);
+        // The detector scores the new sample against the window *before* it:
+        // 30 values alternating 99.5 / 100.5 give mean 100 and stddev 0.5, so
+        //   z = (1000 - 100) / 0.5 = 1800.
+        // (Scored within its own window the outlier would inflate the baseline
+        // and read as z ≈ 5.4.)
+        expect(last.zScore).toBeCloseTo(1800, 6);
 
         // The 30 stable injections should have produced 30 messages on the
         // normal output (one per input). The first sample is the warmup
@@ -107,5 +106,26 @@ describe("integration: anomaly-detector Z-Score flow", () => {
         await harness.inject(DETECTOR, { payload: 100.0, topic: "machine-A/temp" });
         const out = await harness.collect(NORMAL_CAP, 1, 1500);
         expect(out[0].topic).toBe("machine-A/temp");
+    });
+
+    it("gives a multi-sensor message the same envelope as a single value", async () => {
+        harness.reset(NORMAL_CAP);
+        harness.reset(ANOMALY_CAP);
+
+        // The multi-sensor output used to drop everything but its own fields:
+        // no topic unless msg.topic was set, no passthrough, no timestamp.
+        await harness.inject(DETECTOR, {
+            payload: { temp: 50, press: 1.2 },
+            topic: "machine-A/multi",
+            deviceId: "A"
+        });
+        const out = await harness.collect(NORMAL_CAP, 1, 1500);
+        expect(out[0].inputFormat).toBe("multi-sensor");
+        expect(out[0].topic).toBe("machine-A/multi");
+        expect(out[0].deviceId).toBe("A");
+        expect(typeof out[0].timestamp).toBe("number");
+        expect(out[0].hysteresis).toEqual({ enabled: false, applied: false });
+        expect(out[0].sensorCount).toBe(2);
+        expect(out[0].payload.temp.value).toBe(50);
     });
 });

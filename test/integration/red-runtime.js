@@ -106,7 +106,9 @@ async function startRed(options = {}) {
         // would extend it; for tests this is enough and lets us prove rejection.
         conditionMonitoring: {
             allowedModelPaths: [path.join(userDir, "models")]
-        }
+        },
+        // Per-test overrides (e.g. mlInferenceMaxUploadBytes) merged last.
+        ...(options.settings || {})
     };
 
     RED.init(server, settings);
@@ -115,7 +117,7 @@ async function startRed(options = {}) {
 
     let listenPort = port;
     let attempts = 0;
-    // eslint-disable-next-line no-constant-condition
+
     while (true) {
         try {
             await new Promise((resolve, reject) => {
@@ -141,6 +143,16 @@ async function startRed(options = {}) {
         }
     }
 
+    // RED.start() resolves before the runtime has loaded and started the
+    // (empty) stored flows: `loadFlows().then(startFlows)` is fire-and-forget
+    // in @node-red/runtime. A deploy() that lands in that window is overwritten
+    // when the initial load finishes — the runtime then starts the empty flow,
+    // emits `flows:started`, and the test dies with "node not found". It only
+    // shows on a loaded machine, so subscribe before start and wait it out.
+    const initialFlowsStarted = new Promise((resolve) => {
+        RED.events.once("flows:started", resolve);
+    });
+
     await RED.start();
 
     // After RED.start() the runtime continues to load palette nodes
@@ -149,7 +161,7 @@ async function startRed(options = {}) {
     // registry and fail with "unknown type".
     {
         const deadline = Date.now() + 10000;
-        // eslint-disable-next-line no-constant-condition
+
         while (true) {
             let ours = false;
             try {
@@ -160,7 +172,7 @@ async function startRed(options = {}) {
                         Array.isArray(m.types) &&
                         m.types.length > 0
                 );
-            } catch (_) {
+            } catch {
                 // ignore — runtime not ready yet
             }
             if (ours) break;
@@ -168,6 +180,18 @@ async function startRed(options = {}) {
                 throw new Error("condition-monitoring nodes never registered after RED.start()");
             }
             await new Promise((r) => setTimeout(r, 50));
+        }
+    }
+
+    {
+        let timer;
+        const timedOut = new Promise((resolve) => {
+            timer = setTimeout(() => resolve("timeout"), 10000);
+        });
+        const outcome = await Promise.race([initialFlowsStarted, timedOut]);
+        clearTimeout(timer);
+        if (outcome === "timeout") {
+            throw new Error("initial flows never started after RED.start()");
         }
     }
 
@@ -181,7 +205,7 @@ async function startRed(options = {}) {
     function expand(flow) {
         const json = JSON.stringify(flow)
             .split("$RED_PORT")
-            .join(String(port))
+            .join(String(listenPort))
             .split("$TMP_DIR")
             .join(userDir.replace(/\\/g, "/"));
         return JSON.parse(json);
@@ -218,7 +242,7 @@ async function startRed(options = {}) {
      */
     async function getNodeAsync(nodeId, timeoutMs = 1500) {
         const start = Date.now();
-        // eslint-disable-next-line no-constant-condition
+
         while (true) {
             const node = RED.nodes.getNode(nodeId);
             if (node) return node;
@@ -270,7 +294,7 @@ async function startRed(options = {}) {
      */
     async function collect(captureId, count, timeoutMs = 1500) {
         const start = Date.now();
-        // eslint-disable-next-line no-constant-condition
+
         while (true) {
             const list = captures.get(captureId) || [];
             if (list.length >= count) return list.slice();
@@ -291,13 +315,13 @@ async function startRed(options = {}) {
     async function shutdown() {
         try {
             await RED.stop();
-        } catch (_) {
+        } catch {
             /* ignore */
         }
         await new Promise((r) => server.close(() => r()));
         try {
             fs.rmSync(userDir, { recursive: true, force: true });
-        } catch (_) {
+        } catch {
             /* ignore */
         }
     }
@@ -316,7 +340,9 @@ async function startRed(options = {}) {
     }
 
     return {
-        port,
+        // The bound port, not the first one we tried: the EADDRINUSE loop above
+        // may have moved us, and every consumer needs where we actually listen.
+        port: listenPort,
         userDir,
         deploy,
         inject,

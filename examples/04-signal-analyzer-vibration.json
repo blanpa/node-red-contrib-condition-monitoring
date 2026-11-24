@@ -64,7 +64,6 @@
         "minPeakHeight": "",
         "minPeakDistance": 5,
         "peakType": "both",
-        "vibOutputMode": "all",
         "vibInputUnit": "mm_s",
         "iso10816Class": "class2",
         "envelopeBandLow": 500,

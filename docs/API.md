@@ -353,6 +353,88 @@ msg = {
 }
 ```
 
+**How a sample is scored.** A new value is compared with the window as it stood
+*before* the value arrived, and only then added to it. (Scoring it against a
+window that already contains it caps the z-score at `sqrt(n − 1)` — with a
+window of 10 an outlier of any size reached exactly 3.0 and could never exceed a
+threshold of 3.) While a baseline holds fewer than 10 values — or fewer than
+`windowSize`, if that is smaller — its spread is too unstable to judge a
+newcomer, so those first samples are scored within the window they are part of.
+A departure from a perfectly flat baseline (σ = 0) is an anomaly with a very
+large but finite score. The EMA method compares the value with the average
+before the value moves it.
+
+`msg.config` overrides that are not valid numbers are ignored (the configured
+value stays in force) rather than silently disabling the check, and
+`msg.method` reports the method actually used for the message.
+
+With **Persist State** and a regime property, every regime's baseline is saved
+and restored, not only the one that was active.
+
+### Anomaly Detector: operating-point regimes
+
+A machine that runs at several speeds or loads has several "normals". Set
+**Regime Property** (`regimeProperty`) to a message property and the detector
+keeps one independent baseline — window, EMA, CUSUM, hysteresis counters,
+per-sensor buffers — per value of that property:
+
+```javascript
+// Node config
+{ method: "zscore", windowSize: 100, regimeProperty: "regime", maxRegimes: 20 }
+
+// Input
+msg = { payload: 41.7, regime: "full-load" };
+
+// Output — tagged with the baseline that judged it
+msg = { payload: 41.7, isAnomaly: false, regime: "full-load", bufferSize: 57, ... };
+```
+
+- Nested paths work (`payload.speedClass`); a missing or empty value uses the
+  default regime `""`.
+- Every regime warms up on its own (the first samples pass through unjudged).
+- `maxRegimes` (default 20) bounds memory; the least recently used regime is
+  evicted beyond it.
+- `msg.reset = true` clears the regime the message belongs to,
+  `msg.reset = "all"` clears every regime.
+- State persistence saves every regime.
+
+### Anomaly Detector: per-device state
+
+Set **Group By** (`groupBy`) to a message property such as `topic` to keep one
+independent state per device — sliding window, EMA / CUSUM, hysteresis
+counters and the per-sensor buffers of multi-sensor input:
+
+```javascript
+// Node config
+{ method: "zscore", windowSize: 100, groupBy: "topic", maxGroups: 50 }
+
+// Output — tagged with the device it was scored for
+msg = { topic: "pump-02", group: "pump-02", isAnomaly: false, ... };
+```
+
+- Combines with the regime property: each device then has one baseline per
+  operating point (`msg.group` and `msg.regime` are both set).
+- Messages without a usable group value share one ungrouped state.
+- `maxGroups` (default 50) bounds memory; with regimes the bound is
+  `maxGroups × maxRegimes` states, least recently used evicted first.
+- `msg.reset = true` clears the state the message belongs to,
+  `msg.reset = "all"` clears everything.
+
+### Anomaly Detector: CUSUM scale
+
+`cusumMode` selects the unit of the CUSUM drift and thresholds:
+
+- `"sigma"` (default for new nodes): each deviation from the target is divided
+  by the standard deviation of the window first, so `cusumDrift: 0.5`,
+  `cusumThreshold: 5` mean 0.5σ and 5σ on any signal.
+- `"raw"` (flows saved before this setting existed): deviation, drift and
+  thresholds are in the unit of the input, as in earlier releases.
+
+The active mode is reported as `msg.mode`.
+
+`msg.config` overrides (method, thresholds, hysteresis) apply to multi-sensor
+object payloads as well as to single values.
+
 ### Multi-Sensor Input Format
 
 ```javascript
@@ -386,25 +468,73 @@ msg.payload = {
   feature3: 0.8
 };
 
-// Dynamic model loading
-msg.loadModel = {
-  path: "/models/new-model.onnx",
-  id: "new-model"
-};
+// Typed arrays and Buffers are accepted as-is
+msg.payload = Float32Array.from([0.5, 1.2, 0.8, 0.3]);
+
+// Dynamic model loading (a path inside the model-path allowlist, see below)
+msg.loadModel = "/srv/models/new-model.onnx";
 ```
+
+Outside `preprocessMode: "object"`, an object's `features`, `values` or
+`input` property is used when it holds an array (or typed array); otherwise
+every value of the object is taken.
 
 ### ML Inference Output
 
 ```javascript
 msg = {
-  payload: [0.15, 0.85],      // Model output
-  prediction: [0.15, 0.85],   // Same as payload
-  modelId: "anomaly-v1",
-  runtime: "onnx",            // "onnx", "tfjs", "python"
-  inferenceTime: 5,           // ms
-  inputShape: [1, 10]
+  payload: [0.5, 1.2, 0.8, 0.3],   // untouched input
+  prediction: [0.15, 0.85],        // model output (outputProperty, default "prediction")
+  mlInference: {
+    modelPath: "models/bearing_fault_clf.onnx",
+    modelFormat: "onnx",           // onnx | tfjs | savedmodel | tflite | keras | sklearn | max
+    inferenceTime: 5,              // ms
+    invalidInputs: 0,              // non-numeric input values that went in as 0
+    inputShape: "1,4",             // as configured
+    outputShape: [1, 2],           // tensor dims of the output, when known
+    timestamp: 1700000000000,
+    mlflowTracking: null           // { experimentName, runId } when tracking is on
+  }
 }
 ```
+
+### ML Inference: credentials, model paths, metadata
+
+**Credentials.** The four secrets are Node-RED credentials (encrypted in
+`flows_cred.json`, excluded from flow exports), not node properties:
+
+| Credential | Type | Used for |
+|------------|------|----------|
+| `urlAuthToken` | `password` | Bearer token or `user:pass` for a URL model source (`urlAuthType`) |
+| `hfToken` | `password` | Hugging Face Hub token |
+| `mlflowAuthToken` | `password` | MLflow registry and tracking token |
+| `customApiKey` | `password` | Custom registry API key |
+
+Resolution order at runtime: `node.credentials.<name>`, then the inline
+`config.<name>` a flow saved before 0.4.1 may still carry (it works, but the
+node warns once on start — re-enter the value in the editor to migrate it).
+
+**Model paths.** A local `modelPath` / `msg.loadModel` must resolve inside
+the model store (`<userDir>/ml-models`), the bundled models
+(`models/<file>`), or a directory listed in `settings.js` under
+`conditionMonitoring.allowedModelPaths`; anything else fails with
+`EPATHFORBIDDEN`. A relative path is looked up in the store first (the
+editor's model list hands out bare file names), then among the bundled
+models, then against the cwd. The Node-RED user dir and the process cwd are
+**not** allowlisted (they were up to 0.4.0).
+
+**Metadata.** Load bookkeeping (`name`, `version`, `format`, `lastLoaded`,
+…) is stored in `<userDir>/ml-models/.meta/<sha1(absolute model path)>.json`
+and only rewritten when something other than `lastLoaded` changed. A
+`<model>_metadata.json` sidecar written next to the model by earlier
+versions is still read as a fallback, but never written again.
+
+**ONNX input shape.** With `inputShape` set, the input must contain exactly
+`∏ dims` values — a mismatch fails the message instead of running the model
+on a silently reshaped `[1, N]` tensor. Use `-1` for an open dimension
+(`"-1,10"`); with no shape configured the input is fed as `[1, N]`. The
+tensor element type follows the session's input metadata (`float32` when
+unknown; integer types are truncated).
 
 ### Signal Analyzer Output (FFT Mode)
 
@@ -415,10 +545,12 @@ attached as sibling properties.
 msg = {
   payload: 0.45,                 // the sample that triggered this result
   peaks: [
-    { frequency: 46.875, magnitude: 0.24, normalized: 1 },
-    { frequency: 140.6, magnitude: 0.08, normalized: 0.33 }
+    { frequency: 46.875, magnitude: 0.24, amplitude: 0.96, normalized: 1 },
+    { frequency: 140.6, magnitude: 0.08, amplitude: 0.32, normalized: 0.33 }
   ],
   dominantFrequency: 46.875,     // null when no peak passes the threshold
+  dcOffset: 9.81,                // mean of the window, removed before the transform
+  amplitudeScale: 4,             // amplitude = magnitude × this (2 / window coherent gain)
   features: {
     spectralCentroid: 85.2,      // Hz
     spectralSpread: 41.7,        // Hz
@@ -441,6 +573,17 @@ msg.frequencies = [0, 3.9, 7.8, ...];   // Hz, fftSize/2 bins
 msg.magnitudes  = [0.01, 0.24, 0.03, ...];
 ```
 
+- `magnitude` is `|X_k| / N` of the windowed signal, as in earlier releases.
+  `amplitude` is the physical single-sided amplitude: a sine of amplitude 1
+  reads 1 (multiply `msg.magnitudes` by `msg.amplitudeScale` for the same).
+- The window mean is removed before the transform and reported as `dcOffset`,
+  so a constant offset (gravity on an accelerometer, a 4–20 mA live zero) no
+  longer hides the real lines behind the relative peak threshold.
+- **Overlap** controls how often a sample-by-sample stream is analysed: once
+  when the buffer first fills, then every `fftSize × (1 − overlap)` samples
+  (50 % = every half window). An array payload is analysed once per message.
+  The same applies to envelope and cepstrum mode.
+
 ### Signal Analyzer Output (Vibration Mode)
 
 ```javascript
@@ -461,18 +604,22 @@ msg = {
     periodicity: 0.98,
     healthScore: 62,             // 0-100
 
-    // ISO 10816-3 assessment
-    iso10816: {
-      zone: "C",                 // A | B | C | D
-      severity: "warning",       // ok | warning | alarm
+    // ISO 20816-3 assessment (`iso10816` is an alias of the same object)
+    iso20816: {
+      zone: "C",                 // A | B | C | D | N/A
+      severity: "warning",       // good | acceptable | warning | critical | unknown
       recommendation: "Acceptable only for limited periods - schedule maintenance",
       rmsVelocity: 3.0,          // mm/s, converted from inputUnit
-      machineClass: "class2",    // class1 | class2 | class3 | class4
-      limits: { ab: 1.12, bc: 2.8, cd: 7.1 },   // mm/s zone boundaries
-      zoneProgress: 4.65,        // % through the current zone
+      machineClass: "group2_rigid", // group1_rigid | group1_flexible | group2_rigid | group2_flexible
+                                    // | class1..class4 (legacy ISO 10816-1)
+      standard: "ISO 20816-3",   // or "ISO 10816-1 (legacy)"
+      limits: { ab: 1.4, bc: 2.8, cd: 4.5 },    // mm/s zone boundaries
+      zoneProgress: 11.8,        // % through the current zone
+      conversion: "spectral-integration", // none | scale | spectral-integration | single-frequency
+      band: [10, 500],           // Hz band integrated (acceleration input only)
       isAlarm: false,
       isWarning: true,
-      inputUnit: "mm_s",         // mm_s | m_s | g | in_s
+      inputUnit: "g",            // mm_s | m_s | g | m_s2 | raw
       isValid: true              // false if the unit conversion is not applicable
     }
   },
@@ -484,6 +631,44 @@ msg = {
 
 Anomalies (crest factor above the configured threshold, or `|kurtosis| > 4`) are
 routed to **output 2** with the same shape.
+
+### Signal Analyzer Output (Envelope Mode)
+
+```javascript
+// Input: raw acceleration frame (array) or single samples; msg.rpm optional
+msg = { payload: [...], rpm: 1450 };
+
+// Output (output 1 = no fault, output 2 = fault)
+msg = {
+  payload: 0.12,
+  envelope: { peaks: [{ frequency: 162.5, magnitude: 0.31, normalized: 0.8, noiseRatio: 42.1 }, ...], bandLow: 500, bandHigh: 5000 },
+  shaftSpeed: 1450,              // RPM used for this analysis
+  shaftFrequency: 24.17,         // Hz
+  bearingFreqs: {                // typed-in values win, the rest is derived from geometry
+    BPFO: 86.6, BPFI: 130.9, BSF: 56.9, FTF: 9.6,
+    source: "geometry"           // manual | geometry | mixed | none
+  },
+  bearingFaults: [
+    { type: "BPFI", harmonic: 1, description: "Inner Race Fault", expectedFreq: 130.9,
+      detectedFreq: 131.2, magnitude: 0.31, severity: "medium" },
+    { type: "BPFI-Sideband", harmonic: 1, sideband: -1, description: "Inner race fault modulated by shaft speed (BPFI×1 −1×1X)",
+      expectedFreq: 106.7, detectedFreq: 107.0, magnitude: 0.14, severity: "low" },
+    // also: BPFO | BSF | FTF | 1X | 2X | Looseness (harmonics: [1,2,3,4,...]) | SubSynchronous (order: 0.43)
+  ],
+  hasFault: true,
+  faultCount: 2,
+  timestamp: 1750000000000
+}
+```
+
+Peaks are accepted only above `envelopePeakFloor` (default 8) × the local
+spectral noise floor; matching tolerance is 5 % capped at 0.15 × shaft frequency
+and floored at 1.5 bins; harmonics of a bearing line count only with the
+fundamental; a line that also sits on a shaft harmonic carries
+`coincidesWith1X: k`. Bearing geometry config keys: `bearingBalls`,
+`bearingBallDiameter`, `bearingPitchDiameter`, `bearingContactAngle` (all
+overridable through `msg.config`, as is `envelopePeakFloor`). Shaft speed resolution order: `msg.rpm`, `msg.shaftSpeed`,
+`msg.config.shaftSpeed`, node setting.
 
 ### Signal Analyzer Output (Peaks Mode)
 
@@ -505,6 +690,27 @@ msg = {
   timestamp: 1750000000000
 }
 ```
+
+**Min Peak Height** (`minPeakHeight`, or per message `msg.config.minPeakHeight`)
+is the absolute height a positive peak must reach (a negative one must fall to
+`−height`). Left empty, the threshold is automatic: mean ± 2σ of the window.
+
+### Signal Analyzer: cepstrum and envelope notes
+
+- A cepstral line is reported as the gear-mesh frequency *or* as one of its
+  sidebands — whichever candidate is closest — never as several at once.
+- **Cepstrum** quefrencies are those of the real cepstrum of the full spectrum:
+  a harmonic family spaced 50 Hz apart peaks at 0.020 s. Gear-mesh matching
+  needs the real shaft speed (node setting or `msg.rpm`); without one
+  `gearFaults` stays empty and `shaftSpeed` is `0`.
+- **Envelope** reports the band it actually used in `envelope.bandLow` /
+  `bandHigh` and the filter in `envelope.filter` (`"butterworth"` or
+  `"moving-average"`). An upper band edge at or above the Nyquist frequency is
+  lowered to 90 % of it; a band that still does not fit falls back to a crude
+  moving-average filter whose result is unreliable. Both cases log one warning.
+- Bearing-fault `severity` is derived from how far the line stands above the
+  local noise floor relative to the Peak Floor factor (more than 5× = `high`,
+  more than 2× = `medium`), so it no longer depends on the sensor unit.
 
 ### Signal Analyzer: per-device buffers
 
@@ -536,37 +742,76 @@ msg = { topic: "pump-01/vibration", group: "pump-01/vibration", peaks: [...], ..
 
 ### Trend Predictor Output (RUL Mode)
 
+`msg.payload` stays the current value; the estimate is attached as sibling
+properties.
+
 ```javascript
 msg = {
-  payload: {
-    rul: 45.5,                // Remaining useful life
-    rulUnit: "hours",
-    confidence: {
-      lower: 38.2,
-      upper: 52.8
-    },
-    status: "warning",        // "healthy", "warning", "critical", "failed"
-    degradationRate: 0.23,
-    model: "linear",          // "linear", "exponential", "weibull"
-
-    // Weibull parameters (if applicable)
-    weibull: {
-      beta: 2.5,              // Shape parameter
-      eta: 100,               // Scale parameter
-      mttf: 88.6,             // Mean time to failure
-      bLife: {
-        B1: 23.5,
-        B5: 38.2,
-        B10: 48.9,
-        B50: 83.3
-      }
-    }
+  payload: 71.2,              // the current value
+  rul: {
+    value: 45.5,              // remaining useful life in `unit`; Infinity when no trend
+    unit: "hours",            // hours | minutes | days | cycles (cycles = samples)
+    lower: 38.2,              // two-sided interval at the configured level;
+    upper: 52.8,              //   lower can be 0 ("could fail now")
+    confidence: 0.93,         // R² of the fitted trend, 0 … 1
+    confidenceLevel: 0.95,    // the level the interval was computed for (0.5 … 0.9999)
+                              // interval = delta method on the trend-line crossing time (slope and
+                              // level uncertainty); calibration on a noisy linear model gives roughly
+                              // 75–80 % coverage for a 90 % band — indicative, not a guarantee
+    status: "warning",        // "healthy", "warning", "critical", "failed", "stable"
+    model: "linear",          // the model actually used: "linear", "exponential", "weibull"
+    direction: "rising"       // "rising" | "falling"
   },
+  degradation: {
+    percent: 71.2,            // share of the way to the failure threshold
+    rate: 0.23,               // change per sample, in the signal's own direction
+    trend: "increasing"
+  },
+  thresholds: { failure: 100, warning: 80 },
+  currentValue: 71.2,
+  timestamp: 1750000000000,
 
-  warningThreshold: 72,
-  failureThreshold: 24
+  // Only with the Weibull model
+  weibull: {
+    beta: 2.5,                // configured shape parameter
+    eta: 3600000000,          // configured characteristic life, in ms
+    etaHours: 1000,
+    equivalentAge: 2.1e9,     // ms, see below
+    currentReliability: 0.29,
+    hazardRate: 1.6e-9,
+    mttf: 3.2e9,              // ms
+    failureMode: "wear_out",
+    bLife: { B1: 5.7e8, B5: 1.1e9, B10: 1.5e9, B50: 3.1e9 }   // ms
+  }
 }
 ```
+
+- **Failure Direction** (`failureDirection`, per message
+  `msg.config.failureDirection`): `"rising"` (default) for indicators that grow
+  towards the threshold, `"falling"` for those that drop towards it (pressure,
+  efficiency, a 100 → 0 health index). The warning threshold follows the same
+  direction.
+- **No trend** is a statistical decision: the result is `stable` (RUL
+  `Infinity`) when the slope is within two standard errors of zero. A slow but
+  clean drift on a fast-sampled signal is therefore detected, whatever the unit.
+- **Exponential** fits `y = a·e^(bt)` (a straight line in `ln y`). It needs
+  positive values rising to a positive threshold; otherwise the node uses the
+  linear model and says so in `rul.model`.
+- **Weibull** uses the configured β and η. The node does not know the asset's
+  age, so it reads the degradation fraction `level / threshold` as the failed
+  fraction and derives an *equivalent age* `η·(−ln(1−D))^(1/β)`; the RUL is the
+  time from there to the age at which reliability drops to 10 %.
+- The trend is fitted over **time**, not over the sample index: a gap in the
+  data counts for as long as it lasted (`rul` results carry `timeBased: true`).
+  When timestamps do not increase strictly the fit falls back to the index.
+- **Group By** (`groupBy`, `maxGroups`) keeps one independent buffer per value
+  of a message property, in every mode; outputs are tagged with `msg.group`.
+  `msg.reset = true` clears the group of the message, `"all"` every group.
+- `msg.config` overrides also apply to multi-sensor object payloads.
+- **Cycles** counts samples. Timestamps come from `msg.timestamp` (ms, a `Date`
+  or a date string) and default to the arrival time.
+- Payloads must be finite numbers (or strings that are one); `"12abc"` and
+  `"Infinity"` are rejected with a warning.
 
 ### Health Index Output
 
@@ -624,7 +869,7 @@ The `llm-analyzer` node buffers sensor samples, builds a prompt from them, calls
 |----------|------------------|----------------|-------|
 | `anthropic` | `https://api.anthropic.com/v1/messages` | `x-api-key` header | Native Messages API (`anthropic-version: 2023-06-01`) |
 | `openai` | `https://api.openai.com/v1/chat/completions` | `Authorization: Bearer` | Chat Completions API |
-| `google` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` | `?key=` query param | `{model}` substituted from config; system prompt sent as `systemInstruction` |
+| `google` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` | `x-goog-api-key` header | `{model}` substituted from config; system prompt sent as `systemInstruction` |
 | `ollama` | `http://localhost:11434/api/chat` | none (optional Bearer) | Local model runner; API key not required |
 | `openai-compatible` | **none — `apiUrl` is required** | `Authorization: Bearer` | Generic Chat Completions adapter (Groq, Together, OpenRouter, DeepSeek, Mistral API, vLLM, LMStudio, …) |
 
@@ -638,8 +883,10 @@ Numeric fields are clamped to their valid range (out-of-range values are pinned,
 |-------|------|---------|-------------|
 | `name` | string | `""` | Editor label only |
 | `provider` | string | `"anthropic"` | One of `anthropic` \| `openai` \| `google` \| `ollama` \| `openai-compatible` |
-| `model` | string | `"claude-haiku-4-5-20251001"` | Free-text model name passed to the provider |
+| `model` | string | `"claude-haiku-5-5"` | Free-text model name passed to the provider (undated Anthropic id = current Haiku snapshot) |
 | `apiUrl` | string | `""` | Empty = provider default endpoint. **Required** for `openai-compatible` |
+| `allowMsgApiUrl` | boolean | `false` | Honour `msg.apiUrl` (same origin as the configured endpoint only) |
+| `allowMsgOverrides` | boolean | `false` | Honour `msg.prompt`, `msg.systemPrompt` and `msg.model`. A missing key (nodes saved before 0.4.1) means `false`; present overrides are then ignored with one warning |
 | `triggerMode` | string | `"batch"` | `batch` \| `manual` \| `interval` |
 | `batchSize` | number | `50` | Range 1–1000. Used only in `batch` mode |
 | `intervalMs` | number | `60000` | Range 250–86400000 (24 h). Used only in `interval` mode |
@@ -657,7 +904,7 @@ Numeric fields are clamped to their valid range (out-of-range values are pinned,
 | `sensorName` | string | `""` | Metadata; fills the `{sensor}` placeholder |
 | `unit` | string | `""` | Metadata; fills the `{unit}` placeholder |
 | `passthroughOriginal` | boolean | `true` | If true, the triggering message's `payload` is copied to `msg.input` on the output |
-| `persistState` | boolean | `false` | Persist buffer, detected columns, and lifetime counters across redeploys |
+| `persistState` | boolean | `false` | Persist buffer, detected columns, and lifetime counters across redeploys (newest 100 000 samples at most) |
 
 ### Credential Handling
 
@@ -706,7 +953,7 @@ Variables available in both modes: `{sensor}`, `{unit}`, `{count}`, `{stats}`, `
 
 Stats are pre-computed by the node (mean/stdDev/min/max/range) so the LLM does not burn tokens recomputing them. In JSON output mode an instruction block (built by `buildJsonInstruction()`, including the `outputSchema` example if set) is appended to the system prompt — provider-native JSON modes are not used.
 
-Record mode column detection: with an empty `columns` field, the **first** record received establishes the numeric column set, which is then frozen for the node's lifetime. Common timestamp/identifier fields (`timestamp`, `time`, `ts`, `_ts`, `epoch`, `datetime`, `date`, `id`, `_id` — case-insensitive) are skipped automatically; list columns explicitly to include them.
+Record mode column detection: with an empty `columns` field, the **first** record received establishes the numeric column set, which is then frozen for the node's lifetime. Common timestamp/identifier fields (`timestamp`, `time`, `ts`, `_ts`, `epoch`, `datetime`, `date`, `id`, `_id` — case-insensitive) are skipped automatically; list columns explicitly to include them. Keys that contain control characters or newlines, are empty, or are longer than 64 characters are never detected as columns, and every column name written into a prompt is sanitised (`sanitizeColumnName()`: control characters stripped, whitespace collapsed, 64-character cap) — record keys are supplied by the upstream sender, not the operator.
 
 ### Input Message
 
@@ -718,10 +965,14 @@ msg = {
 
   flush: true,                 // optional — manual mode only: fire now
   prompt: "…",                 // optional — replaces the user prompt template
-                               //   ({word} substitution is still applied)
+                               //   ({word} substitution is still applied);
+                               //   ignored (one warning) unless allowMsgOverrides is enabled
   systemPrompt: "…",           // optional — replaces the system prompt for this call
-  model: "gpt-4o-mini",        // optional — per-message model override
-  apiUrl: "http://mock:8080"   // optional — per-message endpoint override (tests/gateways)
+                               //   (same opt-in)
+  model: "gpt-4o-mini",        // optional — per-message model override (same opt-in)
+  apiUrl: "http://mock:8080"   // optional — per-message endpoint override (tests/gateways);
+                               // ignored unless "Allow msg.apiUrl override" is enabled, and then
+                               // only accepted within the origin of the configured endpoint
 }
 ```
 
@@ -746,7 +997,7 @@ msg = {
   samples: [/* exact batch sent */],  // number[] (scalar) or object[] (record)
   sensor: "machine-A/temp",        // sensorName or null
   unit: "°C",                      // unit or null
-  model: "claude-haiku-4-5-…",     // model reported by the provider
+  model: "claude-haiku-5-5",       // model reported by the provider
   durationMs: 1234,                // wall-clock time of the API call
 
   // JSON mode only:
@@ -766,7 +1017,7 @@ msg = {
 - The buffer is drained (copied and cleared) on every fire; `msg.samples` carries the exact batch that was sent.
 - `maxBufferSize` is a hard ring-buffer cap: when exceeded, the **oldest** entries are dropped and the drop count appears in the status line (`buffering 9999/10000 ⚠ 12 dropped`). Most relevant in `manual`/`interval` modes where the buffer can otherwise grow unbounded.
 - `maxSamplesInPrompt` independently caps how many buffered values are rendered into the prompt (token-cost knob) — the newest N are kept, older ones are summarized only by the stats line.
-- With `persistState: true`, the buffer, detected columns, and lifetime usage counters are saved every 30 s and on close (context key `llmAnalyzerState_<nodeId>` via the shared persistence helper) and restored after a redeploy.
+- With `persistState: true`, the buffer, detected columns, and lifetime usage counters are saved every 30 s and on close (context key `llmAnalyzerState_<nodeId>` via the shared persistence helper) and restored after a redeploy. At most the newest 100 000 samples are written (`min(maxBufferSize, 100000)`, one warning when the cap applies). A batch that is out with the provider when the node closes is part of the snapshot, so a redeploy mid-call does not lose it.
 
 ### Timeouts and Errors
 
@@ -781,6 +1032,7 @@ Each request runs under an `AbortController` armed with `timeoutMs`; on expiry t
 | `http` | Any other non-2xx status |
 | `shape` | Provider response missing expected fields |
 | `blocked` | Google only — prompt blocked (`promptFeedback.blockReason`) |
+| `refusal` | Anthropic only — `stop_reason: "refusal"` (HTTP 200 with no text); not retried |
 | `config` | Missing key/URL/model, unknown provider |
 
 JSON mode adds two error paths: an unparseable response (`json parse` status; the error message carries `msg.rawResponse`, `msg.usage`, `msg.model`) and a missing `outputPath` field (`path not found` status; error message additionally carries `msg.json`). The error kind is also shown in the node status (red ring).
@@ -822,7 +1074,8 @@ const median = stats.calculateMedian([1, 2, 3, 4, 5]);
 
 // Quartiles
 const q = stats.calculateQuartiles([1, 2, 3, 4, 5, 6, 7, 8]);
-// Returns: { q1: 2, q2: 4, q3: 6, iqr: 4, median: 4 }
+// Returns: { q1: 2.75, q2: 4.5, q3: 6.25, iqr: 3.5, median: 4.5 }
+// (linear interpolation, the same definition as calculatePercentile / calculateMedian)
 
 // Percentile
 const p95 = stats.calculatePercentile([1, 2, 3, 4, 5], 95);
@@ -838,7 +1091,7 @@ const result = stats.calculateZScore(10, [5, 6, 7, 8, 9]);
 
 // IQR Bounds
 const bounds = stats.calculateIQRBounds([1, 2, 3, 4, 5, 6, 7, 8], 1.5);
-// Returns: { q1, q3, iqr, lowerBound, upperBound }
+// Returns: { q1: 2.75, q3: 6.25, iqr: 3.5, lowerBound: -2.5, upperBound: 11.5, ... }
 ```
 
 #### Correlation
@@ -890,9 +1143,28 @@ const manager = new NodeStateManager(node, {
   stateKey: 'myState',        // Context key
   saveInterval: 30000,        // Auto-save interval (ms)
   autoSave: true,             // Enable auto-save
-  saveOnChange: false         // Save on every change
+  saveOnChange: false,        // Save on every change
+  stateVersion: 1,            // Schema version written as `__v` (default: STATE_VERSION)
+  migrate: (state, fromVersion) => state, // Convert a blob of another version, or return null
+  maxPersistedItems: 100000,  // Cap on any persisted array (newest kept); default unlimited
+  onAutoSave: () => {}        // Called on each auto-save tick before the dirty check
 });
 ```
+
+#### Schema version and migration
+
+Every blob written carries `__v` (currently `1`, exported as `STATE_VERSION`). On load:
+
+- same version → deserialized as before;
+- no `__v` at all (a blob written by 0.4.0, before the marker existed) → treated as version `1` (`UNVERSIONED_BLOB_VERSION`): the shape did not change, so it loads **unchanged, without a warning**, and the next save writes it back with `__v`;
+- a different `__v` → `migrate(state, fromVersion)` is called when the manager has one; an object it returns is adopted. Without a hook, or when it returns anything else or throws, the manager **starts fresh** and logs a warning (`[Persistence] Persisted state is version N, this node expects version 1 — starting fresh`). The state is marked dirty so the next save replaces the stale blob and the warning does not repeat;
+- a blob that cannot be deserialized (corrupt typed-array data, a non-object value) → warning + fresh start, same way.
+
+Nodes using `initializeStatePersistence()` pass `migrate` and `maxPersistedItems` through the helper's options.
+
+#### Size bound
+
+`maxPersistedItems` is **off by default** (every array is written whole; the anomaly-detector / signal-analyzer windows are never trimmed). When a node sets it, every top-level array (plain arrays and object arrays; typed arrays are left intact) is trimmed to its newest N items at serialization time, with **one** warning per manager. It bounds what the context store rewrites on every save; the live state in the node is untouched. Only `llm-analyzer` sets it (`min(maxBufferSize, 100000)`).
 
 #### Methods
 
@@ -943,6 +1215,26 @@ const anomalyState = createAnomalyStateManager(node);
 const mlState = createMLStateManager(node);
 const signalState = createSignalStateManager(node);
 ```
+
+#### Persistence helper (`nodes/utils/persistence-helper.js`)
+
+```javascript
+const persistence = initializeStatePersistence(node, {
+  stateKey: 'myNodeState',
+  saveInterval: 30000,
+  onStateLoaded: (state) => { /* restore */ },
+  getStateToSave: () => ({ buffer: node.buffer }),
+  migrate: (state, fromVersion) => state,   // optional, see above
+  maxPersistedItems: 100000                 // optional
+});
+
+persistence.saveNow();     // snapshot via getStateToSave() into the manager (written by auto-save)
+persistence.markDirty();   // cheaper: the manager's next auto-save tick pulls the snapshot itself
+await persistence.flush(); // snapshot + write now; resolves false when the state is not loaded yet (nothing written)
+await persistence.close(); // snapshot, final write, stop the timer
+```
+
+`markDirty()` + the manager's auto-save is the intended single writer for a node's blob; a node should not run a second timer of its own next to it.
 
 ---
 

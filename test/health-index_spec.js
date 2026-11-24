@@ -41,10 +41,15 @@ describe("health-index Node", function () {
 
             n2.on("input", function (msg) {
                 try {
-                    expect(msg.payload).toBeGreaterThanOrEqual(0);
-                    expect(msg.payload).toBeLessThanOrEqual(100);
-                    expect(msg.status).toBeDefined();
-                    expect(msg.sensorScores).toBeDefined();
+                    // Nothing flagged on either sensor: a clean 100
+                    expect(msg.payload).toBe(100);
+                    expect(msg.healthIndex).toBe(100);
+                    expect(msg.status).toBe("healthy");
+                    expect(msg.scale).toBe("0-100");
+                    expect(msg.sensorScores).toEqual({ temp: 100, vibration: 100 });
+                    expect(msg.worstSensor).toBeNull();
+                    expect(msg.contributingFactors).toEqual([]);
+                    expect(msg.thresholds).toEqual({ healthy: 80, warning: 60, degraded: 40, critical: 20 });
                     done();
                 } catch (err) {
                     done(err);
@@ -120,7 +125,9 @@ describe("health-index Node", function () {
             n2.on("input", function (msg) {
                 try {
                     expect(msg.method).toBe("weighted");
-                    expect(msg.sensorScores).toBeDefined();
+                    expect(msg.sensorScores).toEqual({ sensor1: 70, sensor2: 100 });
+                    // (70 x 2 + 100 x 1) / 3 — a plain average would give 85
+                    expect(msg.payload).toBeCloseTo(80, 10);
                     done();
                 } catch (err) {
                     done(err);
@@ -129,7 +136,7 @@ describe("health-index Node", function () {
 
             n1.receive({
                 payload: {
-                    sensor1: { value: 50, isAnomaly: false },
+                    sensor1: { value: 50, isAnomaly: true },
                     sensor2: { value: 50, isAnomaly: false }
                 }
             });
@@ -191,8 +198,9 @@ describe("health-index Node", function () {
 
             n2.on("input", function (msg) {
                 try {
-                    expect(msg.payload).toBeGreaterThanOrEqual(0);
-                    expect(msg.sensorScores).toBeDefined();
+                    expect(msg.payload).toBe(100);
+                    // Named from each entry's valueName
+                    expect(msg.sensorScores).toEqual({ temp: 100, pressure: 100 });
                     done();
                 } catch (err) {
                     done(err);
@@ -225,8 +233,19 @@ describe("health-index Node", function () {
                 if (received) return;
                 received = true;
                 try {
-                    expect(msg.worstSensor).toBeDefined();
-                    expect(msg.worstSensor.name).toBe("badSensor");
+                    // anomaly (-30) and z-score above 3 (-40)
+                    expect(msg.worstSensor).toEqual({ name: "badSensor", score: 30, reliability: 1 });
+                    expect(msg.sensorScores).toEqual({ goodSensor: 100, badSensor: 30 });
+                    expect(msg.payload).toBe(65);
+                    expect(msg.status).toBe("attention");
+                    expect(
+                        msg.contributingFactors.map(function (f) {
+                            return [f.sensor, f.impact];
+                        })
+                    ).toEqual([
+                        ["badSensor", -30],
+                        ["badSensor", -40]
+                    ]);
                     done();
                 } catch (err) {
                     done(err);
@@ -293,7 +312,8 @@ describe("health-index Node", function () {
                     received = true;
                     try {
                         expect(msg.method).toBe("dynamic");
-                        expect(msg).toHaveProperty("dynamicWeights");
+                        expect(msg.payload).toBe(100);
+                        expect(Object.keys(msg.dynamicWeights)).toEqual(["sensor1", "sensor2"]);
                         done();
                     } catch (err) {
                         done(err);
@@ -335,11 +355,9 @@ describe("health-index Node", function () {
                     if (received) return;
                     received = true;
                     try {
-                        expect(msg.dynamicWeights).toHaveProperty("sensor1");
-                        expect(msg.dynamicWeights).toHaveProperty("sensor2");
-                        expect(msg.dynamicWeights.sensor1).toHaveProperty("effectiveWeight");
-                        expect(msg.dynamicWeights.sensor1).toHaveProperty("reliabilityFactor");
-                        expect(msg.dynamicWeights.sensor1).toHaveProperty("anomalyRate");
+                        // First sample, no weights configured, nothing flagged
+                        const pristine = { effectiveWeight: 1, reliabilityFactor: 1, anomalyRate: 0 };
+                        expect(msg.dynamicWeights).toEqual({ sensor1: pristine, sensor2: pristine });
                         done();
                     } catch (err) {
                         done(err);
@@ -358,7 +376,9 @@ describe("health-index Node", function () {
             });
         });
 
-        it("should reduce weight for sensors with high anomaly rate", function (done) {
+        // A persistently anomalous sensor is the fault to surface, not an
+        // unreliable one to mute: the rate is reported, the weight is untouched.
+        it("should report the anomaly rate without reducing the weight of an anomalous sensor", function (done) {
             const flow = [
                 {
                     id: "n1",
@@ -379,16 +399,14 @@ describe("health-index Node", function () {
                 let messageCount = 0;
                 const handleMessage = function (msg) {
                     messageCount++;
-                    // After enough messages, sensor2 should have reduced weight
-                    if (messageCount >= 15) {
+                    if (messageCount === 20) {
                         try {
-                            // sensor2 has 50% anomaly rate, should have lower reliability
-                            expect(msg.dynamicWeights.sensor2.anomalyRate).toBeGreaterThan(0.3);
-                            expect(msg.dynamicWeights.sensor2.reliabilityFactor).toBeLessThan(1.0);
-                            // sensor1 has no anomalies, should have higher reliability
-                            expect(msg.dynamicWeights.sensor1.reliabilityFactor).toBeGreaterThanOrEqual(
-                                msg.dynamicWeights.sensor2.reliabilityFactor
-                            );
+                            // sensor2 has a 50% anomaly rate ...
+                            expect(msg.dynamicWeights.sensor2.anomalyRate).toBeCloseTo(0.5, 5);
+                            expect(msg.dynamicWeights.sensor1.anomalyRate).toBe(0);
+                            // ... and keeps its full weight
+                            expect(msg.dynamicWeights.sensor2.reliabilityFactor).toBe(1);
+                            expect(msg.dynamicWeights.sensor2.effectiveWeight).toBe(1);
                             done();
                         } catch (err) {
                             done(err);
@@ -479,7 +497,8 @@ describe("health-index Node", function () {
                     if (received) return;
                     received = true;
                     try {
-                        expect(msg.worstSensor).toHaveProperty("reliability");
+                        expect(msg.worstSensor).toEqual({ name: "sensor2", score: 70, reliability: 1 });
+                        expect(msg.dynamicWeights.sensor2.anomalyRate).toBe(1);
                         done();
                     } catch (err) {
                         done(err);

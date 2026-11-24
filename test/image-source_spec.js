@@ -84,3 +84,39 @@ describe("image-source Node", function () {
         });
     });
 });
+
+describe("image-source hardening", function () {
+    beforeEach(function (done) {
+        helper.startServer(done);
+    });
+    afterEach(function (done) {
+        helper.unload().then(function () {
+            helper.stopServer(done);
+        });
+    });
+
+    it("shows a stopped status after 'stop' and ignores an unknown msg.config.defect", function (done) {
+        const flow = [
+            { id: "n1", type: "image-source", intervalMs: 50, defect: "spot", width: 16, height: 16, wires: [[]] }
+        ];
+        helper.load(isNode, flow, function () {
+            const n1 = helper.getNode("n1");
+            const statuses = [];
+            n1.status = (s) => statuses.push(s);
+            n1.receive({ payload: "start", config: { defect: "definitely-not-a-defect" } });
+            setTimeout(function () {
+                n1.receive({ payload: "stop" });
+                try {
+                    expect(n1.defect).toBe("spot");
+                    expect(n1.timer).toBeNull();
+                    const last = statuses[statuses.length - 1];
+                    expect(last.shape).toBe("ring");
+                    expect(last.text).toMatch(/^stopped/);
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            }, 130);
+        });
+    });
+});

@@ -17,7 +17,7 @@ function startMockAnthropic() {
     let nextStatus = 200;
     let nextBody = {
         content: [{ type: "text", text: "Looks normal." }],
-        model: "claude-haiku-4-5-20251001",
+        model: "claude-haiku-5-5",
         usage: { input_tokens: 25, output_tokens: 7 }
     };
     const requests = [];
@@ -30,7 +30,7 @@ function startMockAnthropic() {
             let parsed = null;
             try {
                 parsed = JSON.parse(raw);
-            } catch (_) {
+            } catch {
                 parsed = null;
             }
             requests.push({
@@ -85,7 +85,7 @@ describe("integration: llm-analyzer end-to-end", () => {
         mock.requests.length = 0;
         mock.setNext(200, {
             content: [{ type: "text", text: "Looks normal." }],
-            model: "claude-haiku-4-5-20251001",
+            model: "claude-haiku-5-5",
             usage: { input_tokens: 25, output_tokens: 7 }
         });
     });
@@ -100,7 +100,7 @@ describe("integration: llm-analyzer end-to-end", () => {
                 type: "llm-analyzer",
                 name: "batch",
                 provider: "anthropic",
-                model: "claude-haiku-4-5-20251001",
+                model: "claude-haiku-5-5",
                 apiUrl: mock.url,
                 apiKey: "sk-ant-test-key",
                 triggerMode: "batch",
@@ -129,7 +129,7 @@ describe("integration: llm-analyzer end-to-end", () => {
         expect(req.method).toBe("POST");
         expect(req.headers["x-api-key"]).toBe("sk-ant-test-key");
         expect(req.headers["anthropic-version"]).toBe("2023-06-01");
-        expect(req.body.model).toBe("claude-haiku-4-5-20251001");
+        expect(req.body.model).toBe("claude-haiku-5-5");
         // Sensor metadata propagated into the user prompt.
         expect(req.body.messages[0].content).toMatch(/machine-A\/temp/);
         // Stats injected — mean of 71..75 is 73.
@@ -151,6 +151,8 @@ describe("integration: llm-analyzer end-to-end", () => {
                 triggerMode: "manual",
                 sensorName: "pump-3",
                 unit: "bar",
+                // Per-message prompt overrides are opt-in.
+                allowMsgOverrides: true,
                 wires: [[CAP]]
             },
             captureNode(CAP, "capture")
@@ -179,6 +181,46 @@ describe("integration: llm-analyzer end-to-end", () => {
         expect(mock.requests).toHaveLength(1);
         // The msg.prompt override must replace the default user prompt.
         expect(mock.requests[0].body.messages[0].content).toBe("Three sentences about pump-3 batch of 4 samples.");
+    }, 20000);
+
+    it("without the opt-in, msg.prompt / msg.systemPrompt / msg.model are ignored (default template, configured model)", async () => {
+        const TAB = "llm-tab-noovr";
+        const NODE = "llm-noovr";
+        const CAP = "cap-noovr";
+        const flow = buildFlow(TAB, "llm no overrides", [
+            {
+                id: NODE,
+                type: "llm-analyzer",
+                name: "no-overrides",
+                provider: "anthropic",
+                model: "claude-haiku-5-5",
+                apiUrl: mock.url,
+                apiKey: "sk-ant-noovr",
+                triggerMode: "manual",
+                sensorName: "pump-3",
+                unit: "bar",
+                wires: [[CAP]]
+            },
+            captureNode(CAP, "capture")
+        ]);
+        await harness.deploy(flow);
+
+        await harness.inject(NODE, {
+            payload: 2.5,
+            flush: true,
+            prompt: "Injected {count}",
+            systemPrompt: "Injected system prompt",
+            model: "claude-opus-5-5"
+        });
+
+        const captured = await harness.collect(CAP, 1, 8000);
+        expect(captured).toHaveLength(1);
+        expect(mock.requests).toHaveLength(1);
+        const body = mock.requests[0].body;
+        expect(body.model).toBe("claude-haiku-5-5");
+        expect(body.system).toMatch(/^You are an industrial sensor analyst/);
+        expect(body.messages[0].content).toMatch(/^Sensor pump-3 \(bar\)\. Batch of 1 samples\./);
+        expect(body.messages[0].content).not.toMatch(/Injected/);
     }, 20000);
 
     it("HTTP 401 from upstream → catch-node sees the error, no payload-bearing output", async () => {

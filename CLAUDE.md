@@ -7,7 +7,7 @@ Guidance for Claude Code when working in this repository.
 `node-red-contrib-condition-monitoring` — a Node-RED module of **15 nodes** for
 anomaly detection, predictive maintenance, signal/vibration analysis, ML
 inference (ONNX/TF.js), a synthetic data/vision pipeline, and an LLM analyzer.
-Published to npm; current line is **v0.3.x** (Beta). Pure CommonJS, runtime
+Published to npm; current line is **v0.4.x** (Beta). Pure CommonJS, runtime
 `node >= 18`.
 
 ## Commands
@@ -17,6 +17,8 @@ npm test                 # jest, BOTH projects (unit + integration) — what CI 
 npx jest --selectProjects unit          # unit only (fast, parallel)
 npx jest --selectProjects integration   # integration only (real Node-RED, serial)
 npx jest path/to/_spec.js               # a single suite
+                                        # NOT `--selectProjects unit path/…`: the flag is variadic,
+                                        # swallows the path and runs the whole project
 npm run test:coverage    # with coverage gate (jest.config.js thresholds)
 npm run lint             # eslint (flat config) — 0 errors required, warnings OK
 npm run format:check     # prettier --check (CI gate); npm run format to fix
@@ -33,11 +35,21 @@ Before committing/pushing, the changes must pass the same gates CI enforces:
   `module.exports = function (RED) { … RED.nodes.registerType("name", Node); }`.
 - **`nodes/utils/`** — shared helpers, required by nodes as `./utils/<x>`:
   `statistics.js`, `path-validator.js` (security: model-path allowlisting),
+  `admin-auth.js` (security: `httpAdmin` permission guard),
   `config-validator.js` (`clampInt`/`clampFloat`), `error-handler.js`,
-  `persistence-helper.js`, `llm-providers.js`.
+  `message.js` (`copyPassthrough`), `persistence-helper.js`, `llm-providers.js`,
+  `group-state.js` (per-device "Group By" state: key resolution, LRU-bounded
+  map, field swapper — use it, don't hand-roll another copy),
+  `signal-processing.js` (the signal-analyzer's FFT / filters / cepstrum /
+  diagnosis rules as pure functions), `vibration.js` (ISO severity tables,
+  bearing geometry), `seeded-random.js`, `json-http-client.js` (request + retry
+  shared by the HTTP bridges).
 - **Non-node runtime modules** in `nodes/` (not registered, used by nodes):
   `websocket-manager.js`, `state-persistence.js`, `python-bridge-manager.js`,
-  `max-bridge-manager.js`.
+  `max-bridge-manager.js`, `ml-inference-admin.js` (all of ml-inference's
+  `httpAdmin` routes; takes runtime state by injection),
+  `ml-inference-mlflow.js` (MLflow REST helper + tracker) and
+  `ml-inference-download.js` (model download / registry helpers).
 - **`nodes/python/`** — Python sidecars (`python_bridge.py`, `max_bridge.py`,
   `coral_inference.py`) driven by the bridge-manager nodes.
 - **`nodes/models/`, `nodes/labels/`, `nodes/model-catalog.json`** — bundled ML
@@ -46,6 +58,28 @@ Before committing/pushing, the changes must pass the same gates CI enforces:
 When adding a node: create the `.js`/`.html` pair, register it in `package.json`,
 reuse `nodes/utils/` helpers (don't re-implement stats/validation), and add a
 `test/<name>_spec.js`.
+
+Editor (`.html`) gotchas, both of which shipped once:
+- **Never name a runtime property `node.debug`** (or `log`/`warn`/`error`/
+  `status`/`send`): those are Node-RED's own methods. The "debug" checkbox is
+  stored as `node.debugEnabled`. Overwriting `node.debug` broke the nodes with
+  debug on *and* silently discarded persisted state with it off.
+- **An `id="node-input-<prop>"` may exist only once per dialog.** A setting shown
+  in two mode panels needs one real field plus a mirror with another id that is
+  synced in `oneditprepare` (see the shaft speed in `signal-analyzer.html`); a
+  duplicate id is never read back on save.
+- A new `<select>` setting has no value on nodes saved before it existed: default
+  it in `oneditprepare`, and make the runtime default for a *missing* key the old
+  behaviour (editor `defaults` only apply to newly dropped nodes).
+
+**Every `RED.httpAdmin` route must be wrapped in
+`needsPermission(RED, "<node>.read"|"<node>.write")` from `utils/admin-auth`.**
+Node-RED does *not* apply `adminAuth` to node-registered routes — an unguarded
+one is reachable by anyone who can talk to the editor port.
+`test/utils-admin-auth_spec.js` fails the build if a registration slips through.
+Any request-supplied file name (route param, header, JSON body) must go through
+a `path-validator` check before it reaches `fs` — see `safeChildPath()` in
+`ml-inference-admin.js`.
 
 ## Tests
 
@@ -61,17 +95,31 @@ Gotchas:
   and route a message to the wrong output → collect timeout on the slow CI runner.
 - `test/fixtures/*_model_metadata.json` get a `lastLoaded` timestamp rewritten on
   every ml-inference run. **Revert that churn before committing** — don't stage it.
+  Running the suite against a *container* also drops an untracked
+  `nodes/models/<model>_metadata.json` sidecar next to each bundled model —
+  same deal, delete it rather than commit it.
 - Optional ML runtimes (`@tensorflow/tfjs-node`, `onnxruntime-node`) and `ws` are
   `optionalDependencies`; CI's unit/lint/audit jobs install with
-  `--ignore-optional`, so guard code/tests for their absence.
-- Coverage thresholds (`jest.config.js`) sit a few points under the measured
-  baseline. Ratchet **up** as coverage grows, never down.
+  `--omit=optional`, so guard code/tests for their absence.
+- Coverage thresholds (`jest.config.js`) sit under the baseline measured *the
+  way CI measures it* — with `--omit=optional` (74/65/78/75 against a measured
+  ≈79.5/70.0/83.4/80.8 at v0.4.0). Installing the optional runtimes locally reads a few
+  points higher; don't set the gate from that number. The margin is wider than
+  it looks like it needs to be because one run came in ~4.5 points low and never
+  reproduced. Ratchet **up** as coverage grows, never down.
+- Node-RED mounts body parsers on the admin router, so an `httpAdmin` handler
+  may find the request stream already drained. Don't read `req.on("data")`
+  blindly — it hangs. Prefer `req.body`, stream only as a fallback.
 
 ## CI gates (`.github/workflows/ci.yml`)
 
 `test` (Node 18/20/22), `coverage`, `lint`, `audit`, `optional-runtimes`
-(allowed to fail). The **audit gate is intentionally scoped to required runtime
-deps only**: `npm audit --omit=dev --omit=optional --audit-level=high`. Highs in
+(allowed to fail). All jobs install with **`npm ci`** so the tracked lockfile is
+enforced (the `test`/`coverage` jobs then load `unrs-resolver` once before jest:
+its native binding is an optional dep, missing after `--omit=optional`, and on
+Node 18 jest's first run fails while it self-installs); both workflows default to `permissions: contents: read`.
+
+The **audit gate is intentionally scoped to required runtime deps only**: `npm audit --omit=dev --omit=optional --audit-level=high`. Highs in
 dev/optional deps (tfjs-node's tar/node-pre-gyp tooling) are out of scope and
 must not be "fixed" by force-bumping — they never reach a user who skips the
 optional runtimes.
@@ -93,10 +141,23 @@ pending a dedicated cleanup follow-up.
   will keep re-proposing v5 — leave it until the test helper supports it.
 - Packaging uses a **`files` allowlist** in `package.json` (`nodes/`, `examples/`
   minus the generated test-suite, `CHANGELOG.md`, `SECURITY.md`). The old
-  `.npmignore` blocklist leaked training data/datasets into the tarball — rely on
-  `files`, not `.npmignore`.
+  `.npmignore` blocklist leaked training data/datasets into the tarball; it has
+  been deleted (the allowlist takes precedence, so it was dead config — verified
+  with `npm pack --dry-run`). Don't reintroduce it.
 - `package-lock.json` is tracked (required for `npm ci` / setup-node cache).
-- `training/` carries ~109 MB in git (deferred repo split); local-only venvs
+- **Regenerating `examples/test-suite.json`** (`node tools/build-test-suite.js`)
+  requires `./test-models/` to be populated first — `bash tools/fetch-models.sh`.
+  Tabs are emitted conditionally on those fixtures, so running the generator
+  without them silently produces a *smaller* suite (27 tabs instead of 38;
+  the full suite has 49 tests) and overwrites the committed one. The generator now refuses to
+  write a partial suite unless `--allow-partial` is passed. The Test Runner's
+  settle delay defaults to 45 s and is a ceiling, not a measurement — too short
+  and `/test` reports false negatives; override with
+  `TEST_SUITE_SETTLE_SECONDS` when regenerating for a slower machine.
+- `training/` carries ~109 MB in git. **This is a deliberate decision — the data
+  stays in the repo.** Don't propose a repo split, LFS migration or history
+  rewrite for it. The weight never reaches npm users: the `files` allowlist in
+  `package.json` keeps `training/` out of the tarball. Local-only venvs
   (`.venv/`, `notebooks_venv/`) are gitignored.
 
 ## Release / publish

@@ -12,7 +12,10 @@
             varianceThreshold: { value: 0.95, validate: RED.validators.number() },
             contributionThreshold: { value: 0.1, validate: RED.validators.number() },
             showTopContributors: { value: 3, validate: RED.validators.number() },
+            retrainMode: { value: "window" },
             outputTopic: { value: "" },
+            groupBy: { value: "" },
+            maxGroups: { value: 50 },
             debug: { value: false },
             persistState: { value: false }
         },
@@ -28,6 +31,11 @@
         outputLabels: ["normal", "anomaly"],
         paletteLabel: "PCA Anomaly",
         oneditprepare: function() {
+            // Nodes saved before this setting existed have no value for it; show
+            // the behaviour they actually get instead of an empty select.
+            if (!$("#node-input-retrainMode").val()) {
+                $("#node-input-retrainMode").val("window");
+            }
             var node = this;
             
             $("#node-input-autoComponents").on("change", function() {
@@ -192,6 +200,25 @@
             </div>
             
             <div class="form-row">
+                <label for="node-input-retrainMode"><i class="fa fa-refresh"></i> Retraining</label>
+                <select id="node-input-retrainMode">
+                    <option value="window">Refit every window of normal samples</option>
+                    <option value="off">Off (model frozen after the first full window)</option>
+                </select>
+            </div>
+
+            <div class="form-row">
+                <label for="node-input-groupBy"><i class="fa fa-sitemap"></i> Group By</label>
+                <input type="text" id="node-input-groupBy" placeholder="msg property, e.g. topic (empty = single model)">
+            </div>
+
+            <div class="form-row">
+                <label for="node-input-maxGroups"><i class="fa fa-list-ol"></i> Max Groups</label>
+                <input type="number" id="node-input-maxGroups" min="1" step="1" placeholder="50">
+                <span class="cm-hint">least recently used model is dropped</span>
+            </div>
+
+            <div class="form-row">
                 <label for="node-input-debug" style="width: auto;">
                     <input type="checkbox" id="node-input-debug" style="width: auto; margin-right: 5px;">
                     Enable debug logging
@@ -221,7 +248,9 @@
     <h3>Inputs</h3>
     <dl class="message-properties">
         <dt>payload <span class="property-type">object | array</span></dt>
-        <dd>Multi-sensor data as object <code>{sensor1: value, sensor2: value, ...}</code> or array <code>[value1, value2, ...]</code></dd>
+        <dd>Multi-sensor data as object <code>{sensor1: value, sensor2: value, ...}</code> or array <code>[value1, value2, ...]</code>.
+        Object fields that are not numbers or purely numeric strings — text, <code>"123abc"</code>, ISO timestamps —
+        are not sensors: they are skipped and listed in <code>msg.skippedValues</code>.</dd>
         <dt class="optional">reset <span class="property-type">boolean</span></dt>
         <dd>Set to <code>true</code> to reset the model and retrain</dd>
     </dl>
@@ -232,6 +261,10 @@
             <dl class="message-properties">
                 <dt>payload <span class="property-type">object</span></dt>
                 <dd>Original sensor values (no anomaly detected)</dd>
+                <dt>severity <span class="property-type">string</span></dt>
+                <dd><code>"warmup"</code> while the model is still training: <code>isAnomaly</code> is
+                <code>false</code>, <code>bufferSize</code> / <code>minRequired</code> report the progress and there
+                is no <code>pca</code> block yet.</dd>
             </dl>
         </li>
         <li>Anomaly
@@ -242,6 +275,11 @@
                 <dd>PCA statistics: scores, T², SPE, thresholds, explained variance</dd>
                 <dt>contributions <span class="property-type">array</span></dt>
                 <dd>Sensor contributions to anomaly, sorted by importance</dd>
+                <dt>contributionStatistic <span class="property-type">string</span></dt>
+                <dd><code>"t2"</code> or <code>"spe"</code>: the statistic the contributions and
+                <code>topContributor</code> explain. Every entry carries the same <code>statistic</code> field; when
+                both statistics exceed their limits, <code>contributions</code> holds both lists, the one further
+                over its limit first.</dd>
             </dl>
         </li>
     </ol>
@@ -252,9 +290,43 @@
         <li><b>T² only</b>: Detects unusual sensor combinations within normal operating space</li>
         <li><b>SPE only</b>: Detects new fault patterns not seen during training</li>
     </ul>
+    <p><b>Default when the property is absent:</b> a node dropped from the palette is saved with
+    <code>method: "combined"</code>. A flow created outside the editor (Admin API, generated JSON) that
+    omits <code>method</code> runs as <code>"t2"</code>, the runtime default, and will not raise SPE alarms.
+    Set <code>method</code> explicitly in generated flows.</p>
     
+    <h3>Training and limits</h3>
+    <ul>
+        <li>The <b>feature set is fixed by the first sample</b> and values are matched <i>by name</i> afterwards
+        (array entries are named <code>sensor0</code>, <code>sensor1</code>, &hellip; by position). Key order and
+        extra keys do not matter; a sample missing one of the features is skipped with an error. Send
+        <code>msg.reset</code> to learn a new feature set.</li>
+        <li>The first model is fitted after half a window (at least 10 samples) and refitted once the window is
+        full. With <b>Retraining</b> on, it is then refitted every time the window has turned over.</li>
+        <li>Only samples judged <b>normal</b> join the training window, so a persisting fault is not learned as
+        the new normal.</li>
+        <li><b>Threshold</b> is sigma-like (3 &asymp; 99.87% confidence). The T&sup2; limit is the matching
+        F-distribution limit for the number of retained components and training samples; the SPE limit is the
+        chi-squared approximation from the discarded eigenvalues.</li>
+    </ul>
+
+    <h3>Per-device grouping</h3>
+    <p>Set <b>Group By</b> to a message property (e.g. <code>topic</code>, or a nested path such as
+    <code>payload.deviceId</code>) to keep a separate PCA model per value of that property, so one node can serve an
+    interleaved stream from several machines without mixing their baselines.</p>
+    <ul>
+        <li>Each result carries <code>msg.group</code> with the key it was computed from.</li>
+        <li>Messages whose group property is missing or empty share one "ungrouped" state.</li>
+        <li><b>Max Groups</b> caps memory: when exceeded, the least recently used group is dropped.</li>
+        <li><code>msg.reset</code> clears the group named by the message, or everything if it names none.</li>
+        <li>Leaving <b>Group By</b> empty keeps the single shared state of earlier releases.</li>
+    </ul>
+
     <h3>Contribution Analysis</h3>
-    <p>When an anomaly is detected, PCA identifies which sensors contribute most:</p>
+    <p>When an anomaly is detected, PCA identifies which sensors contribute most. A T&sup2; anomaly is broken
+    down into the per-sensor terms of T&sup2; (Westerhuis / Kourti), an SPE anomaly into the reconstruction
+    residuals; <code>contributionStatistic</code> says which. Ranking SPE residuals for a T&sup2;-only anomaly
+    would report rounding noise as the root cause.</p>
     <ul>
         <li><b>Min. Contribution</b>: Only show sensors with contribution above this threshold (0.1 = 10%)</li>
         <li><b>Top Contributors</b>: Maximum number of sensors to include in output</li>

@@ -14,7 +14,7 @@ describe("utils/path-validator", () => {
     afterAll(() => {
         try {
             fs.rmSync(tmpRoot, { recursive: true, force: true });
-        } catch (_) {
+        } catch {
             /* best effort */
         }
     });
@@ -65,13 +65,53 @@ describe("utils/path-validator", () => {
         const link = path.join(allowed, "escape.bin");
         try {
             fs.symlinkSync(outside, link);
-        } catch (e) {
+        } catch {
             // symlinks may not be supported on this FS — skip
             return;
         }
         const r = validatePath(link, { allowedBases: [allowed], followSymlinks: true });
         expect(r.ok).toBe(false);
         expect(r.reason).toMatch(/outside the allowed directories/);
+    });
+
+    it("rejects a not-yet-existing file behind a symlinked parent directory", () => {
+        const outsideDir = path.join(tmpRoot, "outside-dir");
+        fs.mkdirSync(outsideDir, { recursive: true });
+        const linkDir = path.join(allowed, "linked-dir");
+        try {
+            fs.symlinkSync(outsideDir, linkDir);
+        } catch {
+            return; // symlinks unsupported
+        }
+        // Lexically inside the allowlist, physically outside it.
+        const r = validatePath(path.join(linkDir, "sub", "new.bin"), { allowedBases: [allowed] });
+        expect(r.ok).toBe(false);
+        expect(r.reason).toMatch(/outside the allowed directories/);
+    });
+
+    it("rejects a dangling symlink instead of treating it as a new file", () => {
+        const link = path.join(allowed, "dangling.bin");
+        try {
+            fs.symlinkSync(path.join(tmpRoot, "does-not-exist-anywhere.bin"), link);
+        } catch {
+            return; // symlinks unsupported
+        }
+        expect(validatePath(link, { allowedBases: [allowed] }).ok).toBe(false);
+    });
+
+    it("accepts files under an allowlisted directory that is itself a symlink", () => {
+        const realBase = path.join(tmpRoot, "real-base");
+        fs.mkdirSync(realBase, { recursive: true });
+        fs.writeFileSync(path.join(realBase, "m.onnx"), "x");
+        const linkedBase = path.join(tmpRoot, "linked-base");
+        try {
+            fs.symlinkSync(realBase, linkedBase);
+        } catch {
+            return; // symlinks unsupported
+        }
+        expect(validatePath(path.join(linkedBase, "m.onnx"), { allowedBases: [linkedBase] }).ok).toBe(true);
+        expect(validatePath(path.join(linkedBase, "new.onnx"), { allowedBases: [linkedBase] }).ok).toBe(true);
+        expect(validatePath(path.join(linkedBase, "..", "outside.bin"), { allowedBases: [linkedBase] }).ok).toBe(false);
     });
 
     it("assertPath throws EPATHFORBIDDEN on rejection", () => {

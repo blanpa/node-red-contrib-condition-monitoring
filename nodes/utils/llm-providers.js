@@ -4,10 +4,12 @@
  * Each adapter implements the same contract:
  *
  *     async function callXxx({ apiKey, model, systemPrompt, userPrompt,
- *                              maxTokens, timeoutMs, apiUrl, fetchFn }) {
+ *                              maxTokens, timeoutMs, apiUrl, fetchFn, signal }) {
  *         return { text, usage: { inputTokens, outputTokens },
- *                  model, durationMs, raw };
+ *                  model, finishReason, truncated, durationMs, raw };
  *     }
+ *
+ * `signal` is an optional AbortSignal: aborting it cancels the request.
  *
  * `fetchFn` is injectable — tests pass a stub instead of stubbing the
  * global. `apiUrl` is overridable so an integration test can point at a
@@ -24,6 +26,8 @@
 
 "use strict";
 
+const { isIsoDateLike } = require("./config-validator");
+
 const DEFAULT_ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_GOOGLE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent";
@@ -36,7 +40,65 @@ class LlmHttpError extends Error {
         this.name = "LlmHttpError";
         this.status = opts && opts.status;
         this.kind = (opts && opts.kind) || "http";
+        // Server-requested wait (Retry-After), in ms, when the response had one.
+        this.retryAfterMs = opts && Number.isFinite(opts.retryAfterMs) ? opts.retryAfterMs : null;
     }
+}
+
+/**
+ * Whether a failed call is worth repeating unchanged: timeouts, transport
+ * errors, rate limits and server-side (5xx) failures. Auth, config, shape and
+ * other 4xx errors will fail the same way again.
+ */
+function isRetryableError(err) {
+    if (!err) return false;
+    if (err.kind === "timeout" || err.kind === "network" || err.kind === "rate-limit") return true;
+    return typeof err.status === "number" && (err.status === 408 || err.status >= 500);
+}
+
+/**
+ * Parse a Retry-After header (delta-seconds or HTTP date) into milliseconds.
+ * Returns null when absent or unparseable.
+ */
+function parseRetryAfter(value, now) {
+    if (typeof value !== "string" || value.trim().length === 0) return null;
+    const v = value.trim();
+    if (/^\d+(\.\d+)?$/.test(v)) return Math.round(parseFloat(v) * 1000);
+    const when = Date.parse(v);
+    if (!Number.isFinite(when)) return null;
+    return Math.max(0, when - (Number.isFinite(now) ? now : Date.now()));
+}
+
+/**
+ * Parse and validate an endpoint URL. Only http(s) is accepted — the adapters
+ * attach the API key to whatever this points at.
+ *
+ * @returns {{ok:true, url:URL}|{ok:false, reason:string}}
+ */
+function parseHttpUrl(raw) {
+    if (typeof raw !== "string" || raw.trim().length === 0) {
+        return { ok: false, reason: "URL must be a non-empty string" };
+    }
+    let url;
+    try {
+        url = new URL(raw.trim());
+    } catch (_) {
+        return { ok: false, reason: "not a valid absolute URL" };
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+        return { ok: false, reason: "only http(s) URLs are allowed (got '" + url.protocol + "')" };
+    }
+    return { ok: true, url };
+}
+
+/**
+ * True when `candidate` is an http(s) URL on the same origin (scheme + host +
+ * port) as `reference`.
+ */
+function isSameOrigin(candidate, reference) {
+    const a = parseHttpUrl(candidate);
+    const b = parseHttpUrl(reference);
+    return a.ok && b.ok && a.url.origin === b.url.origin;
 }
 
 // ---------------------------------------------------------------------------
@@ -50,30 +112,69 @@ class LlmHttpError extends Error {
  *
  * @returns {Promise<{parsed:any, rawText:string, durationMs:number, status:number}>}
  */
-async function _httpCall({ url, headers, body, timeoutMs, fetchFn, providerLabel }) {
+async function _httpCall({ url, headers, body, timeoutMs, fetchFn, providerLabel, signal }) {
     const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    // The timer stays armed until the BODY has been read: fetch() resolves as
+    // soon as the headers arrive, and a server that then stalls the body would
+    // otherwise hang the caller forever.
+    const t = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+    }, timeoutMs);
+    // Optional caller-side cancellation (node close / redeploy).
+    const onExternalAbort = () => controller.abort();
+    if (signal) {
+        if (signal.aborted) controller.abort();
+        else if (typeof signal.addEventListener === "function") signal.addEventListener("abort", onExternalAbort);
+    }
     const startedAt = Date.now();
 
-    let res;
-    try {
-        res = await fetchFn(url, {
-            method: "POST",
-            headers,
-            body: typeof body === "string" ? body : JSON.stringify(body),
-            signal: controller.signal
-        });
-    } catch (err) {
-        clearTimeout(t);
-        if (err && err.name === "AbortError") {
-            throw new LlmHttpError("LLM call timed out after " + timeoutMs + "ms", { kind: "timeout" });
+    const wrapTransportError = (err) => {
+        if (timedOut) {
+            return new LlmHttpError("LLM call timed out after " + timeoutMs + "ms", { kind: "timeout" });
         }
-        throw new LlmHttpError("network error: " + (err && err.message), { kind: "network" });
+        if (controller.signal.aborted || (err && err.name === "AbortError")) {
+            return new LlmHttpError("LLM call aborted", { kind: "aborted" });
+        }
+        return new LlmHttpError("network error: " + (err && err.message), { kind: "network" });
+    };
+
+    let res;
+    let rawText;
+    try {
+        try {
+            res = await fetchFn(url, {
+                method: "POST",
+                headers,
+                body: typeof body === "string" ? body : JSON.stringify(body),
+                signal: controller.signal
+            });
+        } catch (err) {
+            throw wrapTransportError(err);
+        }
+        try {
+            // Race the body read against the abort signal so an injected or
+            // misbehaving fetch whose text() ignores the signal still times out.
+            rawText = await Promise.race([
+                res.text(),
+                new Promise((_, reject) => {
+                    const fail = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+                    if (controller.signal.aborted) fail();
+                    else controller.signal.addEventListener("abort", fail);
+                })
+            ]);
+        } catch (err) {
+            throw wrapTransportError(err);
+        }
+    } finally {
+        clearTimeout(t);
+        if (signal && typeof signal.removeEventListener === "function") {
+            signal.removeEventListener("abort", onExternalAbort);
+        }
     }
-    clearTimeout(t);
 
     const durationMs = Date.now() - startedAt;
-    const rawText = await res.text();
     let parsed = null;
     try {
         parsed = rawText ? JSON.parse(rawText) : null;
@@ -87,9 +188,15 @@ async function _httpCall({ url, headers, body, timeoutMs, fetchFn, providerLabel
             (parsed && parsed.message) ||
             rawText ||
             "(no body)";
-        throw new LlmHttpError(providerLabel + " API " + res.status + ": " + String(detail).slice(0, 400), {
+        const detailText = typeof detail === "string" ? detail : JSON.stringify(detail);
+        let retryAfterMs = null;
+        if (res.headers && typeof res.headers.get === "function") {
+            retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
+        }
+        throw new LlmHttpError(providerLabel + " API " + res.status + ": " + String(detailText).slice(0, 400), {
             status: res.status,
-            kind: res.status === 401 || res.status === 403 ? "auth" : res.status === 429 ? "rate-limit" : "http"
+            kind: res.status === 401 || res.status === 403 ? "auth" : res.status === 429 ? "rate-limit" : "http",
+            retryAfterMs
         });
     }
 
@@ -144,11 +251,25 @@ async function callAnthropic(args) {
         body,
         timeoutMs,
         fetchFn,
+        signal: args.signal,
         providerLabel: "Anthropic"
     });
 
     if (!parsed || !Array.isArray(parsed.content)) {
         throw new LlmHttpError("Anthropic response missing content[]", { kind: "shape" });
+    }
+    // A refusal comes back as HTTP 200 with no text. Passing that through as
+    // an empty payload hides what happened; it is an error of its own class
+    // (not retryable: the same prompt would be refused again).
+    if (parsed.stop_reason === "refusal") {
+        const detail =
+            parsed.stop_details && typeof parsed.stop_details === "object"
+                ? [parsed.stop_details.category, parsed.stop_details.explanation].filter(Boolean).join(": ")
+                : "";
+        throw new LlmHttpError(
+            "Anthropic refused the request (stop_reason: refusal" + (detail ? "; " + detail : "") + ")",
+            { kind: "refusal" }
+        );
     }
     const text = parsed.content
         .filter((c) => c && c.type === "text" && typeof c.text === "string")
@@ -162,6 +283,8 @@ async function callAnthropic(args) {
             outputTokens: Number(usage.output_tokens) || 0
         },
         model: parsed.model || args.model,
+        finishReason: typeof parsed.stop_reason === "string" ? parsed.stop_reason : null,
+        truncated: parsed.stop_reason === "max_tokens",
         durationMs,
         raw: parsed
     };
@@ -176,7 +299,10 @@ async function callOpenAI(args) {
         defaultUrl: DEFAULT_OPENAI_URL,
         providerLabel: "OpenAI",
         requireApiKey: true,
-        requireApiUrl: false
+        requireApiUrl: false,
+        // OpenAI deprecated `max_tokens` in favour of `max_completion_tokens`;
+        // the o-series / reasoning models reject the old name outright.
+        maxTokensField: "max_completion_tokens"
     });
 }
 
@@ -191,7 +317,9 @@ async function callOpenAICompatible(args) {
         defaultUrl: null, // user MUST supply apiUrl
         providerLabel: "OpenAI-compatible",
         requireApiKey: true,
-        requireApiUrl: true
+        requireApiUrl: true,
+        // Third-party hosts overwhelmingly still implement the original name.
+        maxTokensField: "max_tokens"
     });
 }
 
@@ -212,9 +340,9 @@ async function _callOpenAIShape(args, opts) {
 
     const body = {
         model: args.model,
-        messages,
-        max_tokens: maxTokens
+        messages
     };
+    body[opts.maxTokensField || "max_tokens"] = maxTokens;
 
     const headers = {
         "content-type": "application/json",
@@ -228,6 +356,7 @@ async function _callOpenAIShape(args, opts) {
         body,
         timeoutMs,
         fetchFn,
+        signal: args.signal,
         providerLabel: opts.providerLabel
     });
 
@@ -245,6 +374,8 @@ async function _callOpenAIShape(args, opts) {
             outputTokens: Number(usage.completion_tokens) || 0
         },
         model: parsed.model || args.model,
+        finishReason: choice && typeof choice.finish_reason === "string" ? choice.finish_reason : null,
+        truncated: !!choice && choice.finish_reason === "length",
         durationMs,
         raw: parsed
     };
@@ -259,11 +390,9 @@ async function callGoogle(args) {
     const baseUrl = (args.apiUrl && String(args.apiUrl).trim()) || DEFAULT_GOOGLE_URL;
     // Default URL has a `{model}` placeholder; substitute. If user provided a
     // full URL with `{model}` they get the same treatment, which is a feature.
-    const url =
-        baseUrl.replace("{model}", encodeURIComponent(args.model)) +
-        (baseUrl.indexOf("?") === -1 ? "?" : "&") +
-        "key=" +
-        encodeURIComponent(args.apiKey);
+    // The key travels in the `x-goog-api-key` header, never in the query
+    // string — URLs end up in proxy and access logs.
+    const url = baseUrl.replace("{model}", encodeURIComponent(args.model));
     const maxTokens = Number.isFinite(args.maxTokens) ? args.maxTokens : 1024;
     const timeoutMs = Number.isFinite(args.timeoutMs) ? args.timeoutMs : 30000;
 
@@ -277,10 +406,15 @@ async function callGoogle(args) {
 
     const { parsed, durationMs } = await _httpCall({
         url,
-        headers: { "content-type": "application/json", accept: "application/json" },
+        headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+            "x-goog-api-key": args.apiKey
+        },
         body,
         timeoutMs,
         fetchFn,
+        signal: args.signal,
         providerLabel: "Google"
     });
 
@@ -306,6 +440,8 @@ async function callGoogle(args) {
             outputTokens: Number(meta.candidatesTokenCount) || 0
         },
         model: parsed.modelVersion || args.model,
+        finishReason: cand && typeof cand.finishReason === "string" ? cand.finishReason : null,
+        truncated: !!cand && cand.finishReason === "MAX_TOKENS",
         durationMs,
         raw: parsed
     };
@@ -343,6 +479,7 @@ async function callOllama(args) {
         body,
         timeoutMs,
         fetchFn,
+        signal: args.signal,
         providerLabel: "Ollama"
     });
 
@@ -356,6 +493,8 @@ async function callOllama(args) {
             outputTokens: Number(parsed.eval_count) || 0
         },
         model: parsed.model || args.model,
+        finishReason: typeof parsed.done_reason === "string" ? parsed.done_reason : null,
+        truncated: parsed.done_reason === "length",
         durationMs,
         raw: parsed
     };
@@ -441,14 +580,48 @@ function formatRecordsTable(records, columns, maxRows) {
     const offset = Math.max(0, records.length - cap);
     const used = records.slice(offset);
     const head = records.length > cap ? "(showing last " + cap + " of " + records.length + ")\n" : "";
+    // Lookup by the raw key, display the sanitised name.
+    const names = columns.map(sanitizeColumnName);
     const lines = used.map((r, idx) => {
-        const parts = columns.map((c) => {
+        const parts = columns.map((c, i) => {
             const v = r && r[c];
-            return c + "=" + _fmt6(v);
+            return names[i] + "=" + _fmt6(v);
         });
         return "t=" + (offset + idx + 1) + " " + parts.join(" ");
     });
     return head + lines.join("\n");
+}
+
+// Longest column name written into a prompt.
+const MAX_COLUMN_NAME_LENGTH = 64;
+// C0/C1 control characters plus the Unicode line/paragraph separators —
+// anything that could start a new "line" inside the prompt.
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+/**
+ * Make a record key safe to paste into a prompt: control characters and
+ * newlines are removed, runs of whitespace collapse to one space, the result
+ * is trimmed and capped at 64 characters. Keys come from the payload — an
+ * upstream sender controls them, the operator does not.
+ */
+function sanitizeColumnName(name) {
+    const text = String(name).replace(CONTROL_CHARS_RE, "").replace(/\s+/g, " ").trim();
+    return text.length > MAX_COLUMN_NAME_LENGTH ? text.slice(0, MAX_COLUMN_NAME_LENGTH) : text;
+}
+
+/**
+ * True when a key can be used as a column as-is: no control characters, not
+ * empty once trimmed, within the length cap. Auto-detection drops keys that
+ * fail this (they are not sensor names); explicit allowlists are the
+ * operator's own text and are only sanitised for display.
+ */
+function isAcceptableColumnName(name) {
+    if (typeof name !== "string") return false;
+    CONTROL_CHARS_RE.lastIndex = 0;
+    if (CONTROL_CHARS_RE.test(name)) return false;
+    const trimmed = name.trim();
+    return trimmed.length > 0 && trimmed.length <= MAX_COLUMN_NAME_LENGTH;
 }
 
 /**
@@ -466,8 +639,9 @@ function formatPerColumnStats(colStats) {
     if (!colStats || typeof colStats !== "object") return "";
     const cols = Object.keys(colStats);
     if (cols.length === 0) return "(no columns)";
-    const labelWidth = Math.min(20, Math.max(...cols.map((c) => c.length)) + 1);
-    const lines = cols.map((col) => {
+    const names = cols.map(sanitizeColumnName);
+    const labelWidth = Math.min(20, Math.max(...names.map((c) => c.length)) + 1);
+    const lines = cols.map((col, i) => {
         const s = colStats[col] || {};
         const parts = [
             "n=" + (Number.isFinite(s.count) ? s.count : "0"),
@@ -476,7 +650,7 @@ function formatPerColumnStats(colStats) {
             "min=" + _fmt4(s.min),
             "max=" + _fmt4(s.max)
         ];
-        return "  " + (col + ":").padEnd(labelWidth + 1) + parts.join(" ");
+        return "  " + (names[i] + ":").padEnd(labelWidth + 1) + parts.join(" ");
     });
     return lines.join("\n");
 }
@@ -509,6 +683,11 @@ const DEFAULT_SKIP_FIELDS = new Set(["timestamp", "time", "ts", "_ts", "epoch", 
  * Common timestamp/identifier names (`timestamp`, `time`, `id`, …) are
  * skipped by default so a SCADA snapshot doesn't accidentally include an
  * epoch number as a "sensor".
+ *
+ * Keys that could not be written into a prompt as they are — control
+ * characters or newlines, empty, longer than 64 characters — are skipped
+ * too: the detected names are pasted into every prompt for the node's
+ * lifetime, and they come from whoever sends the payload.
  */
 function detectNumericColumns(record, opts) {
     if (!record || typeof record !== "object" || Array.isArray(record)) return [];
@@ -516,12 +695,14 @@ function detectNumericColumns(record, opts) {
     const extraSkip = opts && Array.isArray(opts.skip) ? new Set(opts.skip) : null;
     const cols = [];
     for (const [k, v] of Object.entries(record)) {
+        if (!isAcceptableColumnName(k)) continue;
         const lower = k.toLowerCase();
         if (skipDefault && DEFAULT_SKIP_FIELDS.has(lower)) continue;
         if (extraSkip && extraSkip.has(k)) continue;
         if (typeof v === "number" && Number.isFinite(v)) {
             cols.push(k);
-        } else if (typeof v === "string") {
+        } else if (typeof v === "string" && !isIsoDateLike(v)) {
+            // Date-shaped strings ("2024-05-01T…") would parse as 2024.
             const n = parseFloat(v);
             if (Number.isFinite(n)) cols.push(k);
         }
@@ -686,11 +867,18 @@ module.exports = {
     formatPerColumnStats,
     parseCsvList,
     detectNumericColumns,
+    sanitizeColumnName,
+    isAcceptableColumnName,
+    MAX_COLUMN_NAME_LENGTH,
     fillTemplate,
     extractJson,
     getNestedField,
     buildJsonInstruction,
     LlmHttpError,
+    isRetryableError,
+    parseRetryAfter,
+    parseHttpUrl,
+    isSameOrigin,
     DEFAULT_ANTHROPIC_URL,
     DEFAULT_OPENAI_URL,
     DEFAULT_GOOGLE_URL,

@@ -36,14 +36,32 @@ Concurrency model:
 The model *loaders* are imported from python_bridge.py so the two backends
 cannot drift apart. Only the (short) numpy predict path is mirrored here.
 
+Network trust. This server loads whatever file a client names (including
+pickles, which execute on load), so it must only be reachable by its Node-RED:
+- It binds to loopback unless CM_INFERENCE_HOST says otherwise (in a container
+  set CM_INFERENCE_HOST=0.0.0.0 - the supplied Dockerfile/compose files do).
+- With CM_INFERENCE_TOKEN set, every request except GET /health (left open for
+  container health checks) must carry `Authorization: Bearer <token>` or
+  `X-Bridge-Token: <token>`; anything else gets 401. The Node-RED side sends
+  the header automatically when the same variable is set there.
+- model_path must resolve below one of the CM_INFERENCE_MODEL_ROOT
+  directories (os.pathsep-separated; default /data/models, where the supplied
+  Dockerfile mounts the models), else 403.
+- Backend failures return the exception class and message only; the traceback
+  goes to stderr.
+
 Environment variables:
-    CM_INFERENCE_HOST: bind host (default: 0.0.0.0)
-    CM_INFERENCE_PORT: bind port (default: 8770)
+    CM_INFERENCE_HOST:       bind host (default: 127.0.0.1)
+    CM_INFERENCE_PORT:       bind port (default: 8770)
+    CM_INFERENCE_TOKEN:      shared secret; unset = no authentication
+    CM_INFERENCE_MODEL_ROOT: allowed model directories (default: /data/models)
+    CM_INFERENCE_MAX_MODELS: LRU cap on resident models (default: 0 = unlimited)
 """
 
 import os
 import sys
 import json
+import hmac
 import time
 import threading
 import traceback
@@ -71,6 +89,47 @@ _cache_lock = threading.Lock()
 # value for the load-on-demand / replicas:N deployment, where any replica may
 # end up loading any model and memory must be bounded.
 MAX_MODELS = int(os.environ.get("CM_INFERENCE_MAX_MODELS", "0") or "0")
+
+# Shared secret. None = authentication off (backwards compatible); a token is
+# compared in constant time against the Bearer / X-Bridge-Token header.
+AUTH_TOKEN = os.environ.get("CM_INFERENCE_TOKEN") or None
+
+DEFAULT_MODEL_ROOT = "/data/models"
+
+
+def _parse_model_roots(raw):
+    """Split CM_INFERENCE_MODEL_ROOT into resolved directories."""
+    roots = []
+    for part in (raw or DEFAULT_MODEL_ROOT).split(os.pathsep):
+        part = part.strip()
+        if part:
+            roots.append(os.path.realpath(part))
+    return roots or [os.path.realpath(DEFAULT_MODEL_ROOT)]
+
+
+MODEL_ROOTS = _parse_model_roots(os.environ.get("CM_INFERENCE_MODEL_ROOT"))
+
+
+def _resolve_allowed_model_path(model_path):
+    """Resolve a client-supplied path and require it below an allowed root.
+
+    Symlinks are resolved first so a link inside a root cannot point outside
+    it. Raises PermissionError (-> 403) otherwise; existence is checked by the
+    caller afterwards, so nothing is revealed about files outside the roots.
+    """
+    real = os.path.realpath(str(model_path))
+    for root in MODEL_ROOTS:
+        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+            return real
+    # The roots themselves are not echoed back: they are server configuration
+    # (printed at startup), and the client only needs to know it was refused.
+    raise PermissionError(
+        f"model_path is outside the allowed model root(s), see CM_INFERENCE_MODEL_ROOT: {model_path}"
+    )
+
+
+def _log(msg):
+    print(f"[Inference Server] {msg}", file=sys.stderr, flush=True)
 
 _stats = {
     "requests_total": 0,
@@ -143,6 +202,10 @@ def do_load(model_path, model_id):
     if not model_id:
         model_id = os.path.basename(model_path)
 
+    # The allowlist check comes first: a path outside the roots is refused
+    # before anything (including whether it exists) is learned about it.
+    model_path = _resolve_allowed_model_path(model_path)
+
     with _cache_lock:
         if model_id in _models:
             return {"message": f"Model {model_id} already loaded",
@@ -186,12 +249,13 @@ def do_predict(model_id, input_data, model_path=None):
     self-heals by loading from the (shared) model path. It also makes the
     sharded deployment resilient to a replica restart wiping its cache.
     """
-    import numpy as np
-
     with _cache_lock:
         present = model_id in _models
     if not present and model_path:
+        # Runs the model-root allowlist check before anything else happens.
         do_load(model_path, model_id)
+
+    import numpy as np
 
     with _cache_lock:
         if model_id not in _models:
@@ -245,13 +309,46 @@ class InferenceHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def _send(self, status, payload):
+    def _send(self, status, payload, extra_headers=None):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
+
+    def _authorized(self):
+        """True when no token is configured or the request carries it.
+
+        Sends the 401 itself when it returns False.
+        """
+        if AUTH_TOKEN is None:
+            return True
+        supplied = None
+        auth = self.headers.get("Authorization", "")
+        if auth[:7].lower() == "bearer ":
+            supplied = auth[7:].strip()
+        if supplied is None:
+            supplied = self.headers.get("X-Bridge-Token")
+        if supplied is not None and hmac.compare_digest(
+            supplied.encode("utf-8"), AUTH_TOKEN.encode("utf-8")
+        ):
+            return True
+        _bump("errors_total")
+        self._send(
+            401,
+            {"success": False, "error": "Unauthorized: missing or invalid bridge token"},
+            {"WWW-Authenticate": "Bearer"},
+        )
+        return False
+
+    def _send_backend_error(self, e):
+        """500 with class + message only; the traceback stays in the server log."""
+        _bump("errors_total")
+        _log(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+        self._send(500, {"success": False, "error": f"{type(e).__name__}: {e}"})
 
     def _read_json(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -263,9 +360,13 @@ class InferenceHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         _bump("requests_total")
         if self.path == "/health":
+            # Deliberately unauthenticated: container HEALTHCHECKs probe it,
+            # and it reveals nothing but liveness and a model count.
             with _cache_lock:
                 loaded = len(_models)
             self._send(200, {"status": "healthy", "models_loaded": loaded})
+        elif not self._authorized():
+            return
         elif self.path == "/status":
             with _cache_lock:
                 loaded_models = list(_models.keys())
@@ -291,6 +392,8 @@ class InferenceHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         _bump("requests_total")
+        if not self._authorized():
+            return
         try:
             data = self._read_json()
         except (ValueError, json.JSONDecodeError) as e:
@@ -333,6 +436,9 @@ class InferenceHandler(BaseHTTPRequestHandler):
             else:
                 self._send(404, {"success": False, "error": f"Not found: {self.path}"})
 
+        except PermissionError as e:
+            _bump("errors_total")
+            self._send(403, {"success": False, "error": str(e)})
         except FileNotFoundError as e:
             _bump("errors_total")
             self._send(404, {"success": False, "error": str(e)})
@@ -340,13 +446,13 @@ class InferenceHandler(BaseHTTPRequestHandler):
             _bump("errors_total")
             self._send(400, {"success": False, "error": str(e)})
         except Exception as e:  # noqa: BLE001 - surface any backend failure as 500
-            _bump("errors_total")
-            self._send(500, {"success": False, "error": str(e),
-                             "traceback": traceback.format_exc()})
+            self._send_backend_error(e)
 
 
 def main():
-    host = os.environ.get("CM_INFERENCE_HOST", "0.0.0.0")
+    # Loopback by default: the server trusts its clients with file paths, so
+    # exposing it beyond the host is an explicit decision (CM_INFERENCE_HOST).
+    host = os.environ.get("CM_INFERENCE_HOST", "127.0.0.1")
     port = int(os.environ.get("CM_INFERENCE_PORT", 8770))
 
     print("=" * 60, flush=True)
@@ -355,6 +461,9 @@ def main():
     print(f"Listening on:  http://{host}:{port}", flush=True)
     print(f"Health check:  http://{host}:{port}/health", flush=True)
     print(f"Packages:      {', '.join(_detect_packages()) or 'none'}", flush=True)
+    print(f"Auth token:    {'required (CM_INFERENCE_TOKEN)' if AUTH_TOKEN else 'none - set CM_INFERENCE_TOKEN'}",
+          flush=True)
+    print(f"Model roots:   {os.pathsep.join(MODEL_ROOTS)}", flush=True)
     print("=" * 60, flush=True)
 
     server = ThreadingHTTPServer((host, port), InferenceHandler)

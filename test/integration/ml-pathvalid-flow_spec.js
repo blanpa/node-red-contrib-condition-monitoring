@@ -95,4 +95,33 @@ describe("integration: ml-inference path validation", () => {
             expect(node.loadError.message).not.toMatch(/Refusing to use path|outside the allowed directories/);
         }
     });
+
+    // The user dir and the process cwd were allowlisted wholesale up to 0.4.0.
+    // The user dir holds flows_cred.json and settings.js; a cwd of "/" (systemd's
+    // default WorkingDirectory) allowlisted the whole filesystem.
+    it("refuses a path inside the Node-RED user dir that is not allowlisted", async () => {
+        const node = await deployWithModelPath(path.join(harness.userDir, "flows_cred.onnx"));
+        expect(node.modelLoaded).toBe(false);
+        expect(node.loadError.code).toBe("EPATHFORBIDDEN");
+    });
+
+    it("refuses an existing model file under the process cwd that is not allowlisted", async () => {
+        const underCwd = path.join(process.cwd(), "test", "fixtures", "model.onnx");
+        expect(fs.existsSync(underCwd)).toBe(true);
+        const node = await deployWithModelPath(underCwd);
+        expect(node.modelLoaded).toBe(false);
+        expect(node.loadError.code).toBe("EPATHFORBIDDEN");
+    });
+
+    it("accepts a bundled model by its catalog path (models/<file>)", async () => {
+        // Relative paths resolve against the bundled models dir before the cwd.
+        const node = await deployWithModelPath("models/bearing_fault_clf.onnx");
+        if (node.loadError) {
+            // Only the optional runtime may be missing.
+            expect(node.loadError.code).not.toBe("EPATHFORBIDDEN");
+            expect(node.loadError.message).toMatch(/^ONNX Runtime not available/);
+        } else {
+            expect(node.modelLoaded).toBe(true);
+        }
+    });
 });

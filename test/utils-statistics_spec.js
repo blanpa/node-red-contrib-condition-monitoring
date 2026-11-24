@@ -133,4 +133,62 @@ describe("utils/statistics", () => {
             expect(r.stdDev()).toBe(0);
         });
     });
+    describe("calculateSkewness / calculateKurtosis (sample estimators)", () => {
+        it("matches the adjusted Fisher-Pearson skewness (Excel SKEW)", () => {
+            expect(stats.calculateSkewness([1, 2, 3, 4, 10])).toBeCloseTo(1.6970563, 6);
+            expect(stats.calculateSkewness([1, 2, 3, 4, 5])).toBeCloseTo(0, 12);
+        });
+
+        it("matches the sample excess kurtosis (Excel KURT)", () => {
+            expect(stats.calculateKurtosis([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])).toBeCloseTo(-1.2, 10);
+            expect(stats.calculateKurtosis([1, 2, 3, 4, 10])).toBeCloseTo(3.152, 10);
+        });
+
+        it("returns 0 for degenerate input", () => {
+            expect(stats.calculateSkewness([1, 2])).toBe(0);
+            expect(stats.calculateKurtosis([1, 2, 3])).toBe(0);
+            expect(stats.calculateSkewness([4, 4, 4, 4])).toBe(0);
+            expect(stats.calculateKurtosis([4, 4, 4, 4])).toBe(0);
+        });
+    });
+
+    describe("control-limit quantiles", () => {
+        // Reference values from standard chi-squared / F tables.
+        it("chiSquaredQuantileFromZ approximates chi-squared quantiles", () => {
+            const within = (actual, expected, rel) => expect(Math.abs(actual / expected - 1)).toBeLessThan(rel);
+            within(stats.chiSquaredQuantileFromZ(2, 1.6449), 5.991, 0.02); // 95%
+            within(stats.chiSquaredQuantileFromZ(3, 2.3263), 11.345, 0.02); // 99%
+            within(stats.chiSquaredQuantileFromZ(10, 1.6449), 18.307, 0.02); // 95%
+            within(stats.chiSquaredQuantileFromZ(1, 3.0902), 10.828, 0.05); // 99.9%
+            expect(stats.chiSquaredQuantileFromZ(0, 3)).toBe(0);
+            expect(stats.chiSquaredQuantileFromZ(-1, 3)).toBe(0);
+        });
+
+        it("chiSquaredQuantileFromZ grows with both arguments", () => {
+            expect(stats.chiSquaredQuantileFromZ(4, 3)).toBeGreaterThan(stats.chiSquaredQuantileFromZ(4, 2));
+            expect(stats.chiSquaredQuantileFromZ(8, 3)).toBeGreaterThan(stats.chiSquaredQuantileFromZ(4, 3));
+        });
+
+        it("fQuantileFromZ approximates F quantiles", () => {
+            const within = (actual, expected, rel) => expect(Math.abs(actual / expected - 1)).toBeLessThan(rel);
+            within(stats.fQuantileFromZ(3, 7, 1.6449), 4.347, 0.02); // 95%
+            within(stats.fQuantileFromZ(3, 7, 2.3263), 8.451, 0.03); // 99%
+            within(stats.fQuantileFromZ(2, 48, 2.3263), 5.077, 0.02); // 99%
+            within(stats.fQuantileFromZ(8, 12, 1.6449), 2.849, 0.02); // 95%
+        });
+
+        it("fQuantileFromZ is infinite when the denominator cannot support the confidence level", () => {
+            expect(stats.fQuantileFromZ(3, 1, 3)).toBe(Infinity);
+            expect(stats.fQuantileFromZ(3, 0, 3)).toBe(Infinity);
+        });
+
+        it("hotellingLimitFromZ converges to chi-squared and widens for small samples", () => {
+            const chi = stats.chiSquaredQuantileFromZ(3, 3);
+            expect(stats.hotellingLimitFromZ(3, 1e7, 3)).toBeCloseTo(chi, 2);
+            expect(stats.hotellingLimitFromZ(3, Infinity, 3)).toBe(chi);
+            expect(stats.hotellingLimitFromZ(3, 50, 3)).toBeGreaterThan(chi);
+            expect(stats.hotellingLimitFromZ(3, 12, 3)).toBeGreaterThan(stats.hotellingLimitFromZ(3, 50, 3));
+            expect(stats.hotellingLimitFromZ(3, 3, 3)).toBe(Infinity);
+        });
+    });
 });

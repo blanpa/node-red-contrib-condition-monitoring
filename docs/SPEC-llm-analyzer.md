@@ -27,18 +27,20 @@ sensor → [batch buffer N] → [build prompt] → LLM API → msg.payload = "<a
 | D2 | **Plain `fetch`**, no SDK dependency. | Each provider's HTTP API is small enough that an SDK adds dependency surface area without payoff. Node ≥ 18 has `fetch`. |
 | D3 | **Three trigger modes**: `batch` (collect N, then fire), `manual` (only when `msg.flush === true`), `interval` (every X ms, fire on whatever's in the buffer). | Covers the three use cases operators ask for: throughput-bounded, ad-hoc, and time-bounded reports. |
 | D4 | **Stats are pre-computed** and injected into the prompt. | Saves tokens; an LLM does not need to recompute mean/stdDev from raw samples. |
-| D5 | **`msg.prompt` overrides** the user-prompt template (after substitution). `msg.systemPrompt` overrides system. | Lets a `change`-node pick a different prompt per shift / context without redeploying. |
+| D5 | **`msg.prompt` overrides** the user-prompt template (after substitution). `msg.systemPrompt` overrides system, `msg.model` the model — all three **only with the opt-in `allowMsgOverrides`** (off by default since 0.4.1; a present override is otherwise ignored and warned once). | Lets a `change`-node pick a different prompt per shift / context without redeploying — while an upstream payload that forwards its fields (MQTT JSON, http-in body) cannot replace the operator's system prompt or pick a pricier model unless the operator allowed it. |
 | D6 | **API key via Node-RED credentials** (encrypted-at-rest), with an inline-config backstop for tests/dev only. | Same pattern as `mcp-bridge` had. |
 | D7 | **Output as `msg.payload` text by default**; structured-JSON output deferred to Phase 2. | Phase 1 keeps schema design out of scope. |
-| D8 | **`apiUrl` is overridable** (config + `msg.apiUrl`). | So integration tests can point at a local mock server without touching `fetch`. |
+| D8 | **`apiUrl` is overridable** (config; `msg.apiUrl` only with the opt-in **Allow msg.apiUrl override** setting, and then only within the configured origin). | So integration tests can point at a local mock server without touching `fetch`. |
 
 ## Configuration
 
 | Field | Default | Notes |
 |-------|---------|-------|
 | `provider` | `anthropic` | one of `anthropic` \| `openai` \| `google` \| `ollama` \| `openai-compatible` |
-| `model` | `claude-haiku-4-5-20251001` | text input — operator can override |
+| `model` | `claude-haiku-5-5` | text input — operator can override (undated Anthropic id: always the current Haiku snapshot) |
 | `apiUrl` | *empty → provider default (see below)* | required for `openai-compatible`; optional override otherwise |
+| `allowMsgApiUrl` | `false` | honour `msg.apiUrl` (same origin as the configured endpoint only) |
+| `allowMsgOverrides` | `false` | honour `msg.prompt`, `msg.systemPrompt`, `msg.model`; a missing key (nodes saved before 0.4.1) means `false` |
 | `triggerMode` | `batch` | `batch` \| `manual` \| `interval` |
 | `batchSize` | `50` | only used when `triggerMode === "batch"` |
 | `intervalMs` | `60000` | only used when `triggerMode === "interval"` |
@@ -49,6 +51,7 @@ sensor → [batch buffer N] → [build prompt] → LLM API → msg.payload = "<a
 | `sensorName` | empty | metadata, fills `{sensor}` placeholder |
 | `unit` | empty | metadata, fills `{unit}` placeholder |
 | `passthroughOriginal` | `true` | if true, output preserves original `msg.payload` as `msg.input` |
+| `persistState` | `false` | buffer + detected columns + counters survive a redeploy; the newest 100 000 samples at most are written (`maxPersistedItems`), the blob carries a schema version (`__v`) |
 | **credential** `apiKey` | — | encrypted on disk |
 
 ### Default prompts
@@ -72,10 +75,12 @@ Recent values (oldest first):
 |---------|------|--------|
 | `payload` | `number` \| `string` (numeric) \| `number[]` | Single value pushed into batch buffer; or array spread into buffer. |
 | `flush` | `true` | (manual mode only) trigger the LLM call now with the current buffer. Ignored in `batch`/`interval` modes. |
-| `prompt` | `string` | Replace the *user* prompt entirely (substitution still applied). |
-| `systemPrompt` | `string` | Replace the *system* prompt. |
-| `apiUrl` | `string` | Per-message API URL override (testing). |
-| `model` | `string` | Per-message model override. |
+| `prompt` | `string` | Replace the *user* prompt entirely (substitution still applied). Ignored — with one warning — unless `allowMsgOverrides` is enabled. |
+| `systemPrompt` | `string` | Replace the *system* prompt. Same opt-in. |
+| `apiUrl` | `string` | Per-message API URL override (testing). Ignored unless `allowMsgApiUrl` is enabled; must share the origin of the configured endpoint. |
+| `model` | `string` | Per-message model override. Same opt-in as `prompt`. |
+
+In record mode the column names are taken from the first record's keys and pasted into every prompt. Keys that contain control characters or newlines, are empty, or exceed 64 characters are not detected as columns; every name written into a prompt is additionally sanitised (control characters removed, whitespace collapsed, capped at 64) — see `sanitizeColumnName()` in `nodes/utils/llm-providers.js`.
 
 ## Outputs (single output pin)
 
@@ -86,7 +91,7 @@ Recent values (oldest first):
     samples:   [ ...the batch that was sent... ],
     sensor:    "machine-A/temp",
     unit:      "°C",
-    model:     "claude-haiku-4-5-...",
+    model:     "claude-haiku-5-5",
     durationMs: 1234,
     input:     <original msg.payload, only if passthroughOriginal>,
     topic:     <pass-through>,
@@ -96,7 +101,14 @@ Recent values (oldest first):
 
 On API error: `node.error("llm-analyzer: <message>", originalMsg)` so a
 catch-node can pick it up. The node does **not** emit a payload-bearing
-output on error.
+output on error. An Anthropic `stop_reason: "refusal"` is such an error
+(kind `refusal`, not retried) rather than an empty payload.
+
+A redeploy during an in-flight call aborts the request and puts the batch
+back into the buffer; with `persistState` the shutdown snapshot includes
+it, so the next instance starts with the batch instead of losing it.
+Retries and queued re-fires are made with the message that triggered the
+original call, so its `topic`, `_msgid` and (allowed) overrides carry over.
 
 ## Status indicator
 
@@ -114,7 +126,7 @@ output on error.
 |----------|------------------|---------|-------|
 | `anthropic` | `https://api.anthropic.com/v1/messages` | `x-api-key` header | Native Messages API. |
 | `openai` | `https://api.openai.com/v1/chat/completions` | `Authorization: Bearer` | Chat Completions. |
-| `google` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` | `?key=` query param | Substitutes `{model}` from config; `systemInstruction` shape. |
+| `google` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` | `x-goog-api-key` header | Substitutes `{model}` from config; `systemInstruction` shape. |
 | `ollama` | `http://localhost:11434/api/chat` | none (or optional Bearer) | Local model runner; works offline. |
 | `openai-compatible` | **REQUIRED** to be set | `Authorization: Bearer` | Generic adapter — Groq, Together, OpenRouter, DeepSeek, Mistral API, vLLM, LMStudio, … |
 

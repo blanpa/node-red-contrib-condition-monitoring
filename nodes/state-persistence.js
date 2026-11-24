@@ -9,7 +9,20 @@
  *
  * This allows nodes to survive Node-RED restarts and maintain
  * their training state, buffers, and calculated statistics.
+ *
+ * Every blob written carries a schema version (`__v`). Blobs written before
+ * versioning existed (0.4.0) carry none; their shape IS the version-1 shape,
+ * so they load unchanged. A blob with a different `__v` is handed to the
+ * node's `migrate(state, fromVersion)` hook when it has one, and otherwise
+ * discarded with a warning so a shape change between package versions can
+ * never feed stale fields into a node.
  */
+
+// Schema version written into every persisted blob.
+const STATE_VERSION = 1;
+// Version assumed for a blob without `__v` (written by 0.4.0): the schema
+// did not change when the marker was introduced.
+const UNVERSIONED_BLOB_VERSION = 1;
 
 /**
  * State Manager for a single node
@@ -23,6 +36,14 @@ class NodeStateManager {
      * @param {number} options.saveInterval - Auto-save interval in ms (default: 30000)
      * @param {boolean} options.autoSave - Enable periodic auto-save (default: true)
      * @param {boolean} options.saveOnChange - Save immediately on changes (default: false)
+     * @param {number} options.stateVersion - Schema version written as `__v` (default: STATE_VERSION)
+     * @param {Function} options.migrate - `(state, fromVersion) => state|null` called when a
+     *   stored blob has another version (a blob without `__v` counts as version 1); return
+     *   the converted state to keep it, anything else to start fresh
+     * @param {number} options.maxPersistedItems - Cap on the length of any persisted array
+     *   (the newest items are kept); default: unlimited
+     * @param {Function} options.onAutoSave - Called on every auto-save tick before the
+     *   dirty check, so a node can hand over a fresh snapshot
      */
     constructor(node, options = {}) {
         this.node = node;
@@ -31,6 +52,14 @@ class NodeStateManager {
         this.saveInterval = options.saveInterval || 30000; // 30 seconds
         this.autoSave = options.autoSave !== false;
         this.saveOnChange = options.saveOnChange === true;
+        this.stateVersion = Number.isInteger(options.stateVersion) ? options.stateVersion : STATE_VERSION;
+        this.migrate = typeof options.migrate === "function" ? options.migrate : null;
+        this.maxPersistedItems =
+            Number.isFinite(options.maxPersistedItems) && options.maxPersistedItems > 0
+                ? Math.floor(options.maxPersistedItems)
+                : null;
+        this.onAutoSave = typeof options.onAutoSave === "function" ? options.onAutoSave : null;
+        this._capWarned = false;
 
         this.state = {};
         this.isDirty = false;
@@ -72,6 +101,13 @@ class NodeStateManager {
         }
 
         this.saveTimer = setInterval(() => {
+            if (this.onAutoSave) {
+                try {
+                    this.onAutoSave();
+                } catch (err) {
+                    this.node.warn(`[Persistence] Auto-save snapshot failed: ${err.message}`);
+                }
+            }
             if (this.isDirty) {
                 this.save();
             }
@@ -95,14 +131,24 @@ class NodeStateManager {
                 settled = true;
                 try {
                     if (stored && typeof stored === "object") {
-                        this.state = this._deserializeState(stored);
+                        // Loading is asynchronous: anything set() while the store
+                        // was still answering is newer than what was persisted
+                        // and must survive the load instead of being replaced.
+                        this.state = Object.assign(this._adoptStoredState(stored), this.state);
                         this.node.debug(`[Persistence] Loaded state: ${Object.keys(this.state).length} keys`);
-                    } else {
-                        this.state = {};
+                    } else if (stored !== undefined && stored !== null) {
+                        this.node.warn(
+                            `[Persistence] Persisted state is not an object (${typeof stored}) — starting fresh`
+                        );
+                        this.isDirty = true;
                     }
                 } catch (err) {
-                    this.node.warn(`[Persistence] Failed to deserialize state: ${err.message}`);
-                    this.state = {};
+                    // Corrupt blob: say so and start fresh. Marking the state
+                    // dirty replaces the blob at the next save, so the warning
+                    // does not repeat on every start.
+                    this.node.warn(`[Persistence] Failed to deserialize state (starting fresh): ${err.message}`);
+                    this.state = Object.assign({}, this.state);
+                    this.isDirty = true;
                 }
                 this.isLoaded = true;
                 resolve(this.state);
@@ -249,23 +295,61 @@ class NodeStateManager {
     }
 
     /**
+     * Turn a stored blob into live state, honouring its schema version.
+     * Same version (or no `__v`, which means version 1): deserialize. Other
+     * version: the node's migrate hook decides; without one, or when it
+     * declines, start fresh.
+     */
+    _adoptStoredState(stored) {
+        const fromVersion = Number.isInteger(stored.__v) ? stored.__v : UNVERSIONED_BLOB_VERSION;
+        const state = this._deserializeState(stored);
+        if (fromVersion === this.stateVersion) return state;
+
+        const label = "version " + fromVersion;
+        if (this.migrate) {
+            let migrated = null;
+            try {
+                migrated = this.migrate(state, fromVersion);
+            } catch (err) {
+                this.node.warn(`[Persistence] migrate() failed for ${label} state: ${err.message}`);
+            }
+            if (migrated && typeof migrated === "object") {
+                this.node.debug(`[Persistence] Migrated ${label} state to version ${this.stateVersion}`);
+                this.isDirty = true;
+                return migrated;
+            }
+        }
+        this.node.warn(
+            `[Persistence] Persisted state is ${label}, this node expects version ${this.stateVersion} — starting fresh`
+        );
+        this.isDirty = true;
+        return {};
+    }
+
+    /**
      * Serialize state for storage (handle special types)
      */
     _serializeState(state) {
-        const serialized = {};
+        const serialized = { __v: this.stateVersion };
 
         for (const [key, value] of Object.entries(state)) {
+            if (key === "__v") continue;
             if (value instanceof Float32Array || value instanceof Float64Array) {
                 serialized[key] = {
                     __type: value.constructor.name,
                     data: Array.from(value)
                 };
-            } else if (Array.isArray(value) && value.length > 0 && typeof value[0] === "object") {
-                // Handle arrays of objects (like buffers with timestamps)
-                serialized[key] = {
-                    __type: "ObjectArray",
-                    data: value
-                };
+            } else if (Array.isArray(value)) {
+                const bounded = this._boundArray(key, value);
+                if (bounded.length > 0 && typeof bounded[0] === "object") {
+                    // Handle arrays of objects (like buffers with timestamps)
+                    serialized[key] = {
+                        __type: "ObjectArray",
+                        data: bounded
+                    };
+                } else {
+                    serialized[key] = bounded;
+                }
             } else {
                 serialized[key] = value;
             }
@@ -275,12 +359,29 @@ class NodeStateManager {
     }
 
     /**
-     * Deserialize state from storage
+     * Apply maxPersistedItems to one array: the newest (last) items survive.
+     * Warns once per manager — the cap is a size guard for the context file,
+     * not a silent data policy.
+     */
+    _boundArray(key, value) {
+        if (this.maxPersistedItems === null || value.length <= this.maxPersistedItems) return value;
+        if (!this._capWarned) {
+            this._capWarned = true;
+            this.node.warn(
+                `[Persistence] '${key}' holds ${value.length} items; only the newest ${this.maxPersistedItems} are persisted (maxPersistedItems)`
+            );
+        }
+        return value.slice(value.length - this.maxPersistedItems);
+    }
+
+    /**
+     * Deserialize state from storage. The `__v` marker is metadata, not state.
      */
     _deserializeState(stored) {
         const state = {};
 
         for (const [key, value] of Object.entries(stored)) {
+            if (key === "__v") continue;
             if (value && typeof value === "object" && value.__type) {
                 if (value.__type === "Float32Array") {
                     state[key] = new Float32Array(value.data);
@@ -359,6 +460,8 @@ function createSignalStateManager(node, config = {}) {
 
 module.exports = {
     NodeStateManager,
+    STATE_VERSION,
+    UNVERSIONED_BLOB_VERSION,
     createAnomalyStateManager,
     createMLStateManager,
     createSignalStateManager

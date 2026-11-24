@@ -14,6 +14,7 @@ const helper = require("node-red-node-test-helper");
 const mlInferenceNode = require("../nodes/ml-inference.js");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 
 const modelPath = path.resolve(__dirname, "fixtures", "model.onnx");
 
@@ -30,7 +31,16 @@ try {
     process.exit(0);
 }
 
-helper.init(require.resolve("node-red"));
+// The runtime allowlists only the model store, the bundled models and
+// `conditionMonitoring.allowedModelPaths` — not the cwd. Allowlist the
+// fixtures and use a throw-away user dir so the model store is not created
+// in $HOME (same setup as test/ml-inference_spec.js).
+const userDir = fs.mkdtempSync(path.join(os.tmpdir(), "ncm-smoke-onnx-"));
+
+helper.init(require.resolve("node-red"), {
+    userDir: userDir,
+    conditionMonitoring: { allowedModelPaths: [path.dirname(modelPath)] }
+});
 
 helper.startServer(function () {
     const flow = [
@@ -92,8 +102,12 @@ helper.startServer(function () {
 });
 
 function cleanup(code) {
+    const exit = () => {
+        fs.rmSync(userDir, { recursive: true, force: true });
+        process.exit(code);
+    };
     helper
         .unload()
-        .then(() => helper.stopServer(() => process.exit(code)))
-        .catch(() => process.exit(code));
+        .then(() => helper.stopServer(exit))
+        .catch(exit);
 }

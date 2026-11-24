@@ -30,6 +30,36 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 # Model cache
 _models = {}
 _model_types = {}
+# model_id -> (path, mtime) of the file a cached model was loaded from, so a
+# load request for a file that changed on disk reloads instead of answering
+# "already loaded" with the stale model.
+_model_sources = {}
+
+# Stream the JSON-lines protocol is written to. main() points this at a private
+# duplicate of the original stdout and then redirects fd 1 to stderr, so that a
+# library (or a pickled model) printing to stdout cannot corrupt the protocol.
+_response_stream = None
+
+
+def _isolate_protocol_stream():
+    """Reserve the real stdout for protocol responses; send everything else to stderr."""
+    global _response_stream
+    try:
+        sys.stdout.flush()
+        _response_stream = os.fdopen(os.dup(sys.stdout.fileno()), "w")
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+        sys.stdout = sys.stderr
+    except Exception:
+        # Exotic platforms / replaced streams: fall back to plain stdout.
+        _response_stream = None
+
+
+def _source_signature(model_path):
+    try:
+        return (model_path, os.path.getmtime(model_path))
+    except OSError:
+        return (model_path, None)
+
 
 def send_response(msg_id, success, result=None, error=None):
     """Send JSON response to stdout."""
@@ -42,19 +72,46 @@ def send_response(msg_id, success, result=None, error=None):
     if error is not None:
         response["error"] = error
     
-    # Write to stdout with flush
-    sys.stdout.write(json.dumps(response) + "\n")
-    sys.stdout.flush()
+    # Write to the protocol stream with flush
+    out = _response_stream if _response_stream is not None else sys.stdout
+    out.write(json.dumps(response) + "\n")
+    out.flush()
 
 
 def load_keras_model(model_path):
-    """Load a Keras model (.keras, .h5)."""
+    """Load a Keras model (.keras, .h5).
+
+    Passes safe_mode=True where the installed Keras accepts it (tf.keras >=
+    2.13, Keras 3): it refuses to deserialise Python lambdas embedded in a
+    Lambda layer. Known limit: the legacy HDF5 (.h5) loader of some Keras
+    versions does not consult safe_mode at all, which is why the Node side
+    never picks a downloaded .h5 for the "auto" model type - the operator has
+    to choose Keras explicitly.
+    """
     try:
         from tensorflow import keras
     except ImportError:
         import keras
-    
-    return keras.models.load_model(model_path), "keras"
+
+    load_model = keras.models.load_model
+
+    try:
+        import inspect
+        accepts_safe_mode = "safe_mode" in inspect.signature(load_model).parameters
+    except (TypeError, ValueError):
+        # Not introspectable (C-implemented / exotic wrapper): try, fall back.
+        accepts_safe_mode = True
+
+    if accepts_safe_mode:
+        try:
+            return load_model(model_path, safe_mode=True), "keras"
+        except TypeError as e:
+            # Only an unknown-keyword error means "this Keras has no
+            # safe_mode"; any other TypeError is the model's and propagates.
+            if "safe_mode" not in str(e):
+                raise
+
+    return load_model(model_path), "keras"
 
 
 def load_sklearn_model(model_path):
@@ -81,7 +138,8 @@ def handle_load_model(msg_id, model_path, model_id=None):
     if not model_id:
         model_id = os.path.basename(model_path)
     
-    if model_id in _models:
+    signature = _source_signature(model_path)
+    if model_id in _models and _model_sources.get(model_id) == signature:
         send_response(msg_id, True, {"message": f"Model {model_id} already loaded"})
         return
     
@@ -100,6 +158,7 @@ def handle_load_model(msg_id, model_path, model_id=None):
         
         _models[model_id] = model
         _model_types[model_id] = model_type
+        _model_sources[model_id] = signature
         
         send_response(msg_id, True, {
             "message": f"Model {model_id} loaded successfully",
@@ -173,6 +232,7 @@ def handle_unload_model(msg_id, model_id):
     if model_id in _models:
         del _models[model_id]
         del _model_types[model_id]
+        _model_sources.pop(model_id, None)
         send_response(msg_id, True, {"message": f"Model {model_id} unloaded"})
     else:
         send_response(msg_id, False, error=f"Model {model_id} not loaded")
@@ -224,6 +284,9 @@ def main():
 
     signal.signal(signal.SIGTERM, handle_sigterm)
     signal.signal(signal.SIGINT, handle_sigterm)
+
+    # From here on only send_response() may write to the real stdout.
+    _isolate_protocol_stream()
 
     # Pre-load TensorFlow and sklearn to avoid startup delays during inference
     packages = []
