@@ -1291,7 +1291,7 @@
     <p>These require Python with ML libraries. Use the provided Docker image or install manually:</p>
     <table>
         <tr><th>Format</th><th>Extension</th><th>Python Package</th><th>Created With</th></tr>
-        <tr><td>TFLite</td><td>.tflite</td><td>tflite-runtime</td><td>TensorFlow Lite Converter</td></tr>
+        <tr><td>TFLite</td><td>.tflite</td><td>ai-edge-litert (LiteRT)</td><td>TensorFlow Lite Converter</td></tr>
         <tr><td>Keras</td><td>.keras, .h5</td><td>tensorflow, keras</td><td>model.save(), Keras 3</td></tr>
         <tr><td>scikit-learn</td><td>.pkl, .joblib</td><td>scikit-learn, joblib</td><td>joblib.dump(), pickle</td></tr>
         <tr><td>TensorFlow SavedModel</td><td>saved_model/</td><td>tensorflow</td><td>tf.saved_model.save()</td></tr>
@@ -1351,10 +1351,10 @@
     
     <h4>Option 2: Manual Installation</h4>
     <pre># Install Python packages
-pip install numpy tensorflow scikit-learn joblib tflite-runtime
+pip install numpy tensorflow scikit-learn joblib ai-edge-litert
 
-# For NumPy 1.x compatibility with tflite-runtime:
-pip install "numpy&lt;2"</pre>
+# TFLite runs on LiteRT (ai-edge-litert). An installed tflite-runtime still
+# works, but it has no wheels for Python 3.12 and newer.</pre>
     
     <p><b>Note:</b> The runtime status indicator shows which runtimes are available in your environment.</p>
     

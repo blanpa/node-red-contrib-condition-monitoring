@@ -22,14 +22,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# ML runtimes. TensorFlow is the heavy one and only needed for Keras/SavedModel
-# models; drop it from this list if you only run scikit-learn or TFLite models.
+# ML runtimes. TFLite runs on LiteRT (ai-edge-litert); tflite-runtime stopped at
+# 2.14 and has no wheels for Python 3.12+. This step must succeed.
 RUN pip install --no-cache-dir \
     numpy \
     scikit-learn \
     joblib \
-    tflite-runtime \
-    && pip install --no-cache-dir tensorflow-cpu || echo "tensorflow-cpu not installed (Keras models unavailable)"
+    ai-edge-litert
+
+# TensorFlow is the heavy one and only needed for Keras/SavedModel models; delete
+# this step if you only run scikit-learn or TFLite models. Kept separate so a
+# missing wheel cannot take the runtimes above with it.
+RUN pip install --no-cache-dir tensorflow-cpu \
+    || echo "tensorflow-cpu not installed (Keras models unavailable)"
 
 WORKDIR /app
 

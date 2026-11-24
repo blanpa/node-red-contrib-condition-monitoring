@@ -14,7 +14,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ## Table of Contents
 
-- [Project Status: v0.4.1 Beta](#project-status-v041-beta)
+- [Project Status: v0.4.2 Beta](#project-status-v042-beta)
 - [Important Disclaimer](#important-disclaimer)
 - [Background & Industry Context](#background--industry-context)
 - [Features](#features)
@@ -36,7 +36,7 @@ A comprehensive Node-RED module for **anomaly detection**, **predictive maintena
 
 ---
 
-## Project Status: v0.4.1 Beta
+## Project Status: v0.4.2 Beta
 
 **Per-device state in every analysis node, corrected detection maths, LLM Analyzer, Vision Pipeline & Data-Source Simulators**
 
@@ -115,7 +115,7 @@ below, and runs **on the edge** (inside Node-RED) rather than requiring a cloud 
 
 ## Installation
 
-**Prerequisites:** Node.js >= 18, Node-RED >= 2.0.0
+**Prerequisites:** Node.js >= 18, Node-RED >= 3.0.0
 
 ```bash
 npm install node-red-contrib-condition-monitoring
@@ -975,13 +975,14 @@ docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml \
 ## Dependencies
 
 ### Required
-- Node-RED >= 2.0.0
+- Node-RED >= 3.0.0
 - Node.js >= 18.0.0 (the LLM Analyzer node uses the built-in `fetch`)
 
 ### Core Dependencies
 - `fft.js` - High-performance FFT (Radix-4 Cooley-Tukey algorithm)
 - `ml-isolation-forest` - For Isolation Forest node
-- `simple-statistics` - For statistical functions
+- `ml-matrix`, `ml-pca` - Matrix operations and PCA (multi-value processor, PCA anomaly)
+- `jpeg-js`, `pngjs` - JPEG/PNG decoding and encoding for the vision nodes
 
 ### Optional - JavaScript ML Runtimes
 - `@tensorflow/tfjs-node` - TensorFlow.js support
@@ -990,9 +991,9 @@ docker compose -f docker-compose.dev.yml -f docker-compose.gpu.yml \
 ### Optional - Python ML Runtimes (Docker or manual)
 For TFLite, Keras, and scikit-learn models:
 ```bash
-pip install numpy tensorflow scikit-learn joblib tflite-runtime
-# Use numpy<2 for tflite-runtime compatibility
-pip install "numpy<2"
+pip install numpy tensorflow scikit-learn joblib ai-edge-litert
+# TFLite runs on LiteRT (ai-edge-litert). An already installed tflite-runtime
+# still works, but that package has no wheels for Python 3.12 and newer.
 ```
 
 ---

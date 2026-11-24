@@ -225,7 +225,7 @@ load, but extreme message rates may need multiple Node-RED instances too.
 ## Tuning the image
 
 `Dockerfile.inference` installs `numpy`, `scikit-learn`, `joblib`,
-`tflite-runtime` and (best-effort) `tensorflow-cpu`. Drop `tensorflow-cpu` if
+`ai-edge-litert` (LiteRT, for `.tflite`) and (best-effort) `tensorflow-cpu`. Drop `tensorflow-cpu` if
 you do not run Keras models — it is by far the largest layer. For GPU Keras
 inference, swap the base image for a CUDA-enabled TensorFlow image.
 

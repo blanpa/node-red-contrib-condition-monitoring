@@ -94,6 +94,6 @@ Google Coral Edge TPU inference script for hardware-accelerated ML.
 ## Requirements
 
 ```bash
-pip install numpy tensorflow tflite-runtime scikit-learn
+pip install numpy tensorflow ai-edge-litert scikit-learn
 # For Coral: pip install pycoral
 ```

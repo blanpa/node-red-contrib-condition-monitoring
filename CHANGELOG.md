@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-24 - Inference runtimes brought up to date, Docker images fixed
+
+### 🐛 Fixed
+
+- **`Dockerfile.inference` built an image without any ML package.** It installs
+  on Python 3.12, for which `tflite-runtime` has no wheel; the package sat in
+  the same `pip install` as `numpy`, `scikit-learn` and `joblib`, so the whole
+  command failed and the trailing `|| echo` let the build pass anyway. The
+  runtimes are installed in a step that must succeed, `tensorflow-cpu` in a
+  separate best-effort one. `Dockerfile` and `Dockerfile.gpu` are split the
+  same way.
+- **`Dockerfile` / `Dockerfile.gpu`: the images lacked five required
+  dependencies** — `fft.js`, `ml-matrix`, `ml-pca`, `jpeg-js` and `pngjs`. The
+  module is copied in without its own `node_modules` and the explicit
+  `npm install` list had not followed `package.json`, so the nodes loaded but
+  FFT, PCA, the multi-value matrix path and PNG/JPEG decoding failed when
+  used. All `dependencies` are installed now; `test/docker-deps_spec.js`
+  fails when the list or a pinned version drifts from `package.json` and the
+  lockfile again.
+
+- **Example 07 (`ml-inference`, ONNX) runs as imported.** It pointed at a
+  placeholder path (`/data/models/anomaly-model.onnx`) and told the reader to
+  change it to any file on the host — which the model-path allowlist has
+  refused since 0.4.1. It now loads the bearing-fault classifier bundled with
+  the package (`models/bearing_fault_clf.onnx`), cycles through five machine
+  states and prints the predicted class; the note explains where own models
+  have to live. `npm run test:smoke-onnx` runs the example's classification.
+
+### 🔄 Changed
+
+- **TFLite models run on LiteRT (`ai-edge-litert`).** `tflite-runtime` ended
+  at 2.14 (October 2023) and has no wheels for Python 3.12 and newer. The
+  Python bridge and the remote inference sidecar try `ai_edge_litert` first,
+  then an installed `tflite_runtime`, then `tensorflow.lite`, so existing
+  installs keep working. The editor's Python status reports `tflite` for
+  either standalone runtime. Dockerfiles and install instructions name
+  `ai-edge-litert`; the `numpy<2` pin that `tflite-runtime` needed is gone
+  from `Dockerfile`.
+
+### 🔒 Dependencies
+
+- `onnxruntime-node` 1.24.3 → 1.31.1 (range `^1.31.1`, lockfile, `Dockerfile`,
+  `Dockerfile.gpu`). The hold at 1.24.3 dated from 1.27.0 aborting the jest
+  worker on the CI runner; 1.31.1 passes the ONNX smoke test and the full
+  suite on Node 18, 20 and 22. A plain `npm install` already resolved to the
+  newest 1.x, so this is the version users were getting.
+- **`simple-statistics` removed.** No node requires it; the statistics live
+  in `nodes/utils/statistics.js`. One install less, and the package is back
+  under the Node-RED scorecard's dependency limit.
+- **Declared Node-RED minimum raised from 2.0.0 to 3.0.0**
+  (`node-red.version`). The package requires Node.js 18, which Node-RED 2.x
+  does not support; 3.1 and 4.1 are the versions the nodes are loaded on.
+
 ## [0.4.1] - 2026-11-24 - Second hardening pass; first npm release of the 0.4 line
 
 0.4.0 was never published to npm: 0.4.1 is the first release after 0.3.3 and

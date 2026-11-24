@@ -121,13 +121,42 @@ def load_sklearn_model(model_path):
     return joblib.load(model_path), "sklearn"
 
 
-def load_tflite_model(model_path):
-    """Load a TFLite model (.tflite)."""
+def import_tflite():
+    """Return the module that provides the TFLite ``Interpreter``.
+
+    LiteRT (``ai-edge-litert``) is the maintained runtime. ``tflite-runtime``
+    stopped at 2.14 (October 2023) and has no wheels for Python 3.12+; it is
+    still accepted so existing installs keep working. Full TensorFlow is the
+    last resort.
+    """
+    try:
+        from ai_edge_litert import interpreter as tflite
+        return tflite
+    except ImportError:
+        pass
     try:
         import tflite_runtime.interpreter as tflite
+        return tflite
     except ImportError:
         import tensorflow.lite as tflite
-    
+        return tflite
+
+
+def has_tflite_runtime():
+    """True if a standalone TFLite runtime (LiteRT or tflite-runtime) imports."""
+    for name in ("ai_edge_litert", "tflite_runtime"):
+        try:
+            __import__(name)
+            return True
+        except ImportError:
+            pass
+    return False
+
+
+def load_tflite_model(model_path):
+    """Load a TFLite model (.tflite)."""
+    tflite = import_tflite()
+
     interpreter = tflite.Interpreter(model_path=model_path)
     interpreter.allocate_tensors()
     return interpreter, "tflite"
@@ -254,11 +283,8 @@ def handle_status(msg_id):
     except ImportError:
         pass
     
-    try:
-        import tflite_runtime
+    if has_tflite_runtime():
         packages.append("tflite")
-    except ImportError:
-        pass
     
     try:
         import numpy

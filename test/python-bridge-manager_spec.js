@@ -580,6 +580,64 @@ describe("PythonBridgeManager", () => {
         });
     });
 
+    // python_bridge.py picks the TFLite runtime when a model loads. Stand-in
+    // packages on PYTHONPATH prove the order without any ML stack; `-S` keeps
+    // a runtime that happens to be installed on this machine out of the way.
+    describeWithPython("TFLite runtime selection in python_bridge.py", () => {
+        const pythonDir = path.join(__dirname, "..", "nodes", "python");
+        const python = ["python3", "python"].find((cmd) => {
+            const r = spawnSync(cmd, ["--version"], { stdio: "ignore" });
+            return !r.error && r.status === 0;
+        });
+        let site;
+
+        beforeEach(() => {
+            site = fs.mkdtempSync(path.join(os.tmpdir(), "ncm-tflite-site-"));
+        });
+
+        afterEach(() => {
+            fs.rmSync(site, { recursive: true, force: true });
+        });
+
+        function fakeRuntime(name) {
+            fs.mkdirSync(path.join(site, name), { recursive: true });
+            fs.writeFileSync(path.join(site, name, "__init__.py"), "");
+            fs.writeFileSync(path.join(site, name, "interpreter.py"), "class Interpreter:\n    pass\n");
+        }
+
+        function probe(script) {
+            const r = spawnSync(python, ["-S", "-c", "import python_bridge as b\n" + script], {
+                encoding: "utf8",
+                env: {
+                    ...process.env,
+                    PYTHONPATH: [pythonDir, site].join(path.delimiter),
+                    PYTHONDONTWRITEBYTECODE: "1"
+                }
+            });
+            expect(r.stderr).toBe("");
+            return r.stdout.trim();
+        }
+
+        it("prefers LiteRT (ai_edge_litert) over the legacy tflite_runtime", () => {
+            fakeRuntime("ai_edge_litert");
+            fakeRuntime("tflite_runtime");
+            expect(probe("print(b.import_tflite().__name__, b.has_tflite_runtime())")).toBe(
+                "ai_edge_litert.interpreter True"
+            );
+        });
+
+        it("still uses an installed tflite_runtime when LiteRT is missing", () => {
+            fakeRuntime("tflite_runtime");
+            expect(probe("print(b.import_tflite().__name__, b.has_tflite_runtime())")).toBe(
+                "tflite_runtime.interpreter True"
+            );
+        });
+
+        it("reports no standalone runtime when neither is installed", () => {
+            expect(probe("print(b.has_tflite_runtime())")).toBe("False");
+        });
+    });
+
     // Anything that needs a *real* model (load_model/predict against keras,
     // sklearn or onnx artifacts) requires a Python ML environment and is out
     // of scope for hermetic unit tests — covered by manual/integration runs.
