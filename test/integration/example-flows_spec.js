@@ -6,12 +6,15 @@
  * inject → function → node wiring, and assert the node's output is structurally
  * valid and functionally sensible.
  *
- * Two flows depend on external resources that aren't available in CI:
- *   - 07 ml-inference   → needs the ONNX model at the Docker path /data/models
+ * Two flows depend on resources that aren't always available in CI:
+ *   - 07 ml-inference   → runs the bundled ONNX classifier, which needs the
+ *                         optional onnxruntime-node (absent in the main matrix,
+ *                         present in the `optional-runtimes` job)
  *   - 10 llm-analyzer   → needs an LLM provider API key (credential)
- * For those we validate that the flow deploys, the data-generator function is
- * valid, and the node processes input without crashing the runtime (the model
- * load / LLM call is expected to fail gracefully). This is called out per test.
+ * Without the resource we validate that the flow deploys, the data-generator
+ * function is valid, and the node processes input without crashing the runtime
+ * (the model load / LLM call is expected to fail gracefully). This is called
+ * out per test.
  */
 
 const fs = require("fs");
@@ -23,6 +26,15 @@ const EXAMPLES_DIR = path.resolve(__dirname, "..", "..", "examples");
 const PKG_TYPES = Object.keys(require("../../package.json")["node-red"].nodes);
 
 const CAPTURE_ID = "ncm-capture";
+
+const ONNX_RUNTIME_AVAILABLE = (() => {
+    try {
+        require("onnxruntime-node");
+        return true;
+    } catch {
+        return false;
+    }
+})();
 
 function loadFlow(file) {
     return JSON.parse(fs.readFileSync(path.join(EXAMPLES_DIR, file), "utf8"));
@@ -175,18 +187,35 @@ describe("integration: every example flow produces valid output", () => {
         expect(Math.min(...scores)).toBeLessThan(100);
     }, 20000);
 
-    test("07 ml-inference — deploys and handles the missing model without crashing", async () => {
-        // Model path is the Docker path /data/models/anomaly-model.onnx, absent
-        // here (and outside the path-validator allowlist), so inference can't
-        // run. We validate the flow deploys, the node is live, and driving it
-        // doesn't throw / take the runtime down.
-        const { flow, injects, targetId } = prepare(loadFlow("07-ml-inference-onnx.json"));
+    test("07 ml-inference — deploys as imported and loads the bundled model", async () => {
+        // The example must work as imported: its model ships with the package
+        // and is addressed relative to it ("models/<file>"), so no path on the
+        // host is involved. Inference itself cannot run here: Jest's VM sandbox
+        // hands onnxruntime-node a Float32Array from another realm, which its
+        // native type check rejects. `npm run test:smoke-onnx` runs this
+        // example's classification in plain Node.js.
+        const raw = loadFlow("07-ml-inference-onnx.json");
+        const model = raw.find((n) => n.type === "ml-inference").modelPath;
+        expect(path.isAbsolute(model)).toBe(false);
+        expect(fs.existsSync(path.resolve(__dirname, "..", "..", "nodes", model))).toBe(true);
+
+        const { flow, injects, targetId } = prepare(raw);
         await harness.deploy(flow);
-        expect(await harness.getNodeAsync(targetId)).toBeTruthy();
+        const node = await harness.getNodeAsync(targetId);
+        expect(node).toBeTruthy();
+
+        if (ONNX_RUNTIME_AVAILABLE) {
+            for (let waited = 0; !node.modelLoaded && waited < 10000; waited += 50) {
+                await new Promise((r) => setTimeout(r, 50));
+            }
+            expect(node.modelLoaded).toBe(true);
+        }
+
+        // With or without the runtime, driving the node must not throw / take
+        // the runtime down.
         await fire(harness, mainInject(injects).id, 5);
-        // Runtime still healthy: the node is still registered after driving it.
         expect(harness.getNode(targetId)).toBeTruthy();
-    }, 20000);
+    }, 30000);
 
     test("08 pca-anomaly — emits T²/SPE statistics after training", async () => {
         const { flow, injects } = prepare(loadFlow("08-pca-anomaly-multivariate.json"));

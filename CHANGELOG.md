@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails when the list or a pinned version drifts from `package.json` and the
   lockfile again.
 
+- **Example 07 (`ml-inference`, ONNX) runs as imported.** It pointed at a
+  placeholder path (`/data/models/anomaly-model.onnx`) and told the reader to
+  change it to any file on the host — which the model-path allowlist has
+  refused since 0.4.1. It now loads the bearing-fault classifier bundled with
+  the package (`models/bearing_fault_clf.onnx`), cycles through five machine
+  states and prints the predicted class; the note explains where own models
+  have to live. `npm run test:smoke-onnx` runs the example's classification.
+
 ### 🔄 Changed
 
 - **TFLite models run on LiteRT (`ai-edge-litert`).** `tflite-runtime` ended
