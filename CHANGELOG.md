@@ -188,6 +188,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of failing the whole frame with a TypeError.
 - **`condition-monitoring-source`:** an error was reported twice (once via
   `node.error`, once via `done(err)`), so a catch node fired twice.
+- **`ml-inference`: TF.js models run on Node 23 and newer.**
+  `@tensorflow/tfjs-node` 4.22.0 calls `util.isNullOrUndefined()`, which
+  Node 23 removed, so a model loaded and then every inference failed with
+  "isNullOrUndefined is not a function". The node restores the function
+  before it loads the backend. ONNX was not affected.
 
 ### 📚 Documentation
 
