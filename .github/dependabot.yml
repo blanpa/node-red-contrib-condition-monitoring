@@ -16,6 +16,11 @@ updates:
       # Heavy native runtimes — bump them deliberately, not on a weekly cadence.
       - dependency-name: "@tensorflow/tfjs-node"
       - dependency-name: "onnxruntime-node"
+      # node-red 5 needs Node >= 22.9; this package supports and tests Node 18
+      # and 20, and the integration harness hangs on v5. Minor/patch updates
+      # of the 4.x line still come through.
+      - dependency-name: "node-red"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions versions
   - package-ecosystem: "github-actions"

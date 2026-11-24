@@ -135,10 +135,13 @@ pending a dedicated cleanup follow-up.
 
 ## Dependencies / gotchas
 
-- **Do NOT bump `node-red` to v5.** It breaks the integration test harness
-  (`node-red-node-test-helper` 0.3.6) — ~30 integration tests fail with "node not
-  found"/ECONNREFUSED. Runtime itself is fine on v5. Kept at `^4.1.8`; Dependabot
-  will keep re-proposing v5 — leave it until the test helper supports it.
+- **Do NOT bump `node-red` to v5.** It needs Node >= 22.9, and this package
+  supports and tests Node 18 and 20. On v5 the integration harness
+  (`test/integration/red-runtime.js`) also hangs in `startRed()` — every
+  integration suite times out in `beforeAll`, on Node 22 too; the unit suites
+  (`node-red-node-test-helper`) pass. Runtime itself is fine on v5. Kept at
+  `^4.1.8`; `.github/dependabot.yml` ignores node-red major updates. Revisit
+  when Node 18/20 support is dropped.
 - Packaging uses a **`files` allowlist** in `package.json` (`nodes/`, `examples/`
   minus the generated test-suite, `CHANGELOG.md`, `SECURITY.md`). The old
   `.npmignore` blocklist leaked training data/datasets into the tarball; it has
@@ -190,6 +193,7 @@ nested mounts so the package resolves at
 - Validate/clamp all node config inputs via `nodes/utils/config-validator.js`.
 - Validate any filesystem/model path via `nodes/utils/path-validator.js`
   (allowlist) — this is a security boundary, don't bypass it.
-- End git commit messages with:
-  `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
+- Commit and push as the configured git user (`blanpa`) only. **No
+  `Co-Authored-By: Claude …` trailer, no `Claude-Session:` line, no "Generated
+  with Claude Code" footer** in commit messages or PR descriptions.
 - Commit/push only when asked; branch first if on `main` for PR work.

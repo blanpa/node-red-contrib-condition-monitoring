@@ -397,6 +397,15 @@ module.exports = function (RED) {
 
     function loadTensorFlowJS() {
         if (tf === null) {
+            // tfjs-node 4.22.0 (the last stable release, October 2024) calls
+            // util.isNullOrUndefined(), which Node 23 removed: the package
+            // loads, then every kernel op throws "isNullOrUndefined is not a
+            // function". Restore it before the backend loads. No-op on
+            // Node <= 22.
+            const util = require("util");
+            if (typeof util.isNullOrUndefined !== "function") {
+                util.isNullOrUndefined = (value) => value === null || value === undefined;
+            }
             try {
                 tf = require("@tensorflow/tfjs-node");
             } catch (err) {
